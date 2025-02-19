@@ -3,11 +3,19 @@
 
 EQCCT was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis, A., Huang, G., Igonin, N., Fomel, S., and Chen, Y., (2023), as a highly accurate and generalizable machine-learning seismic event detection algorithm. More information regarding the purpose, design, functionality, results, and real-world implementation and application can be read about in their research paper [here](https://ieeexplore.ieee.org/document/10264212).
 
-**If you desire to use and pull only EQCCT (EQCCTOne), use the following command:** 
+**If you desire to use and pull only EQCCT (EQCCTOne), use the following commands:** 
+```sh
+mkdir my_work_directory
+cd my_work_directory
+```
+To pull `eqcctone`, do the following:
 ```sh
 git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+cd eqcct
 git sparse-checkout set eqcctone
 ```
+This should pull only the eqcctone folder.
+
 Further documentation and the originally developed source-code can be found in the `eqcctone` subdirectory. 
 
 
@@ -19,11 +27,19 @@ EQCCTPro was created by Skevofilax, C., Salles, V., Munoz, C., Siervo, D., Saad,
 EQCCTPro can be used-out-of-the box by using: 
 `pip install eqcctpro`
 
-**If you desire to use and pull only EQCCTPro, use the following command:**
+**If you desire to use and pull only EQCCTPro, use the following commands:**
+```sh
+mkdir my_work_directory
+cd my_work_directory
+```
+To pull `eqcctpro`, do the following:
 ```sh
 git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+cd eqcct
 git sparse-checkout set eqcctpro
 ```
+This should pull only the eqcctpro folder.
+
 Further documentation and source-code can be found in the `eqcctpro` subdirectory.
 
 
