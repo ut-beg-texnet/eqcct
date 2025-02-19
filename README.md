@@ -8,7 +8,7 @@ EQCCT was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis,
 mkdir my_work_directory
 cd my_work_directory
 ```
-To pull `eqcctone`, do the following:
+To pull `eqcctone`, now do the following in the `my_work_directory`:
 ```sh
 git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
 cd eqcct
@@ -32,7 +32,7 @@ EQCCTPro can be used-out-of-the box by using:
 mkdir my_work_directory
 cd my_work_directory
 ```
-To pull `eqcctpro`, do the following:
+To pull `eqcctpro`, now do the following in the `my_work_directory`:
 ```sh
 git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
 cd eqcct
