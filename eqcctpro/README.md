@@ -63,11 +63,11 @@ There are three main capabilities of EQCCTPro:
 3. Identify and return back the optimal parallelization configurations for both specific and general-use usecases for both CPU (a) and GPU applications (b)
 
 These capabilities are achieved by the following functions in order respect to the above descriptions: 
-EQCCTMSeedRunner (1), EvaluateSystem (2), OptimalCPUConfigurationFinder (3a), OptimalGPUConfigurationFinder (3b).
+**EQCCTMSeedRunner (1)**, **EvaluateSystem (2)**, **OptimalCPUConfigurationFinder (3a)**, **OptimalGPUConfigurationFinder (3b)**.
 
 ### Processing mSEED data using EQCCTPro (EQCCTMSeedRunner) 
-To use EQCCTPro to process mSEED from various seismic stations, use the EQCCTMSeedRunner class. 
-EQCCTMSeedRunner enables users to process multiple mSEED from a given input directory. The input directory is made up of station directories such as: 
+To use EQCCTPro to process mSEED from various seismic stations, use the **EQCCTMSeedRunner** class. 
+**EQCCTMSeedRunner** enables users to process multiple mSEED from a given input directory. The input directory is made up of station directories such as: 
 
 ```sh
 [skevofilaxc sample_1_minute_data]$ ls
@@ -85,7 +85,7 @@ TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
 EQCCT only needs one pose for the detection to occur, however more poses allow for better detection of the direction of the P and S waves.
 
-After setting up or utilizing the provided sample waveform directory, and install eqcctpro, import EQCCTMseedRunner as show below: 
+After setting up or utilizing the provided sample waveform directory, and install eqcctpro, import **EQCCTMseedRunner** as show below: 
 
 ```python
 from eqcctpro import EQCCTMSeedRunner
@@ -196,7 +196,7 @@ eval_gpu.evaluate()
 ```
 **EvaluateSystem** will iterate through different combinations of CPU(s), Concurrent Predictions, and Workloads (stations), as well as GPU(s), and the amount of VRAM (MB) each Concurrent Prediction can use. 
 **EvaluateSystem** will take time, depending on the number of CPU/GPUs, the amount of VRAM available, and the total workload that needs to be tested. However, after doing the testing once for most if not all usecases, 
-the trial data will be available and can be used to identify the optimal input parallelization configurations for EQCCTMSeedRunner to get the maximum performance out of your system. 
+the trial data will be available and can be used to identify the optimal input parallelization configurations for **EQCCTMSeedRunner** to use to get the maximum amount of processing out of your system in the shortest amonut of time. 
 
 The following input parameters need to be configurated for **EvaluateSystem** to evaluate your system based on your desired utilization of EQCCTPro: 
 
