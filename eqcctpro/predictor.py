@@ -563,7 +563,8 @@ def remove_directory(path):
         
 def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold, 
                    p_model_filepath, s_model_filepath, num_concurrent_predictions, 
-                   ray_cpus, use_gpu, stations2use, cpus_to_use, csv_filepath, intra_threads, inter_threads, testing_gpu, gpu_memory_limit_mb=None, gpus_to_use=None):
+                   ray_cpus, use_gpu, stations2use, cpus_to_use, csv_filepath, intra_threads, inter_threads, testing_gpu, 
+                   gpu_memory_limit_mb=None, gpus_to_use=None):
     """Function to run tf_environ and mseed_predictor as a separate process"""
     
     # Set CPU affinity for the child process
@@ -1223,7 +1224,7 @@ class EvaluateSystem():
         process = multiprocessing.Process(
             target=run_prediction,
             args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold, self.S_threshold, 
-                  self.p_model_filepath, self.s_model_filepath, self.num_concurrent_predictions, len(cpus_to_use),
+                  self.p_model_filepath, self.s_model_filepath, num_concurrent_predictions, len(cpus_to_use),
                   use_gpu, num_stations, cpus_to_use, f"{self.csv_dir}/{self.eval_mode}_test_results.csv",
                   self.intra_threads, self.inter_threads, use_gpu, gpu_memory_limit_mb, self.selected_gpus))
         process.start()
