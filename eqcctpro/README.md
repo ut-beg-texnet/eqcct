@@ -5,8 +5,8 @@ EQCCTPro is a high-performace seismic event detection and processing framework t
 ## Features
 - Supports both CPU and GPU execution
 - Configurable parallelism execution for optimized performance
-- Includes tools for evaluating system performance for optimal use-case configurations
-- Automatic selection of best-use-case configurations
+- Includes tools for evaluating system performance for optimal usecase configurations
+- Automatic selection of best-usecase configurations
 - Efficient handling of large-scale seismic data
 
 ## Installation
@@ -60,7 +60,7 @@ You are now set up for testing.
 There are three main capabilities of EQCCTPro: 
 1. Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs 
 2. Evaluate your system to identify the optimal parallelization configurations needed to get the minimum runtime performance out of your system
-3. Identify and return back the optimal parallelization configurations for both specific and general-use use-cases for both CPU (a) and GPU applications (b)
+3. Identify and return back the optimal parallelization configurations for both specific and general-use usecases for both CPU (a) and GPU applications (b)
 
 These capabilities are achieved by the following functions in order respect to the above descriptions: 
 EQCCTMSeedRunner (1), EvaluateSystem (2), OptimalCPUConfigurationFinder (3a), OptimalGPUConfigurationFinder (3b).
@@ -75,7 +75,7 @@ AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35 
 BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
 BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
 ```
-Where each subdirectory is named after station code. If you wish to use create your own input directory with custom information, please follow the above naming convention. Otherwise, EQCCTPro will not work. 
+Where each subdirectory is named after station code. If you wish to use create your own input directory with custom information, **please follow the above naming convention.** Otherwise, EQCCTPro will **not** work. 
 
 Within each subdirectory, such as PB35, it is made up of mSEED files of different poses (EX. N, E, Z): 
 ```sh
@@ -127,7 +127,7 @@ eqcct_runner.run_eqcctpro()
     - "I want this program to run only on these specific cores." 
 - **`input_dir (str)`**
   - Directory path to the the mSEED directory
-  - EX. /home/skevofilaxc/my_work_directory/eqcct/eqcctpro/sample_1_minute_data
+  - EX. `/home/skevofilaxc/my_work_directory/eqcct/eqcctpro/sample_1_minute_data`
 - **`output_dir (str)`**
   - Directory path to where the output picks and logs will be sent 
   - Doesn't need to exist, will be created if doesn't exist 
@@ -149,8 +149,8 @@ eqcct_runner.run_eqcctpro()
   - EX. if number_of_concurrent_predictions = 5, there will be up to 5 EQCCT instances analyzing 5 different waveforms at the sametime
   - Best to use the optimal amount for your hardware, which can be identified using **EvaluateSystem** (below)
 - **`best_usecase_config (bool)`: default = False**
-  - If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall use-case configurations 
-  - Best overall use-case configurations are defined as the best overall input configurations that minimize runtime while doing the most amount of processing with your available hardware 
+  - If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall usecase configurations 
+  - Best overall usecase configurations are defined as the best overall input configurations that minimize runtime while doing the most amount of processing with your available hardware 
   - Can only be used if EvaluateSystem has been run 
 - **`csv_dir (str)`**
   - Directory path containing the CSV's outputted by EvaluateSystem that contain the trial data that will be used to find the best_usecase_config
@@ -160,7 +160,7 @@ eqcct_runner.run_eqcctpro()
   - None existing GPU IDs will cause the code to exit 
 - **`set_vram_mb (float)`**
   - Value of the maximum amount of VRAM EQCCTPro can use 
-  - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
+  - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to **OutOfMemoryError**
 - **`specific_stations (str)`: default = None**
   - String that contains the "list" of stations you want to only analyze 
   - EX. Out of the 50 sample stations in `sample_1_minute_data`, if I only want to analyze AT01, BP01, DG05, then specific_stations='AT01, BP01, DG05'. 
@@ -242,7 +242,7 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
 - **`selected_gpus (list)`: default = None**
   - List of GPU IDs on your computer you want to use if `mode = 'gpu'`
-  - None existing GPU IDs will cause the code to exit 
+  - Non-existing GPU IDs will cause the code to exit 
 
 ### Finding Optimal CPU/GPU Configurations
 After running **EvalutateSystem**, you can use either the **OptimalCPUConfigurationFinder** or the **OptimalGPUConfigurationFinder** determine the best CPU or GPU configurations (respectively) for your specific usecase:
@@ -279,7 +279,7 @@ A input CSV directory path must be passed for the classes to use as a reference 
 - **`csv_filepath (str)`**
   - Directory path where the CSV's outputted by EvaluateSystem are
 
-Using **OptimalCPUConfigurationFinder.find_best_overall_usecase()**, no input parameters are needed. It will return back the best use-case parameters. 
+Using **OptimalCPUConfigurationFinder.find_best_overall_usecase()**, no input parameters are needed. It will return back the best usecase parameters. 
 
 For **OptimalCPUConfigurationFinder.find_optimal_for()**, the function requires two input parameters: 
 - **`cpu (int)`**
@@ -289,7 +289,7 @@ For **OptimalCPUConfigurationFinder.find_optimal_for()**, the function requires 
 
 **OptimalCPUConfigurationFinder.find_optimal_for()** will return back a trial data point containing the mimimum runtime based on your input paramters 
 
-Similar to **OptimalCPUConfigurationFinder.find_best_overall_usecase()**, **OptimalGPUConfigurationFinder.find_best_overall_usecase()** will return back the best use-case parameters and no input parameters are needed. 
+Similar to **OptimalCPUConfigurationFinder.find_best_overall_usecase()**, **OptimalGPUConfigurationFinder.find_best_overall_usecase()** will return back the best usecase parameters and no input parameters are needed. 
 
 For **OptimalGPUConfigurationFinder.find_optimal_for()**, the function requires three input parameters: 
 - **`cpu (int)`**
