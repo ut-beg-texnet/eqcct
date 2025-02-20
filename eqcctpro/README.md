@@ -13,11 +13,11 @@ EQCCTPro is a high-performace seismic event detection and processing framework t
 To install the necessary dependencies, create a conda environment using:
 
 ```sh
-conda env create -f environment.yml
-conda activate eqcctpro
+[skevofilaxc] conda env create -f environment.yml
+[skevofilaxc] conda activate eqcctpro
 ```
 
-You can get the environment.yml file from the repository. You can download the entire eqcct repository or download only the eqcctpro repository using the following command: 
+You can get the `environment.yml` file from the `eqcct` repository. You can download the entire eqcct repository or download only the `eqcctpro` repository using the following command: 
 
 ```sh
 [skevofilaxc] mkdir my_work_directory
@@ -26,7 +26,7 @@ You can get the environment.yml file from the repository. You can download the e
 [skevofilaxc] cd eqcct
 [skevofilaxc] git sparse-checkout set eqcctpro
 ```
-After creating and activating the conda environment, install the eqcctpro Python package using the following command: 
+After creating and activating the conda environment, install the **eqcctpro Python package** using the following command: 
 ```sh
 [skevofilaxc] pip install eqcctpro
 ```
