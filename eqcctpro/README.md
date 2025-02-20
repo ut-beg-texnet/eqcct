@@ -45,25 +45,25 @@ unzip sample_1_minute_data.zip
 ```
 It's contents will look like: 
 ```sh
-[skevofilaxc@BEGE-TEXA75553X sample_1_minute_data]$ ls
+[skevofilaxc sample_1_minute_data]$ ls
 AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35  PB52  PH02  SM03  WB11
 BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
 BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
 ```
 Where each subdirectory is named after station code, and is made up of mSEED files of different poses: 
 ```sh
-[skevofilaxc@BEGE-TEXA75553X PB35]$ ls
+[skevofilaxc PB35]$ ls
 TX.PB35.00.HH1__20241215T115800Z__20241215T120100Z.mseed  TX.PB35.00.HHZ__20241215T115800Z__20241215T120100Z.mseed
 TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
-EQCCT only needs one pose for the detection to occur, however the more the merrier.
+EQCCT only needs one pose for the detection to occur, however more poses allow for better detection of the direction of the P and S waves. 
 
 You are now set up for testing. 
 ## Usage
 There are three main capabilities of EQCCTPro: 
 1. Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs 
-2. Evaluate your system to identify the optimal paralleization configurations needed to get the minimum runtime performance out of your system
-3. Identify and return back the optimal parallelization configurations for both specific and general-use use-cases for both CPU and GPU applications 
+2. Evaluate your system to identify the optimal parallelization configurations needed to get the minimum runtime performance out of your system
+3. Identify and return back the optimal parallelization configurations for both specific and general-use use-cases for both CPU (a) and GPU applications (b)
 
 These capabilities are achieved by the following functions in order respect to the above descriptions: 
 EQCCTMSeedRunner (1), EvaluateSystem (2), OptimalCPUConfigurationFinder (3a), OptimalGPUConfigurationFinder (3b).
@@ -73,28 +73,28 @@ To use EQCCTPro to process mSEED from various seismic stations, use the EQCCTMSe
 EQCCTMSeedRunner enables users to process multiple mSEED from a given input directory. The input directory is made up of station directories such as: 
 
 ```sh
-[skevofilaxc@BEGE-TEXA75553X sample_1_minute_data]$ ls
+[skevofilaxc sample_1_minute_data]$ ls
 AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35  PB52  PH02  SM03  WB11
 BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
 BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
 ```
 Where each subdirectory is named after station code. If you wish to use create your own input directory with custom information, please follow the above naming convention. Otherwise, EQCCTPro will not work. 
 
-Within each subdirectory, such as PB35, it is made up of mseed files. EQCCTPro only needs one pose for the detection to occur, however the more the merrier. 
-
+Within each subdirectory, such as PB35, it is made up of mSEED files of different poses (EX. N, E, Z): 
 ```sh
-[skevofilaxc@BEGE-TEXA75553X PB35]$ ls
+[skevofilaxc PB35]$ ls
 TX.PB35.00.HH1__20241215T115800Z__20241215T120100Z.mseed  TX.PB35.00.HHZ__20241215T115800Z__20241215T120100Z.mseed
 TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
+EQCCT only needs one pose for the detection to occur, however more poses allow for better detection of the direction of the P and S waves.
 
-After setting up or utilizing the provided sample waveform directory, import EQCCTMseedRunner as show below: 
+After setting up or utilizing the provided sample waveform directory, and install eqcctpro, import EQCCTMseedRunner as show below: 
 
 ```python
 from eqcctpro import EQCCTMSeedRunner
 
 eqcct_runner = EQCCTMSeedRunner(
-    use_gpu=True,
+    use_gpu=False,
     intra_threads=1,
     inter_threads=1,
     cpu_id_list=[0,1,2,3,4],
@@ -114,6 +114,60 @@ eqcct_runner = EQCCTMSeedRunner(
 )
 eqcct_runner.run_eqcctpro()
 ```
+
+**EQCCTMseedRunner** has multiple input paramters that need to be configured and are defined below: 
+
+- use_gpu (bool): True or False 
+  - Tells Ray to use either the GPU(s) (True) or CPUs (False) on your computer to process the waveforms in the entire workflow
+  - Further specification of which GPU(s) and CPU(s) are provided in the parameters below 
+- intra_threads (int): default = 1 
+  - Controls how many intra-parallelism threads Tensorflow can use 
+- inter_threads (int): default = 1 
+  - Controls how many inter-parallelism threads Tensorflow can use
+- cpu_id_list (list): default = [1]
+  - List that defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process.
+  - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
+    - "I want this program to run only on these specific cores." 
+- input_dir (str)
+  - Directory path to the the mSEED directory
+  - EX. /home/skevofilaxc/my_work_directory/eqcct/eqcctpro/sample_1_minute_data
+- output_dir (str)
+  - Directory path to where the output picks and logs will be sent 
+  - Doesn't need to exist, will be created if doesn't exist 
+  - Recommended to be in the same working directory as the input directory for convience
+- log_filepath (str)
+  - Filepath to where the EQCCTPro log will be written to and stored
+  - Doesn't need to exist, will be created if doesn't exist
+  - Recommended to be **in** the **output directory** and called **eqcctpro.log**, however the name can be changed for your own purposes 
+- P_threshold (float): default = 0.001
+  - Threshold in which the P probabilities above it will be considered as P arrival
+- S_threshold (float): default = 0.02
+  - Threshold in which the S probabilities above it will be considered as S arrival
+- p_model_filepath (str)
+  - Filepath to where the P EQCCT detection model is stored
+- s_model_filepath (str)
+  - Filepath to where the S EQCCT detection model is stored
+- number_of_concurrent_predictions (int): 
+  - The number of concurrent EQCCT detection tasks that can happen simultaneously on a given number of resources
+  - EX. if number_of_concurrent_predictions = 5, there will be up to 5 EQCCT instances analyzing 5 different waveforms at the sametime
+  - Best to use the optimal amount for your hardware, which can be identified using **EvaluateSystem** (below)
+- best_usecase_config (bool): default = False
+  - If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall use-case configurations 
+  - Best overall use-case configurations are defined as the best overall input configurations that minimize runtime while doing the most amount of processing with your available hardware 
+  - Can only be used if EvaluateSystem has been run 
+- csv_dir (str)
+  - Directory path containing the CSV's outputted by EvaluateSystem that contain the trial data that will be used to find the best_usecase_config
+  - Script will look for specific files, will only exist if EvaluateSystem has been run 
+- selected_gpus (list): default = None
+  - List of GPU IDs on your computer you want to use if `use_gpu = True`
+  - None existing GPU IDs will cause the code to exit 
+- set_vram_mb (float)
+  - Value of the maximum amount of VRAM EQCCTPro can use 
+  - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
+- specific_stations (str): default = None
+  - String that contains the "list" of stations you want to only analyze 
+  - EX. Out of the 50 sample stations in `sample_1_minute_data`, if I only want to analyze AT01, BP01, DG05, then specific_stations='AT01, BP01, DG05'. 
+  - Removes the need to move station directories around to be used as input, can contain all stations in one directory for access
 
 ### Evaluating System Performance
 To evaluate the system’s GPU performance:
