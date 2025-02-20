@@ -117,60 +117,63 @@ eqcct_runner.run_eqcctpro()
 
 **EQCCTMseedRunner** has multiple input paramters that need to be configured and are defined below: 
 
-- use_gpu (bool): True or False 
+- **`use_gpu (bool)`: True or False** 
   - Tells Ray to use either the GPU(s) (True) or CPUs (False) on your computer to process the waveforms in the entire workflow
   - Further specification of which GPU(s) and CPU(s) are provided in the parameters below 
-- intra_threads (int): default = 1 
+- **`intra_threads (int)`: default = 1**
   - Controls how many intra-parallelism threads Tensorflow can use 
-- inter_threads (int): default = 1 
+- **`inter_threads (int)`: default = 1**
   - Controls how many inter-parallelism threads Tensorflow can use
-- cpu_id_list (list): default = [1]
+- **`cpu_id_list (list)`: default = [1]**
   - List that defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process.
   - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
     - "I want this program to run only on these specific cores." 
-- input_dir (str)
+- **`input_dir (str)`**
   - Directory path to the the mSEED directory
   - EX. /home/skevofilaxc/my_work_directory/eqcct/eqcctpro/sample_1_minute_data
-- output_dir (str)
+- **`output_dir (str)`**
   - Directory path to where the output picks and logs will be sent 
   - Doesn't need to exist, will be created if doesn't exist 
   - Recommended to be in the same working directory as the input directory for convience
-- log_filepath (str)
+- **`log_filepath (str)`**
   - Filepath to where the EQCCTPro log will be written to and stored
   - Doesn't need to exist, will be created if doesn't exist
   - Recommended to be **in** the **output directory** and called **eqcctpro.log**, however the name can be changed for your own purposes 
-- P_threshold (float): default = 0.001
+- **`P_threshold (float)`: default = 0.001**
   - Threshold in which the P probabilities above it will be considered as P arrival
-- S_threshold (float): default = 0.02
+- **`S_threshold (float)`: default = 0.02**
   - Threshold in which the S probabilities above it will be considered as S arrival
-- p_model_filepath (str)
+- **`p_model_filepath (str)`**
   - Filepath to where the P EQCCT detection model is stored
-- s_model_filepath (str)
+- **`s_model_filepath (str)`**
   - Filepath to where the S EQCCT detection model is stored
-- number_of_concurrent_predictions (int): 
+- **`number_of_concurrent_predictions (int)`**
   - The number of concurrent EQCCT detection tasks that can happen simultaneously on a given number of resources
   - EX. if number_of_concurrent_predictions = 5, there will be up to 5 EQCCT instances analyzing 5 different waveforms at the sametime
   - Best to use the optimal amount for your hardware, which can be identified using **EvaluateSystem** (below)
-- best_usecase_config (bool): default = False
+- **`best_usecase_config (bool)`: default = False**
   - If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall use-case configurations 
   - Best overall use-case configurations are defined as the best overall input configurations that minimize runtime while doing the most amount of processing with your available hardware 
   - Can only be used if EvaluateSystem has been run 
-- csv_dir (str)
+- **`csv_dir (str)`**
   - Directory path containing the CSV's outputted by EvaluateSystem that contain the trial data that will be used to find the best_usecase_config
   - Script will look for specific files, will only exist if EvaluateSystem has been run 
-- selected_gpus (list): default = None
+- **`selected_gpus (list)`: default = None**
   - List of GPU IDs on your computer you want to use if `use_gpu = True`
   - None existing GPU IDs will cause the code to exit 
-- set_vram_mb (float)
+- **`set_vram_mb (float)`**
   - Value of the maximum amount of VRAM EQCCTPro can use 
   - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
-- specific_stations (str): default = None
+- **`specific_stations (str)`: default = None**
   - String that contains the "list" of stations you want to only analyze 
   - EX. Out of the 50 sample stations in `sample_1_minute_data`, if I only want to analyze AT01, BP01, DG05, then specific_stations='AT01, BP01, DG05'. 
   - Removes the need to move station directories around to be used as input, can contain all stations in one directory for access
-
-### Evaluating System Performance
-To evaluate the system’s GPU performance:
+- **`cpu_id_list (list)`: default = [1]**
+  - List that defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process.
+  - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
+    - "I want this program to run only on these specific cores." 
+### Evaluating Your Systems Runtime Performance Capabilites
+To evaluate your system’s runtime performance capabilites for both your CPU(s) and GPU(s), the EvaluateSystem class allows you to autonomously evaluate your system:
 
 ```python
 from eqcctpro import EvaluateSystem
@@ -194,6 +197,54 @@ eval_gpu = EvaluateSystem(
 )
 eval_gpu.evaluate()
 ```
+**EvaluateSystem** will iterate through different combinations of CPU(s), Concurrent Predictions, and Workloads (stations), as well as GPU(s), and the amount of VRAM (MB) each Concurrent Prediction can use. 
+**EvaluateSystem** will take time, depending on the number of CPU/GPUs, the amount of VRAM available, and the total workload that needs to be tested. However, after doing the testing once for most if not all usecases, 
+the trial data will be available and can be used to identify the optimal input parallelization configurations for EQCCTMSeedRunner to get the maximum performance out of your system. 
+
+The following input parameters need to be configurated for **EvaluateSystem** to evaluate your system based on your desired utilization of EQCCTPro: 
+
+- **`mode (str)`**
+  - Can be either `cpu` or `gpu`
+  - Tells `EvaluateSystem` which configuration trials should it iterate through
+- **`intra_threads (int)`: default = 1**
+  - Controls how many intra-parallelism threads Tensorflow can use 
+- **`inter_threads (int)`: default = 1**
+  - Controls how many inter-parallelism threads Tensorflow can use 
+- **`input_dir (str)`**
+  - Directory path to the the mSEED directory
+  - EX. /home/skevofilaxc/my_work_directory/eqcct/eqcctpro/sample_1_minute_data
+- **`output_dir (str)`**
+  - Directory path to where the output picks and logs will be sent 
+  - Doesn't need to exist, will be created if doesn't exist 
+  - Recommended to be in the same working directory as the input directory for convience
+- **`log_filepath (str)`**
+  - Filepath to where the EQCCTPro log will be written to and stored
+  - Doesn't need to exist, will be created if doesn't exist
+  - Recommended to be **in** the **output directory** and called **eqcctpro.log**, however the name can be changed for your own purposes 
+- **`csv_dir (str)`**
+  - Directory path where the CSV's outputted by EvaluateSystem will be saved 
+- **`P_threshold (float)`: default = 0.001**
+  - Threshold in which the P probabilities above it will be considered as P arrival
+- **`S_threshold (float)`: default = 0.02**
+  - Threshold in which the S probabilities above it will be considered as S arrival
+- **`p_model_filepath (str)`**
+  - Filepath to where the P EQCCT detection model is stored
+- **`s_model_filepath (str)`**
+  - Filepath to where the S EQCCT detection model is stored
+- **`stations2use (int)`: default = None**
+  - Controls the maximum amount of stations EvaluateSystem can use in its trial iterations 
+  - Sample data has been provided so that the maximum is 50, however, if using custom data, configure for your specific usecase 
+- **`cpu_id_list (list)`: default = [1]**
+  - List that defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process and **is the maximum amount of cores EvaluteSystem can use in its trial iterations**
+  - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
+    - "I want this program to run only on these specific cores." 
+  - Must be at least 1 CPU if using GPUs (Ray needs CPUs to manage the Raylets (concurrent tasks), however the processing of the waveform is done on the GPU)
+- **`set_vram_mb (float)`**
+  - Value of the maximum amount of VRAM EQCCTPro can use 
+  - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
+- **`selected_gpus (list)`: default = None**
+  - List of GPU IDs on your computer you want to use if `mode = 'gpu'`
+  - None existing GPU IDs will cause the code to exit 
 
 ### Finding Optimal CPU/GPU Configurations
 To determine the best CPU or GPU configuration:
