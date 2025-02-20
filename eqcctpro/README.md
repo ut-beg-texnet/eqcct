@@ -223,6 +223,7 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - Recommended to be **in** the **output directory** and called **eqcctpro.log**, however the name can be changed for your own purposes 
 - **`csv_dir (str)`**
   - Directory path where the CSV's outputted by EvaluateSystem will be saved 
+  - Doesn't need to exist, will be created if doesn't exist
 - **`P_threshold (float)`: default = 0.001**
   - Threshold in which the P probabilities above it will be considered as P arrival
 - **`S_threshold (float)`: default = 0.02**
@@ -247,7 +248,7 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - None existing GPU IDs will cause the code to exit 
 
 ### Finding Optimal CPU/GPU Configurations
-To determine the best CPU or GPU configuration:
+After running EvalutateSystem determine the best CPU or GPU configuration:
 
 ```python
 from eqcctpro import OptimalCPUConfigurationFinder, OptimalGPUConfigurationFinder

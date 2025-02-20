@@ -1241,14 +1241,14 @@ class EvaluateSystem():
         print(f"Evaluating System Parallelization Capability using CPUs\n")
         
         self._prepare_environment() # Remove outputs dir 
-        
+        os.makedirs(self.csv_dir, exist_ok=True)
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/cpu_test_results.csv"
         prepare_csv(csv_filepath, False)
         
         trial_num = 1
         for i in range(1, self.cpu_count+1):
-            cpus_to_use = self.cpu_list[:i]
+            cpus_to_use = self.cpu_id_list[:i]
             for num_stations in self.stations2use_list: 
                 concurrent_predictions_list = generate_station_list(num_stations)
                 for num_concurrent_predictions in concurrent_predictions_list: 
