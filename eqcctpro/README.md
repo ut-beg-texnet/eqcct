@@ -16,9 +16,19 @@ To install the necessary dependencies, create a conda environment using:
 conda env create -f environment.yml
 conda activate eqcctpro
 ```
+
+You can get the environment.yml file from the repository. You can download the entire eqcct repository or download only the eqcctpro repository using the following command: 
+
+```sh
+[skevofilaxc] mkdir my_work_directory
+[skevofilaxc] cd my_work_directory
+[skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+[skevofilaxc] cd eqcct
+[skevofilaxc] git sparse-checkout set eqcctpro
+```
 After creating and activating the conda environment, install the eqcctpro Python package using the following command: 
 ```sh
-pip install eqcctpro
+[skevofilaxc] pip install eqcctpro
 ```
 More information on the package can be found at our PyPi project link [eqcctpro](https://pypi.org/project/eqcctpro/).
 
@@ -26,22 +36,9 @@ More information on the package can be found at our PyPi project link [eqcctpro]
 It's highly suggested to create a workspace environment to first understand how eqcctpro works. 
 Sample seismic waveform data from 50 TexNet stations have provided in the eqcctpro repository under the `sample_1_minute_data.zip` file. 
 
-Create a working directory by running commands such as: 
+After downloading the .zip file, either individually or through the git pull methods, run the following command to unzip it: 
 ```sh
-mkdir my_work_directory
-cd my_work_directory
-```
-You can either clone the eqcctpro folder from the eqcct repository using: 
-```sh
-git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
-cd eqcct
-git sparse-checkout set eqcctpro
-```
-or you can individually download the .zip file and place it in your working directory. 
-
-After downloading the .zip file, run the following command to unzip it: 
-```sh
-unzip sample_1_minute_data.zip
+[skevofilaxc] unzip sample_1_minute_data.zip
 ```
 It's contents will look like: 
 ```sh
@@ -173,7 +170,7 @@ eqcct_runner.run_eqcctpro()
   - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
     - "I want this program to run only on these specific cores." 
 ### Evaluating Your Systems Runtime Performance Capabilites
-To evaluate your system’s runtime performance capabilites for both your CPU(s) and GPU(s), the EvaluateSystem class allows you to autonomously evaluate your system:
+To evaluate your system’s runtime performance capabilites for both your CPU(s) and GPU(s), the **EvaluateSystem** class allows you to autonomously evaluate your system:
 
 ```python
 from eqcctpro import EvaluateSystem
@@ -248,7 +245,7 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - None existing GPU IDs will cause the code to exit 
 
 ### Finding Optimal CPU/GPU Configurations
-After running EvalutateSystem determine the best CPU or GPU configuration:
+After running **EvalutateSystem**, you can use either the **OptimalCPUConfigurationFinder** or the **OptimalGPUConfigurationFinder** determine the best CPU or GPU configurations (respectively) for your specific usecase:
 
 ```python
 from eqcctpro import OptimalCPUConfigurationFinder, OptimalGPUConfigurationFinder
@@ -269,6 +266,39 @@ print(best_gpu_config)
 optimal_gpu_config = gpu_finder.find_optimal_for(num_cpus=1, gpu_list=[0], station_count=1)
 print(optimal_gpu_config)
 ```
+Both **OptimalCPUConfigurationFinder** and **OptimalGPUConfigurationFinder** each have two usecases: 
+
+1. **`find_best_overall_usecase`**
+  - Returns the best overall usecase configuration 
+    - Uses middel 50% of CPUs for moderate, balanced CPU usage, with the maximum amount of stations processed with the minimum runtime 
+2. **`find_optimal_for`**
+  - Return the paralleliztion configurations (EX. concurrent predictions, intra/inter thread counts, vram, etc.) for a given number of CPU(s)/GPU(s) and stations
+    - Enables users to quickly identify which input parameters should be used for the given amount of resources and workload they have for the minimum runtime possible on their computer
+
+A input CSV directory path must be passed for the classes to use as a reference point: 
+- **`csv_filepath (str)`**
+  - Directory path where the CSV's outputted by EvaluateSystem are
+
+Using **OptimalCPUConfigurationFinder.find_best_overall_usecase()**, no input parameters are needed. It will return back the best use-case parameters. 
+
+For **OptimalCPUConfigurationFinder.find_optimal_for()**, the function requires two input parameters: 
+- **`cpu (int)`**
+  - The number of CPU(s) you want to use in your application
+- **`station_count (int)`**
+  - The number of station(s) you want to use in your application
+
+**OptimalCPUConfigurationFinder.find_optimal_for()** will return back a trial data point containing the mimimum runtime based on your input paramters 
+
+Similar to **OptimalCPUConfigurationFinder.find_best_overall_usecase()**, **OptimalGPUConfigurationFinder.find_best_overall_usecase()** will return back the best use-case parameters and no input parameters are needed. 
+
+For **OptimalGPUConfigurationFinder.find_optimal_for()**, the function requires three input parameters: 
+- **`cpu (int)`**
+  - The number of CPU(s) you want to use in your application
+- **`gpu_list (list)`**
+  - The specific GPU ID(s) you want to use in your application
+  - Useful if you have multiple GPUs available and want to use/dedicate a specific one to using EQCCTPro
+- **`station_count (int)`**
+  - The number of station(s) you want to use in your application
 
 ## Configuration
 The `environment.yml` file specifies the dependencies required to run EQCCTPro. Ensure you have the correct versions installed by using the provided conda environment setup.
