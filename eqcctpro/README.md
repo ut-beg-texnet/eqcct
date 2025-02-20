@@ -16,13 +16,49 @@ To install the necessary dependencies, create a conda environment using:
 conda env create -f environment.yml
 conda activate eqcctpro
 ```
-After creating and activating the conda environment, install eqcctpro Python package using the following command: 
+After creating and activating the conda environment, install the eqcctpro Python package using the following command: 
 ```sh
 pip install eqcctpro
 ```
 More information on the package can be found at our PyPi project link [eqcctpro](https://pypi.org/project/eqcctpro/).
 
+## Creating a Test Workspace Environment
+It's highly suggested to create a workspace environment to first understand how eqcctpro works. 
+Sample seismic waveform data from 50 TexNet stations have provided in the eqcctpro repository under the `sample_1_minute_data.zip` file. 
 
+Create a working directory by running commands such as: 
+```sh
+mkdir my_work_directory
+cd my_work_directory
+```
+You can either clone the eqcctpro folder from the eqcct repository using: 
+```sh
+git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+cd eqcct
+git sparse-checkout set eqcctpro
+```
+or you can individually download the .zip file and place it in your working directory. 
+
+After downloading the .zip file, run the following command to unzip it: 
+```sh
+unzip sample_1_minute_data.zip
+```
+It's contents will look like: 
+```sh
+[skevofilaxc@BEGE-TEXA75553X sample_1_minute_data]$ ls
+AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35  PB52  PH02  SM03  WB11
+BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
+BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
+```
+Where each subdirectory is named after station code, and is made up of mSEED files of different poses: 
+```sh
+[skevofilaxc@BEGE-TEXA75553X PB35]$ ls
+TX.PB35.00.HH1__20241215T115800Z__20241215T120100Z.mseed  TX.PB35.00.HHZ__20241215T115800Z__20241215T120100Z.mseed
+TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
+```
+EQCCT only needs one pose for the detection to occur, however the more the merrier.
+
+You are now set up for testing. 
 ## Usage
 There are three main capabilities of EQCCTPro: 
 1. Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs 
