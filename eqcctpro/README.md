@@ -10,14 +10,24 @@ EQCCTPro is a high-performace seismic event detection and processing framework t
 - Efficient handling of large-scale seismic data
 
 ## Installation
-To install the necessary dependencies, create a conda environment using:
+To install `EQCCTPro`, there are two installation approaches: 
+1. Install **EQCCTPro** out the box with no sample waveform data to test the application with
+2. Install **EQCCTPro** with the sample waveform data as provided from the Github folder
+
+It is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data to help you get acquainted with **EQCCTPro** and its capabilites.
+
+If you wish to install **only the EQCCTPro Python package and use it out of the box (method 1)**, run **`pip install eqcctpro`**. **You must have at least Python verison 3.10.14 for the application to run**. 
+You can install Python 3.10.14 using either traditional methods or do the following commands: 
 
 ```sh
-[skevofilaxc] conda env create -f environment.yml
-[skevofilaxc] conda activate eqcctpro
+[skevofilaxc] conda create --name yourname python=3.10.14 -y
+[skevofilaxc] conda activate yourname 
+[skevofilaxc] python3 --version
+Python 3.10.14 (it should return)
+[skevofilaxc] pip install eqcctpro
 ```
-
-You can get the `environment.yml` file from the `eqcct` repository. You can download the entire eqcct repository or download only the `eqcctpro` repository using the following command: 
+You will have access to **EQCCTPro** and its capabilities, however, it is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data and to get acquainted with **EQCCTPro**. 
+You can pull the `EQCCTPro` folder by running the following commands: 
 
 ```sh
 [skevofilaxc] mkdir my_work_directory
@@ -26,11 +36,27 @@ You can get the `environment.yml` file from the `eqcct` repository. You can down
 [skevofilaxc] cd eqcct
 [skevofilaxc] git sparse-checkout set eqcctpro
 ```
-After creating and activating the conda environment, install the **eqcctpro Python package** using the following command: 
+
+
+If you wish to install **EQCCTPro** with the sample waveform data as originally intended, and or are having trouble installing Python 3.10.14, there has been a precreated conda environment under the `EQCCTPro` folder that will install the necessary packages
+and dependencies needed for **EQCCTPro** to run (method 2). 
+You can pull the `EQCCTPro` folder, create the precreated conda environment, and activate it using the following commands: 
+
+```sh
+[skevofilaxc] mkdir my_work_directory
+[skevofilaxc] cd my_work_directory
+[skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+[skevofilaxc] cd eqcct
+[skevofilaxc] git sparse-checkout set eqcctpro
+[skevofilaxc] conda env create -f environment.yml
+[skevofilaxc] conda activate eqcctpro
+```
+
+After creating and activating the conda environment, install the **EQCCTPro Python package** using the following command: 
 ```sh
 [skevofilaxc] pip install eqcctpro
 ```
-More information on the package can be found at our PyPi project link [eqcctpro](https://pypi.org/project/eqcctpro/).
+The pip package will install the remaining packages needed for **EQCCTPro** to work. More information on the package can be found at our PyPi project link [EQCCTPro](https://pypi.org/project/eqcctpro/).
 
 ## Creating a Test Workspace Environment
 It's highly suggested to create a workspace environment to first understand how eqcctpro works. 
@@ -270,7 +296,7 @@ Both **OptimalCPUConfigurationFinder** and **OptimalGPUConfigurationFinder** eac
 
 1. **`find_best_overall_usecase`**
   - Returns the best overall usecase configuration 
-    - Uses middel 50% of CPUs for moderate, balanced CPU usage, with the maximum amount of stations processed with the minimum runtime 
+    - Uses middle 50% of CPUs for moderate, balanced CPU usage, with the maximum amount of stations processed with the minimum runtime 
 2. **`find_optimal_for`**
   - Return the paralleliztion configurations (EX. concurrent predictions, intra/inter thread counts, vram, etc.) for a given number of CPU(s)/GPU(s) and stations
     - Enables users to quickly identify which input parameters should be used for the given amount of resources and workload they have for the minimum runtime possible on their computer
