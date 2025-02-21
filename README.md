@@ -82,6 +82,6 @@ git clone https://github.com/ut-beg-texnet/eqcct.git
 ```
 
 # Contact Information
-If you wish to contact the developers of EQCCTOne, please email `chenyk2016@gmail.com`.
+If you wish to contact the developers of EQCCTOne, please email `yangkang.chen@beg.utexas.edu`.
 
 If you wish to contact the developers of EQCCTPro, please email `constantinos.skevofilax@austin.utexas.edu` or `victor.salles@beg.utexas.edu`. 
