@@ -1,5 +1,22 @@
 from setuptools import setup, find_packages
 import os
+import sys
+
+# Ensure the user has the latest Python version
+REQUIRED_PYTHON = (3, 10, 14)  # Change this to the minimum version you require
+
+if sys.version_info < REQUIRED_PYTHON:
+    sys.stderr.write(f"""
+==========================
+Unsupported Python version
+==========================
+This package requires Python {REQUIRED_PYTHON[0]}.{REQUIRED_PYTHON[1]}.{REQUIRED_PYTHON[2]} or higher.
+You are using Python {sys.version_info.major}.{sys.version_info.minor}.
+Please upgrade Python and try again.
+
+Visit https://www.python.org/downloads/ to install the latest version.
+""")
+    sys.exit(1)
 
 # Ensure TensorFlow and CUDA are initialized before running
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
