@@ -1,6 +1,6 @@
 # EQCCT
 **EQCCT**, or the **EarthQuake Compact Convolutional Transformer**, is a highly effective, accurate, generalizable, and production-ready machine-learning algorithm designed to autonomously detect seismic phases for earthquake detection. 
-EQCCT was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis, A., Huang, G., Igonin, N., Fomel, S., and Chen, Y., (2023). More information regarding the purpose, design, functionality, results, and real-world implementation and application of EQCCT can be read about in their research paper [here](https://ieeexplore.ieee.org/document/10264212).
+**EQCCT** was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis, A., Huang, G., Igonin, N., Fomel, S., and Chen, Y., (2023). More information regarding the purpose, design, functionality, results, and real-world implementation and application of EQCCT can be read about in their research paper [here](https://ieeexplore.ieee.org/document/10264212).
 
 **If you desire to use and pull only EQCCT (EQCCTOne) as originally developed in the 2023 research paper, use the following commands:** 
 ```sh
@@ -10,14 +10,14 @@ EQCCT was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis,
 [skevofilaxc] cd eqcct
 [skevofilaxc] git sparse-checkout set eqcctone
 ```
-This should pull only the eqcctone folder, which contains all the source and demo code as designed by Yangkang Chen.
+This should pull only the `eqcctone` folder, which contains all the source and demo code as designed by Yangkang Chen.
 Further documentation can be found in the `eqcctone` subfolder. 
 
 
 # EQCCTPro
-**EQCCTPro** builds on EQCCT's accurate seismic event detection, creating a highly efficient framework for real-time waveform processing across large seismic networks. By leveraging parallelization frameworks like [Ray](https://docs.ray.io/en/latest/index.html) and optimizing hardware configurations, EQCCTPro enables fast, accurate, and efficient seismic data processing with continuous real-time monitoring capabilities.
+**EQCCTPro** builds on **EQCCT's** accurate seismic event detection, creating a highly efficient framework for real-time waveform processing across large seismic networks. By leveraging parallelization frameworks like [Ray](https://docs.ray.io/en/latest/index.html) and optimizing hardware configurations, **EQCCTPro** enables fast, accurate, and efficient seismic data processing with continuous real-time monitoring capabilities.
 
-EQCCTPro was created by Skevofilax, C., Salles, V., Munoz, C., Siervo, D., Saad, O.M., Chen, Y., and Savvaidis, A., (2025), and can be read about here. 
+**EQCCTPro** was created by Skevofilax, C., Salles, V., Munoz, C., Siervo, D., Saad, O.M., Chen, Y., and Savvaidis, A., (2025), and can be read about here. 
 
 To install `EQCCTPro`, there are two installation approaches: 
 1. Install **EQCCTPro** out the box with no sample waveform data to test the application with (experts)
@@ -25,7 +25,10 @@ To install `EQCCTPro`, there are two installation approaches:
 
 It is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data and code to help you get acquainted with **EQCCTPro** and its capabilites.
 
-If you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run **`pip install eqcctpro`**. 
+However, if you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run:
+```sh
+**`pip install eqcctpro`**
+```
 **You must have at least Python verison 3.10.14 for the application to run**. 
 
 You can install Python 3.10.14 using either traditional methods or do the following commands: 

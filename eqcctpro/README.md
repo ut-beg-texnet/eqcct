@@ -16,7 +16,10 @@ To install `EQCCTPro`, there are two installation approaches:
 
 It is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data and code to help you get acquainted with **EQCCTPro** and its capabilites.
 
-If you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run **`pip install eqcctpro`**. 
+However, if you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run:
+```sh
+**`pip install eqcctpro`**
+```
 **You must have at least Python verison 3.10.14 for the application to run**. 
 
 You can install Python 3.10.14 using either traditional methods or do the following commands: 
