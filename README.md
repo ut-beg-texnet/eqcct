@@ -27,7 +27,7 @@ It is **highly** recommended you pull the `EQCCTPro` folder to gain access to th
 
 However, if you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run:
 ```sh
-**`pip install eqcctpro`**
+pip install eqcctpro
 ```
 **You must have at least Python verison 3.10.14 for the application to run**. 
 

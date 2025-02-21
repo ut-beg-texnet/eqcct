@@ -30,7 +30,7 @@ with open("README.md", "r") as f:
 
 setup(
     name="eqcctpro",
-    version="0.4.2",
+    version="0.4.4",
     packages=find_packages(),
     install_requires=[
         "numpy==1.26.4",
