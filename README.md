@@ -1,5 +1,5 @@
 # EQCCT
-**EQCCT**, or the **EarthQuake Compact Convolutional Transformer**, is a highly effective, accurate, generalizable and production-ready, machine-learning algorithm designed to autonomously detect seismic phases for earthquake detection. 
+**EQCCT**, or the **EarthQuake Compact Convolutional Transformer**, is a highly effective, accurate, generalizable, and production-ready machine-learning algorithm designed to autonomously detect seismic phases for earthquake detection. 
 EQCCT was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis, A., Huang, G., Igonin, N., Fomel, S., and Chen, Y., (2023). More information regarding the purpose, design, functionality, results, and real-world implementation and application of EQCCT can be read about in their research paper [here](https://ieeexplore.ieee.org/document/10264212).
 
 **If you desire to use and pull only EQCCT (EQCCTOne) as originally developed in the 2023 research paper, use the following commands:** 
