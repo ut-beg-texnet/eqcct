@@ -3,20 +3,17 @@
 
 EQCCT was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis, A., Huang, G., Igonin, N., Fomel, S., and Chen, Y., (2023), as a highly accurate and generalizable machine-learning seismic event detection algorithm. More information regarding the purpose, design, functionality, results, and real-world implementation and application can be read about in their research paper [here](https://ieeexplore.ieee.org/document/10264212).
 
-**If you desire to use and pull only EQCCT (EQCCTOne), use the following commands:** 
+**If you desire to use and pull only EQCCT (EQCCTOne) as originally developed in the 2023 research paper, use the following commands:** 
 ```sh
-mkdir my_work_directory
-cd my_work_directory
-```
-To pull `eqcctone`, now do the following in the `my_work_directory`:
-```sh
-git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
-cd eqcct
-git sparse-checkout set eqcctone
+[skevofilaxc] mkdir my_work_directory
+[skevofilaxc] cd my_work_directory
+[skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+[skevofilaxc] cd eqcct
+[skevofilaxc] git sparse-checkout set eqcctone
 ```
 This should pull only the eqcctone folder.
 
-Further documentation and the originally developed source-code can be found in the `eqcctone` subdirectory. 
+Further documentation and the originally developed source-code can be found in the `eqcctone` subfolder. 
 
 
 # EQCCTPro
@@ -24,23 +21,55 @@ Further documentation and the originally developed source-code can be found in t
 
 EQCCTPro was created by Skevofilax, C., Salles, V., Munoz, C., Siervo, D., Saad, O.M., Chen, Y., and Savvaidis, A., (2025), and can be read about here. 
 
-EQCCTPro can be used-out-of-the box by using: 
-`pip install eqcctpro`
+To install `EQCCTPro`, there are two installation approaches: 
+1. Install **EQCCTPro** out the box with no sample waveform data to test the application with
+2. Install **EQCCTPro** with the sample waveform data as provided from the Github folder
 
-**If you desire to use and pull only EQCCTPro, use the following commands:**
-```sh
-mkdir my_work_directory
-cd my_work_directory
-```
-To pull `eqcctpro`, now do the following in the `my_work_directory`:
-```sh
-git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
-cd eqcct
-git sparse-checkout set eqcctpro
-```
-This should pull only the eqcctpro folder.
+It is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data to help you get acquainted with **EQCCTPro** and its capabilites.
 
-Further documentation and source-code can be found in the `eqcctpro` subdirectory.
+If you wish to install **only the EQCCTPro Python package and use it out of the box (method 1)**, run **`pip install eqcctpro`**. **You must have at least Python verison 3.10.14 for the application to run**. 
+You can install Python 3.10.14 using either traditional methods or do the following commands: 
+
+```sh
+[skevofilaxc] conda create --name yourname python=3.10.14 -y
+[skevofilaxc] conda activate yourname 
+[skevofilaxc] python3 --version
+Python 3.10.14 (it should return)
+[skevofilaxc] pip install eqcctpro
+```
+You will have access to **EQCCTPro** and its capabilities, however, it is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data and to get acquainted with **EQCCTPro**. 
+You can pull the `EQCCTPro` folder by running the following commands: 
+
+```sh
+[skevofilaxc] mkdir my_work_directory
+[skevofilaxc] cd my_work_directory
+[skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+[skevofilaxc] cd eqcct
+[skevofilaxc] git sparse-checkout set eqcctpro
+```
+
+
+If you wish to install **EQCCTPro** with the sample waveform data as originally intended, and or are having trouble installing Python 3.10.14, there has been a precreated conda environment under the `EQCCTPro` folder that will install the necessary packages
+and dependencies needed for **EQCCTPro** to run (method 2). 
+You can pull the `EQCCTPro` folder, create the precreated conda environment, and activate it using the following commands: 
+
+```sh
+[skevofilaxc] mkdir my_work_directory
+[skevofilaxc] cd my_work_directory
+[skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+[skevofilaxc] cd eqcct
+[skevofilaxc] git sparse-checkout set eqcctpro
+[skevofilaxc] conda env create -f environment.yml
+[skevofilaxc] conda activate eqcctpro
+```
+
+After creating and activating the conda environment, install the **EQCCTPro Python package** using the following command: 
+```sh
+[skevofilaxc] pip install eqcctpro
+```
+The pip package will install the remaining packages needed for **EQCCTPro** to work. More information on the package can be found at our PyPi project link [EQCCTPro](https://pypi.org/project/eqcctpro/).
+
+Further documentation and source-code can be found in the `eqcctpro` subfolder.
 
 
 # Downloading and using EQCCTOne/Pro
@@ -55,4 +84,4 @@ git clone https://github.com/ut-beg-texnet/eqcct.git
 # Contact Information
 If you wish to contact the developers of EQCCTOne, please email `chenyk2016@gmail.com`.
 
-If you wish to contact the developers of EQCCTPro, please email `constantinos.skevofilax@austin.utexas.edu`. 
+If you wish to contact the developers of EQCCTPro, please email `constantinos.skevofilax@austin.utexas.edu` or `victor.salles@beg.utexas.edu`. 
