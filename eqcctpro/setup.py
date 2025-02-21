@@ -8,13 +8,12 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["NVIDIA_LOG_LEVEL"] = "ERROR"
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
-
-with open ("README.md", "r") as f: 
+with open("README.md", "r") as f:
     description = f.read()
-    
+
 setup(
     name="eqcctpro",
-    version="0.4",
+    version="0.4.1",
     packages=find_packages(),
     install_requires=[
         "numpy==1.26.4",
@@ -26,8 +25,8 @@ setup(
         "ray==2.42.1",
         "schedule==1.2.2",
         "sdnotify==0.3.2",
-        "tensorflow==2.15.1",
-        "tensorflow-estimator==2.15.0",
+        "tensorflow>=2.15,<2.19",  # Updated TensorFlow constraint
+        "tensorflow-estimator>=2.15,<2.19",  # Updated TensorFlow Estimator constraint
         "tensorflow-io-gcs-filesystem==0.37.1",
         "tensorboard==2.15.2",
         "tensorboard-data-server==0.7.2",
@@ -39,6 +38,6 @@ setup(
         "h5py==3.12.1",
         "pynvml==12.0.0",
     ],
-    long_description = description,
+    long_description=description,
     long_description_content_type="text/markdown"
 )
