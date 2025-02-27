@@ -95,8 +95,8 @@ For additional details and package updates, visit the **EQCCTPro PyPI page**:
 
 ---
 
-## **Using Sample Waveform Data**
-To understand how **EQCCTPro** works, it is **highly recommended** to use provided sample seismic waveform data as the data source. 
+### **Using Sample Waveform Data**
+To understand how **EQCCTPro** works, it is **highly recommended** to use provided sample seismic waveform data as the data source when testing the package. 
 
 Sample seismic waveform data from 50 TexNet stations have provided in the repository under `sample_1_minute_data.zip`. 
 
@@ -121,21 +121,29 @@ TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
 EQCCT (i.e., the ML model) requires at least one pose per station for detection, but using multiple poses enhances P and S wave directionality.
 
-You are have now successfully installed EQCCTPro and the required sample waveform dataset are set up for testing. 
+You have successfully installed EQCCTPro and set up the required sample waveform dataset for testing.
 
-
-## Usage
+### **Usage**
 There are three main capabilities of EQCCTPro: 
-1. Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs 
-2. Evaluate your system to identify the optimal parallelization configurations needed to get the minimum runtime performance out of your system
-3. Identify and return back the optimal parallelization configurations for both specific and general-use usecases for both CPU (a) and GPU applications (b)
+1. **Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs** 
+2. **Evaluate your system to identify the optimal parallelization configurations needed to get the minimum runtime performance out of your system**
+3. **Identify and return back the optimal parallelization configurations for both specific and general-use usecases for both CPU (a) and GPU applications (b)**
 
-These capabilities are achieved by the following functions in order respect to the above descriptions: 
-**EQCCTMSeedRunner (1)**, **EvaluateSystem (2)**, **OptimalCPUConfigurationFinder (3a)**, **OptimalGPUConfigurationFinder (3b)**.
 
-### Processing mSEED data using EQCCTPro (EQCCTMSeedRunner) 
-To use EQCCTPro to process mSEED from various seismic stations, use the **EQCCTMSeedRunner** class. 
-**EQCCTMSeedRunner** enables users to process multiple mSEED from a given input directory. The input directory is made up of station directories such as: 
+These capabilities are achieved using the following core functions:
+
+- **EQCCTMSeedRunner** (for processing mSEED data)
+
+- **EvaluateSystem** (for system evaluation)
+
+- **OptimalCPUConfigurationFinder** (for CPU configuration optimization)
+
+- **OptimalGPUConfigurationFinder** (for GPU configuration optimization)
+
+
+### **Processing mSEED data using EQCCTPro (EQCCTMSeedRunner)** 
+To process mSEED from various seismic stations, use the **EQCCTMSeedRunner** class. 
+**EQCCTMSeedRunner** enables users to process multiple mSEED from a given input directory, which consists of station directories formatted as follows:
 
 ```sh
 [skevofilaxc sample_1_minute_data]$ ls
@@ -143,7 +151,7 @@ AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35 
 BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
 BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
 ```
-Where each subdirectory is named after station code. If you wish to use create your own input directory with custom information, **please follow the above naming convention.** Otherwise, EQCCTPro will **not** work. 
+Where each subdirectory is named after station code. If you wish to use create your own input directory with custom waveform mSEED files, **please follow the above naming convention.** Otherwise, EQCCTPro will **not** work. 
 
 Within each subdirectory, such as PB35, it is made up of mSEED files of different poses (EX. N, E, Z): 
 ```sh
@@ -237,7 +245,10 @@ eqcct_runner.run_eqcctpro()
   - List that defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process.
   - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
     - "I want this program to run only on these specific cores." 
-### Evaluating Your Systems Runtime Performance Capabilites
+
+---
+
+### **Evaluating Your Systems Runtime Performance Capabilites**
 To evaluate your system’s runtime performance capabilites for both your CPU(s) and GPU(s), the **EvaluateSystem** class allows you to autonomously evaluate your system:
 
 ```python
@@ -312,7 +323,8 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - List of GPU IDs on your computer you want to use if `mode = 'gpu'`
   - Non-existing GPU IDs will cause the code to exit 
 
-### Finding Optimal CPU/GPU Configurations
+---
+### **Finding Optimal CPU/GPU Configurations**
 After running **EvalutateSystem**, you can use either the **OptimalCPUConfigurationFinder** or the **OptimalGPUConfigurationFinder** determine the best CPU or GPU configurations (respectively) for your specific usecase:
 
 ```python
@@ -368,12 +380,12 @@ For **OptimalGPUConfigurationFinder.find_optimal_for()**, the function requires 
 - **`station_count (int)`**
   - The number of station(s) you want to use in your application
 
-## Configuration
+## **Configuration**
 The `environment.yml` file specifies the dependencies required to run EQCCTPro. Ensure you have the correct versions installed by using the provided conda environment setup.
 
-## License
+## **License**
 EQCCTPro is provided under an open-source license. See LICENSE for details.
 
-## Contact
+## **Contact**
 For inquiries or issues, please contact constantinos.skevofilax@austin.utexas.edu or victor.salles@beg.utexas.edu.
 
