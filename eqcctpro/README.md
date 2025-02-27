@@ -1,6 +1,6 @@
 # EQCCTPro: powerful seismic event detection toolkit
 
-EQCCTPro is a high-performace seismic event detection and processing framework that leverages EQCCT to process seismic data efficiently. It enables users to fully leverage the computational ability of their computing resources for maximum performance for simultaneous seismic waveform processing, achieving real-time performance by identifying and utilizing the optimal computational configurations for their hardware. More information about the development, capabilities, and real-world applications about EQCCTPro can be read about in our research publication here.  
+EQCCTPro is a high-performace seismic event detection and processing framework that leverages DL-pickers, like EQCCT, to process seismic data efficiently. It enables users to fully leverage the computational ability of their computing resources for maximum performance for simultaneous seismic waveform processing, achieving real-time performance by identifying and utilizing the optimal computational configurations for their hardware. More information about the development, capabilities, and real-world applications about EQCCTPro can be read about in our research publication here.  
 
 ## Features
 - Supports both CPU and GPU execution
@@ -14,7 +14,7 @@ To install `EQCCTPro`, there are two installation approaches:
 1. Install **EQCCTPro** out the box with no sample waveform data to test the application with (experts)
 2. Install **EQCCTPro** with the sample waveform data as provided from the Github folder (first-time users)
 
-It is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data and code to help you get acquainted with **EQCCTPro** and its capabilites.
+It is **highly recommended** you pull the `EQCCTPro` folder to gain access to the sample waveform data and code to help you get acquainted with **EQCCTPro** and its capabilites.
 
 However, if you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run:
 ```sh
@@ -22,17 +22,17 @@ pip install eqcctpro
 ```
 **You must have at least Python verison 3.10.14 for the application to run**. 
 
-You can install Python 3.10.14 using either traditional methods or do the following commands: 
+You can install Python 3.10.14 using either traditional methods or run the following commands that will create a conda environment that has Python 3.10.14:
 ```sh
 [skevofilaxc] conda create --name yourenvironemntname python=3.10.14 -y
 [skevofilaxc] conda activate yourenvironemntname 
 [skevofilaxc] python3 --version
 Python 3.10.14 (it should return)
-[skevofilaxc] pip install eqcctpro
+[skevofilaxc] pip install eqcctpro (Now install eqcctpro out of the box)
 ```
 You will have access to **EQCCTPro** and its capabilities, however, it is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data to help you get acquainted with **EQCCTPro's** functionality. 
-You can pull the `EQCCTPro` folder by running the following commands: 
 
+You can pull the `EQCCTPro` folder by running the following commands: 
 ```sh
 [skevofilaxc] mkdir my_work_directory
 [skevofilaxc] cd my_work_directory
@@ -41,10 +41,10 @@ You can pull the `EQCCTPro` folder by running the following commands:
 [skevofilaxc] git sparse-checkout set eqcctpro
 ```
 
-If you wish to install **EQCCTPro** with the sample waveform data as **originally intended for first-time users**, and or are having trouble installing Python 3.10.14, there has been a precreated conda environment under the `EQCCTPro` folder that will install the necessary packages
+Having said that, if you wish to install **EQCCTPro with the sample waveform data as originally intended for first-time users, and or are having trouble installing Python 3.10.14**, there has been a precreated conda environment under the `EQCCTPro` folder that will install the necessary packages
 and dependencies needed for **EQCCTPro** to run (method 2). 
 
-You can pull the `EQCCTPro` folder, create the precreated conda environment, and activate it as originally intended for first-time users using the following commands: 
+You can pull the `EQCCTPro` folder, create the precreated conda environment, and activate it **as originally intended for first-time users** using the following commands: 
 ```sh
 [skevofilaxc] mkdir my_work_directory
 [skevofilaxc] cd my_work_directory
