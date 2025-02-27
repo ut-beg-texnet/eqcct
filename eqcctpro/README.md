@@ -1,38 +1,54 @@
-# EQCCTPro: powerful seismic event detection toolkit
+# **EQCCTPro: powerful seismic event detection toolkit**
 
 EQCCTPro is a high-performace seismic event detection and processing framework that leverages DL-pickers, like EQCCT, to process seismic data efficiently. It enables users to fully leverage the computational ability of their computing resources for maximum performance for simultaneous seismic waveform processing, achieving real-time performance by identifying and utilizing the optimal computational configurations for their hardware. More information about the development, capabilities, and real-world applications about EQCCTPro can be read about in our research publication here.  
 
-## Features
+## **Features**
 - Supports both CPU and GPU execution
 - Configurable parallelism execution for optimized performance
 - Includes tools for evaluating system performance for optimal usecase configurations
 - Automatic selection of best-usecase configurations
 - Efficient handling of large-scale seismic data
 
-## Installation
-To install `EQCCTPro`, there are two installation approaches: 
-1. Install **EQCCTPro** out the box with no sample waveform data to test the application with (experts)
-2. Install **EQCCTPro** with the sample waveform data as provided from the Github folder (first-time users)
+# **Installation Guide**
+There are **two installation methods** for EQCCTPro:
 
-It is **highly recommended** you pull the `EQCCTPro` folder to gain access to the sample waveform data and code to help you get acquainted with **EQCCTPro** and its capabilites.
+1. **Method 1: Install EQCCTPro out of the box** (for experienced users)
+2. **Method 2: Install EQCCTPro with sample waveform data** (recommended for first-time users)
 
-However, if you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run:
+It is **highly recommended** that first-time users pull the `EQCCTPro` folder, which includes sample waveform data and code to help get acquainted with **EQCCTPro**.
+
+---
+
+## **Method 1: Install EQCCTPro (No Sample Data)**
+This method installs only the EQCCTPro package **without** the sample waveform data.
+
+### **Step 1: Install EQCCTPro**
+Run the following command:
 ```sh
 pip install eqcctpro
 ```
-**You must have at least Python verison 3.10.14 for the application to run**. 
 
-You can install Python 3.10.14 using either traditional methods or run the following commands that will create a conda environment that has Python 3.10.14:
+### **Step 2: Ensure Python 3.10.14 is Installed**
+EQCCTPro **requires Python 3.10.14 or higher**. If you don’t have it installed, you can create a conda environment with the correct Python version:
+
 ```sh
 [skevofilaxc] conda create --name yourenvironemntname python=3.10.14 -y
 [skevofilaxc] conda activate yourenvironemntname 
 [skevofilaxc] python3 --version
-Python 3.10.14 (it should return)
-[skevofilaxc] pip install eqcctpro (Now install eqcctpro out of the box)
 ```
-You will have access to **EQCCTPro** and its capabilities, however, it is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data to help you get acquainted with **EQCCTPro's** functionality. 
+Expected output:
+```
+Python 3.10.14
+```
 
-You can pull the `EQCCTPro` folder by running the following commands: 
+Now, reinstall EQCCTPro:
+```sh
+[skevofilaxc] pip install eqcctpro
+```
+
+### **Step 3 (Optional): Pull the EQCCTPro Folder**
+Although not required, **it is highly recommended** to pull the `EQCCTPro` folder to gain access to sample waveform data.
+
 ```sh
 [skevofilaxc] mkdir my_work_directory
 [skevofilaxc] cd my_work_directory
@@ -41,50 +57,73 @@ You can pull the `EQCCTPro` folder by running the following commands:
 [skevofilaxc] git sparse-checkout set eqcctpro
 ```
 
-Having said that, if you wish to install **EQCCTPro with the sample waveform data as originally intended for first-time users, and or are having trouble installing Python 3.10.14**, there has been a precreated conda environment under the `EQCCTPro` folder that will install the necessary packages
-and dependencies needed for **EQCCTPro** to run (method 2). 
+---
 
-You can pull the `EQCCTPro` folder, create the precreated conda environment, and activate it **as originally intended for first-time users** using the following commands: 
+## **Method 2: Install EQCCTPro with Sample Data (Recommended for First-Time Users)**
+This method sets up EQCCTPro **with a pre-created conda environment and sample waveform data**.
+
+### **Step 1: Clone the EQCCTPro Repository**
 ```sh
 [skevofilaxc] mkdir my_work_directory
 [skevofilaxc] cd my_work_directory
 [skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
 [skevofilaxc] cd eqcct
 [skevofilaxc] git sparse-checkout set eqcctpro
+```
+
+### **Step 2: Create and Activate the Conda Environment**
+A **pre-configured conda environment** is included in the repository to handle all dependencies.
+
+```sh
 [skevofilaxc] conda env create -f environment.yml
 [skevofilaxc] conda activate eqcctpro
 ```
 
-After creating and activating the conda environment, install the **EQCCTPro Python package** using the following command: 
+### **Step 3: Install EQCCTPro**
+After activating the environment, install the EQCCTPro package:
 ```sh
 [skevofilaxc] pip install eqcctpro
 ```
-The pip package will install the remaining packages needed for **EQCCTPro** to work. More information on the eqcctpro pip package can be found at our PyPi project link here [(EQCCTPro)](https://pypi.org/project/eqcctpro/).
 
-## Creating a Test Workspace Environment
-It's highly suggested to create a workspace environment to first understand how eqcctpro works. 
-Sample seismic waveform data from 50 TexNet stations have provided in the eqcctpro repository under the `sample_1_minute_data.zip` file. 
+This will install any remaining dependencies needed for **EQCCTPro**.
 
-After downloading the .zip file, either individually or through the git pull methods, run the following command to unzip it: 
+---
+
+## **More Information**
+For additional details and package updates, visit the **EQCCTPro PyPI page**:  
+🔗 [EQCCTPro on PyPI](https://pypi.org/project/eqcctpro/)
+
+---
+
+## **Using Sample Waveform Data**
+To understand how **EQCCTPro** works, it is **highly recommended** to use provided sample seismic waveform data as the data source. 
+
+Sample seismic waveform data from 50 TexNet stations have provided in the repository under `sample_1_minute_data.zip`. 
+
+### **Step 1: Unzip the Sample Wavefrom Data**
+After downloading the `.zip` file through the GitHub methods above, run:
 ```sh
 [skevofilaxc] unzip sample_1_minute_data.zip
 ```
-It's contents will look like: 
+### **Step 2: Check and Understand the Directory Structure**
+The extracted data will contain multiple station directories:
 ```sh
 [skevofilaxc sample_1_minute_data]$ ls
 AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35  PB52  PH02  SM03  WB11
 BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
 BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
 ```
-Where each subdirectory is named after station code, and is made up of mSEED files of different poses: 
+Each subdirectory contains **mSEED** files of different waveform components:
 ```sh
 [skevofilaxc PB35]$ ls
 TX.PB35.00.HH1__20241215T115800Z__20241215T120100Z.mseed  TX.PB35.00.HHZ__20241215T115800Z__20241215T120100Z.mseed
 TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
-EQCCT only needs one pose for the detection to occur, however more poses allow for better detection of the direction of the P and S waves. 
+EQCCT (i.e., the ML model) requires at least one pose per station for detection, but using multiple poses enhances P and S wave directionality.
 
-You are now set up for testing. 
+You are have now successfully installed EQCCTPro and the required sample waveform dataset are set up for testing. 
+
+
 ## Usage
 There are three main capabilities of EQCCTPro: 
 1. Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs 

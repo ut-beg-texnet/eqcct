@@ -2,6 +2,7 @@
 **EQCCT**, or the **EarthQuake Compact Convolutional Transformer**, is a highly effective, accurate, generalizable, and production-ready machine-learning algorithm designed to autonomously detect seismic phases for earthquake detection. 
 **EQCCT** was developed by Saad, O.M., Chen, Y.F., Siervo, D., Zhang, F., Savvaidis, A., Huang, G., Igonin, N., Fomel, S., and Chen, Y., (2023). More information regarding the purpose, design, functionality, results, and real-world implementation and application of EQCCT can be read about in their research paper [here](https://ieeexplore.ieee.org/document/10264212).
 
+# **Installation Guide**
 **If you desire to use and pull only EQCCT (EQCCTOne) as originally developed in the 2023 research paper, use the following commands:** 
 ```sh
 [skevofilaxc] mkdir my_work_directory
@@ -11,6 +12,7 @@
 [skevofilaxc] git sparse-checkout set eqcctone
 ```
 This should pull only the `eqcctone` folder, which contains all the source and demo code as designed by Yangkang Chen.
+
 Further documentation can be found in the `eqcctone` subfolder. 
 
 
@@ -19,29 +21,46 @@ Further documentation can be found in the `eqcctone` subfolder.
 
 **EQCCTPro** was created by Skevofilax, C., Salles, V., Munoz, C., Siervo, D., Saad, O.M., Chen, Y., and Savvaidis, A., (2025), and can be read about here. 
 
-To install `EQCCTPro`, there are two installation approaches: 
-1. Install **EQCCTPro** out the box with no sample waveform data to test the application with (experts)
-2. Install **EQCCTPro** with the sample waveform data as provided from the Github folder (first-time users)
+# **Installation Guide**
+There are **two installation methods** for EQCCTPro:
 
-It is **highly recommended** you pull the `EQCCTPro` folder to gain access to the sample waveform data and code to help you get acquainted with **EQCCTPro** and its capabilites.
+1. **Method 1: Install EQCCTPro out of the box** (for experienced users)
+2. **Method 2: Install EQCCTPro with sample waveform data** (recommended for first-time users)
 
-However, if you wish to install **only the EQCCTPro Python package and use it out of the box** (method 1), run:
+It is **highly recommended** that first-time users pull the `EQCCTPro` folder, which includes sample waveform data and code to help get acquainted with **EQCCTPro**.
+
+---
+
+## **Method 1: Install EQCCTPro (No Sample Data)**
+This method installs only the EQCCTPro package **without** the sample waveform data.
+
+### **Step 1: Install EQCCTPro**
+Run the following command:
 ```sh
 pip install eqcctpro
 ```
-**You must have at least Python verison 3.10.14 for the application to run**. 
 
-You can install Python 3.10.14 using either traditional methods or run the following commands that will create a conda environment that has Python 3.10.14:
+### **Step 2: Ensure Python 3.10.14 is Installed**
+EQCCTPro **requires Python 3.10.14 or higher**. If you don’t have it installed, you can create a conda environment with the correct Python version:
+
 ```sh
 [skevofilaxc] conda create --name yourenvironemntname python=3.10.14 -y
 [skevofilaxc] conda activate yourenvironemntname 
 [skevofilaxc] python3 --version
-Python 3.10.14 (it should return)
-[skevofilaxc] pip install eqcctpro (Now install eqcctpro out of the box)
 ```
-You will have access to **EQCCTPro** and its capabilities, however, it is **highly** recommended you pull the `EQCCTPro` folder to gain access to the sample waveform data to help you get acquainted with **EQCCTPro's** functionality. 
+Expected output:
+```
+Python 3.10.14
+```
 
-You can pull the `EQCCTPro` folder by running the following commands: 
+Now, reinstall EQCCTPro:
+```sh
+[skevofilaxc] pip install eqcctpro
+```
+
+### **Step 3 (Optional): Pull the EQCCTPro Folder**
+Although not required, **it is highly recommended** to pull the `EQCCTPro` folder to gain access to sample waveform data.
+
 ```sh
 [skevofilaxc] mkdir my_work_directory
 [skevofilaxc] cd my_work_directory
@@ -50,25 +69,43 @@ You can pull the `EQCCTPro` folder by running the following commands:
 [skevofilaxc] git sparse-checkout set eqcctpro
 ```
 
-Having said that, if you wish to install **EQCCTPro with the sample waveform data as originally intended for first-time users, and or are having trouble installing Python 3.10.14**, there has been a precreated conda environment under the `EQCCTPro` folder that will install the necessary packages
-and dependencies needed for **EQCCTPro** to run (method 2). 
+---
 
-You can pull the `EQCCTPro` folder, create the precreated conda environment, and activate it **as originally intended for first-time users** using the following commands: 
+## **Method 2: Install EQCCTPro with Sample Data (Recommended for First-Time Users)**
+This method sets up EQCCTPro **with a pre-created conda environment and sample waveform data**.
+
+### **Step 1: Clone the EQCCTPro Repository**
 ```sh
 [skevofilaxc] mkdir my_work_directory
 [skevofilaxc] cd my_work_directory
 [skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
 [skevofilaxc] cd eqcct
 [skevofilaxc] git sparse-checkout set eqcctpro
+```
+
+### **Step 2: Create and Activate the Conda Environment**
+A **pre-configured conda environment** is included in the repository to handle all dependencies.
+
+```sh
 [skevofilaxc] conda env create -f environment.yml
 [skevofilaxc] conda activate eqcctpro
 ```
 
-After creating and activating the conda environment, install the **EQCCTPro Python package** using the following command: 
+### **Step 3: Install EQCCTPro**
+After activating the environment, install the EQCCTPro package:
 ```sh
 [skevofilaxc] pip install eqcctpro
 ```
-The pip package will install the remaining packages needed for **EQCCTPro** to work. More information on the eqcctpro pip package can be found at our PyPi project link here [(EQCCTPro)](https://pypi.org/project/eqcctpro/).
+
+This will install any remaining dependencies needed for **EQCCTPro**.
+
+---
+
+## **More Information**
+For additional details and package updates, visit the **EQCCTPro PyPI page**:  
+🔗 [EQCCTPro on PyPI](https://pypi.org/project/eqcctpro/)
+
+---
 
 Further documentation and source-code can be found in the `eqcctpro` subfolder.
 
