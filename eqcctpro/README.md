@@ -123,7 +123,8 @@ EQCCT (i.e., the ML model) requires at least one pose per station for detection,
 
 You have successfully installed EQCCTPro and set up the required sample waveform dataset for testing.
 
-### **Usage**
+---
+### **Using EQCCTPro**
 There are three main capabilities of EQCCTPro: 
 1. **Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs** 
 2. **Evaluate your system to identify the optimal parallelization configurations needed to get the minimum runtime performance out of your system**
@@ -140,7 +141,7 @@ These capabilities are achieved using the following core functions:
 
 - **OptimalGPUConfigurationFinder** (for GPU configuration optimization)
 
-
+---
 ### **Processing mSEED data using EQCCTPro (EQCCTMSeedRunner)** 
 To process mSEED from various seismic stations, use the **EQCCTMSeedRunner** class. 
 **EQCCTMSeedRunner** enables users to process multiple mSEED from a given input directory, which consists of station directories formatted as follows:
