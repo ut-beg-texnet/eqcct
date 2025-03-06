@@ -317,12 +317,24 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
     - "I want this program to run only on these specific cores." 
   - Must be at least 1 CPU if using GPUs (Ray needs CPUs to manage the Raylets (concurrent tasks), however the processing of the waveform is done on the GPU)
+- **`starting_amount_of_stations (int)`: default = 1** 
+  - For evaluating your system, you have the option to set a starting amount of stations you want to use in the test
+  - By default, the test will start using 1 station but now is configurable 
+- **`station_list_step_size (int)`: default = 1** 
+  - You can set a step size for the station list that is generated 
+  - For example if the stepsize is set to 10 and you start with 50 stations with a max of 100, then your list would be: [50, 60, 70, 80, 80, 100]
+  - Using 1 will use the default step size of 1-10, then step size of 5 up to station2use
+- **`min_cpu_amount (int)`: default = 1**
+  - Is the minimum amount of CPUs you want to start your trials with 
+  - By default, trials will start iterating with 1 CPU up to the maximum allocated 
+  - Can now set a value as the starting point, such as 15 CPUs up to the maximum of for instance 25
 - **`set_vram_mb (float)`**
   - Value of the maximum amount of VRAM EQCCTPro can use 
   - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
 - **`selected_gpus (list)`: default = None**
   - List of GPU IDs on your computer you want to use if `mode = 'gpu'`
   - Non-existing GPU IDs will cause the code to exit 
+
 
 ---
 ### **Finding Optimal CPU/GPU Configurations**

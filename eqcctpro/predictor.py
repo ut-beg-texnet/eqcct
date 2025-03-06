@@ -1188,7 +1188,7 @@ class EvaluateSystem():
                  cpu_id_list:list = [1],
                  starting_amount_of_stations: int = 1, 
                  station_list_step_size: int = 1, 
-                 min_cpu_amount: int = int,
+                 min_cpu_amount: int = 1,
                  set_vram_mb:float = None, 
                  selected_gpus:list = None): 
         
