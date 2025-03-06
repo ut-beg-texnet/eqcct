@@ -531,23 +531,25 @@ def update_csv(csv_filepath, trial_number, intra, inter, success, error_message,
     remove_directory(output_dir)
 
 
-def generate_station_list(num_stations_to_use):
-    if num_stations_to_use == 1:
+def generate_station_list(total_num_stations_to_use, starting_amount_of_stations, station_list_step_size):
+    if total_num_stations_to_use == 1:
         return [1]
-    if num_stations_to_use <= 10:
-        return list(range(1, num_stations_to_use + 1))
-    
-    # Numbers 1-10
-    station_list = list(range(1, 11))
-    
-    # Multiples of 5 up to num_stations_to_use
-    multiples_of_5 = list(range(15, num_stations_to_use + 1, 5))
-    
-    # Any additional numbers between 21 and num_stations_to_use
-    additional_numbers = list(range(21, num_stations_to_use + 1))
-    
-    # Combine lists while ensuring uniqueness
-    return sorted(set(station_list + multiples_of_5 + additional_numbers))
+    if total_num_stations_to_use <= 10:
+        return list(range(1, total_num_stations_to_use + 1))
+    if starting_amount_of_stations != 1 and station_list_step_size != 1:
+        return list(range(starting_amount_of_stations, total_num_stations_to_use + 1, station_list_step_size))
+    else:
+        # Numbers 1-10
+        station_list = list(range(1, 11))
+        
+        # Multiples of 5 up to total_num_stations_to_use
+        multiples_of_5 = list(range(15, total_num_stations_to_use + 1, 5))
+        
+        # Any additional numbers between 21 and total_num_stations_to_use
+        additional_numbers = list(range(21, total_num_stations_to_use + 1))
+        
+        # Combine lists while ensuring uniqueness
+        return sorted(set(station_list + multiples_of_5 + additional_numbers))
 
 
 def remove_directory(path):
@@ -568,8 +570,11 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
     """Function to run tf_environ and mseed_predictor as a separate process"""
     
     # Set CPU affinity for the child process
+    cpus_to_use_set = {cpu_id for cpu_id in cpus_to_use}
     pid = os.getpid()
-    os.sched_setaffinity(pid, cpus_to_use)
+    os.sched_setaffinity(pid, cpus_to_use_set)
+    # Print the CPU IDs being used
+    print(f"Process {pid} is using CPU IDs: {sorted(cpus_to_use_set)}")
     if use_gpu is False: 
         # Initialize TensorFlow environment with CPUs 
         tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads)
@@ -1180,7 +1185,10 @@ class EvaluateSystem():
                  intra_threads: int = 1,
                  inter_threads: int = 1,
                  stations2use:int = None, 
-                 cpu_id_list:list = [1], 
+                 cpu_id_list:list = [1],
+                 starting_amount_of_stations: int = 1, 
+                 station_list_step_size: int = 1, 
+                 min_cpu_amount: int = int,
                  set_vram_mb:float = None, 
                  selected_gpus:list = None): 
         
@@ -1192,7 +1200,7 @@ class EvaluateSystem():
         self.eval_mode = eval_mode.lower()
         self.intra_threads = intra_threads
         self.inter_threads = inter_threads
-        self.input_dir = input_dir
+        self.input_dir = input_dir  
         self.output_dir = output_dir
         self.log_filepath = log_filepath
         self.csv_dir = csv_dir
@@ -1205,13 +1213,16 @@ class EvaluateSystem():
         self.set_vram_mb = set_vram_mb
         self.selected_gpus = selected_gpus
         self.cpu_count = len(cpu_id_list)
-        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(stations2use)
-        
+        self.starting_amount_of_stations = starting_amount_of_stations
+        self.station_list_step_size = station_list_step_size
+        self.min_cpu_amount = min_cpu_amount
+        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(stations2use, self.starting_amount_of_stations, self.station_list_step_size)
+
     def _generate_stations_list(self):
         """Generates station list"""
         if self.station2use is None: 
             return list(range(1, 11)) + list(range(15, 50, 5))
-        return generate_station_list(self.stations2use)
+        return generate_station_list(self.stations2use, self.starting_amount_of_stations, self.station_list_step_size)
     
     def _prepare_environment(self):
         """Removed 'output_dir' so that there is no conflicts in the save for a clean output return"""
@@ -1248,10 +1259,10 @@ class EvaluateSystem():
         prepare_csv(csv_filepath, False)
         
         trial_num = 1
-        for i in range(1, self.cpu_count+1):
+        for i in range(self.min_cpu_amount, self.cpu_count+1):
             cpus_to_use = self.cpu_id_list[:i]
             for num_stations in self.stations2use_list: 
-                concurrent_predictions_list = generate_station_list(num_stations)
+                concurrent_predictions_list = generate_station_list(num_stations, 1, 1)
                 for num_concurrent_predictions in concurrent_predictions_list: 
                     self._run_trial(trial_num, cpus_to_use, num_stations, num_concurrent_predictions)
                     trial_num += 1 
@@ -1283,7 +1294,7 @@ class EvaluateSystem():
         
         trial_num = 1 
         for stations in self.stations2use_list:
-            concurrent_predictions_list = generate_station_list(stations)
+            concurrent_predictions_list = generate_station_list(stations, 1, 1)
             for predictions in concurrent_predictions_list:
                 vram_per_task_mb = free_vram_mb / predictions
                 step_size = vram_per_task_mb * 0.05
