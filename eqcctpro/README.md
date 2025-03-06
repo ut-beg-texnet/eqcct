@@ -22,14 +22,8 @@ It is **highly recommended** that first-time users pull the `EQCCTPro` folder, w
 ## **Method 1: Install EQCCTPro (No Sample Data)**
 This method installs only the EQCCTPro package **without** the sample waveform data.
 
-### **Step 1: Install EQCCTPro**
-Run the following command:
-```sh
-pip install eqcctpro
-```
-
-### **Step 2: Ensure Python 3.10.14 is Installed**
-EQCCTPro **requires Python 3.10.14 or higher**. If you don’t have it installed, you can create a conda environment with the correct Python version:
+### **Step 1: Create a Clean Conda Environment for the Install**
+EQCCTPro **requires Python 3.10.14 or higher as well as minimum Tensorflow packages**. If you have a clean working environment, you can simply run `pip install eqcctpro`. However, if you have a nonclean environment, its highly recommended to create a new conda environment so that you can install the necessary packages safely with no issues. You can create a new conda environment with the correct Python version by using the following commands:
 
 ```sh
 [skevofilaxc] conda create --name yourenvironemntname python=3.10.14 -y
@@ -41,13 +35,14 @@ Expected output:
 Python 3.10.14
 ```
 
-Now, reinstall EQCCTPro:
+After activating your new conda environment, run the following command:  
 ```sh
 [skevofilaxc] pip install eqcctpro
 ```
+You will have access to EQCCTPro and its functionality. However you will not have immediate access to the provided sample waveform data to use for testing. Youcan pull the waveform data either by downloading the .zip file from the repository or by following step 3. 
 
 ### **Step 3 (Optional): Pull the EQCCTPro Folder**
-Although not required, **it is highly recommended** to pull the `EQCCTPro` folder to gain access to sample waveform data.
+Although not required, **it is highly recommended** to pull the `EQCCTPro` folder to gain access to sample waveform data for testing.
 
 ```sh
 [skevofilaxc] mkdir my_work_directory
