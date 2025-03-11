@@ -531,14 +531,12 @@ def update_csv(csv_filepath, trial_number, intra, inter, success, error_message,
     remove_directory(output_dir)
 
 
-def generate_station_list(total_num_stations_to_use, starting_amount_of_stations, station_list_step_size):
+def generate_station_list(starting_amount_of_stations, total_num_stations_to_use, station_list_step_size):
     if total_num_stations_to_use == 1:
         return [1]
-    if total_num_stations_to_use <= 10:
+    elif total_num_stations_to_use <= 10:
         return list(range(1, total_num_stations_to_use + 1))
-    if starting_amount_of_stations != 1 and station_list_step_size != 1:
-        return list(range(starting_amount_of_stations, total_num_stations_to_use + 1, station_list_step_size))
-    else:
+    elif starting_amount_of_stations == 1 and station_list_step_size == 1:
         # Numbers 1-10
         station_list = list(range(1, 11))
         
@@ -550,6 +548,8 @@ def generate_station_list(total_num_stations_to_use, starting_amount_of_stations
         
         # Combine lists while ensuring uniqueness
         return sorted(set(station_list + multiples_of_5 + additional_numbers))
+    else: 
+        return list(range(starting_amount_of_stations, total_num_stations_to_use + 1, station_list_step_size))
 
 
 def remove_directory(path):
@@ -1189,6 +1189,8 @@ class EvaluateSystem():
                  starting_amount_of_stations: int = 1, 
                  station_list_step_size: int = 1, 
                  min_cpu_amount: int = 1,
+                 min_conc_predictions: int = 1, 
+                 conc_predictions_step_size: int = 1,
                  set_vram_mb:float = None, 
                  selected_gpus:list = None): 
         
@@ -1216,7 +1218,9 @@ class EvaluateSystem():
         self.starting_amount_of_stations = starting_amount_of_stations
         self.station_list_step_size = station_list_step_size
         self.min_cpu_amount = min_cpu_amount
-        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(stations2use, self.starting_amount_of_stations, self.station_list_step_size)
+        self.min_conc_predictions = min_conc_predictions # default is = 1 
+        self.conc_predictions_step_size = conc_predictions_step_size # default is = 1 
+        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size)
 
     def _generate_stations_list(self):
         """Generates station list"""
@@ -1262,7 +1266,7 @@ class EvaluateSystem():
         for i in range(self.min_cpu_amount, self.cpu_count+1):
             cpus_to_use = self.cpu_id_list[:i]
             for num_stations in self.stations2use_list: 
-                concurrent_predictions_list = generate_station_list(num_stations, 1, 1)
+                concurrent_predictions_list = generate_station_list(self.min_conc_predictions, num_stations, self.conc_predictions_step_size)
                 for num_concurrent_predictions in concurrent_predictions_list: 
                     self._run_trial(trial_num, cpus_to_use, num_stations, num_concurrent_predictions)
                     trial_num += 1 
@@ -1294,7 +1298,7 @@ class EvaluateSystem():
         
         trial_num = 1 
         for stations in self.stations2use_list:
-            concurrent_predictions_list = generate_station_list(stations, 1, 1)
+            concurrent_predictions_list = generate_station_list(self.min_conc_predictions, stations, self.conc_predictions_step_size)
             for predictions in concurrent_predictions_list:
                 vram_per_task_mb = free_vram_mb / predictions
                 step_size = vram_per_task_mb * 0.05

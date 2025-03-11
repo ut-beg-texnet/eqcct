@@ -41,11 +41,13 @@ eval_cpu = EvaluateSystem('cpu',
                 S_threshold=0.02, 
                 p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', 
                 s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
-                stations2use=230,
-                cpu_id_list=range(87,127), 
-                starting_amount_of_stations=50, 
-                station_list_step_size=10,
-                min_cpu_amount=15)
+                stations2use=12,
+                cpu_id_list=range(87,102), 
+                starting_amount_of_stations=2, 
+                station_list_step_size=1,
+                min_cpu_amount=15,
+                min_conc_predictions=2,
+                conc_predictions_step_size=1)
 eval_cpu.evaluate()  # This triggers evaluate_cpu() if mode is 'cpu'
 
 cpu_finder = OptimalCPUConfigurationFinder(csv_filepath)

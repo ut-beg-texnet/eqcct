@@ -251,24 +251,50 @@ To evaluate your system’s runtime performance capabilites for both your CPU(s)
 from eqcctpro import EvaluateSystem
 
 eval_gpu = EvaluateSystem(
-    mode='gpu',
-    intra_threads=1,
-    inter_threads=1,
-    input_dir='/path/to/mseed',
-    output_dir='/path/to/outputs',
-    log_filepath='/path/to/outputs/eqcctpro.log',
-    csv_dir='/path/to/csv',
-    P_threshold=0.001,
-    S_threshold=0.02,
-    p_model_filepath='/path/to/model_p.h5',
-    s_model_filepath='/path/to/model_s.h5',
-    stations2use=2,
-    cpu_id_list=[0,1],
-    set_vram_mb=24750,
-    selected_gpus=[0]
+                mode='gpu',
+                intra_threads=1,
+                inter_threads=1,
+                input_dir='/path/to/mseed',
+                output_dir='/path/to/outputs',
+                log_filepath='/path/to/outputs/eqcctpro.log',
+                csv_dir='/path/to/csv',
+                P_threshold=0.001,
+                S_threshold=0.02,
+                p_model_filepath='/path/to/model_p.h5',
+                s_model_filepath='/path/to/model_s.h5',
+                stations2use=2,
+                cpu_id_list=[0,1],
+                set_vram_mb=24750,
+                selected_gpus=[0]
 )
 eval_gpu.evaluate()
 ```
+
+```python
+from eqcctpro import EvaluateSystem
+
+eval_cpu = EvaluateSystem(
+                mode='cpu',
+                intra_threads=1,
+                inter_threads=1,
+                input_dir='/path/to/mseed',
+                output_dir='/path/to/outputs',
+                log_filepath='/path/to/outputs/eqcctpro.log',
+                csv_dir='/path/to/csv',
+                P_threshold=0.001,
+                S_threshold=0.02,
+                p_model_filepath='/path/to/model_p.h5',
+                s_model_filepath='/path/to/model_s.h5',
+                stations2use=12,
+                cpu_id_list=range(87,102), 
+                starting_amount_of_stations=2, 
+                station_list_step_size=1,
+                min_cpu_amount=15,
+                min_conc_predictions=2,
+                conc_predictions_step_size=1)
+eval_cpu.evaluate()
+```
+
 **EvaluateSystem** will iterate through different combinations of CPU(s), Concurrent Predictions, and Workloads (stations), as well as GPU(s), and the amount of VRAM (MB) each Concurrent Prediction can use. 
 **EvaluateSystem** will take time, depending on the number of CPU/GPUs, the amount of VRAM available, and the total workload that needs to be tested. However, after doing the testing once for most if not all usecases, 
 the trial data will be available and can be used to identify the optimal input parallelization configurations for **EQCCTMSeedRunner** to use to get the maximum amount of processing out of your system in the shortest amonut of time. 
@@ -323,6 +349,12 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - Is the minimum amount of CPUs you want to start your trials with 
   - By default, trials will start iterating with 1 CPU up to the maximum allocated 
   - Can now set a value as the starting point, such as 15 CPUs up to the maximum of for instance 25
+- **`min_conc_predictions (int)`: default = 1** 
+  - Is the minimum amount of concurrent predictions you want each trial iteration to start with 
+  - By default, if `min_conc_predictions` and `conc_predictions_step_size` are set to 1, a custom step size iteration will be applied to test the 50 sample waveforms. The sequence follows: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, n+5, 50].
+- **`conc_predictions_step_size (int)`: default = 1** 
+  - Is the concurrent predictions step size you want each trial iteration to iterate with with 
+  - By default, if `min_conc_predictions` and `conc_predictions_step_size` are set to 1, a custom step size iteration will be applied to test the 50 sample waveforms. The sequence follows: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, n+5, 50]
 - **`set_vram_mb (float)`**
   - Value of the maximum amount of VRAM EQCCTPro can use 
   - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
