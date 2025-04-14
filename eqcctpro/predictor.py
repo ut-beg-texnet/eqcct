@@ -1724,7 +1724,6 @@ class OptimalCPUConfigurationFinder:
         # Convert relevant columns to numeric
         df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
-        #df["Total Number of Timechunks"]
         df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
 
@@ -1735,6 +1734,9 @@ class OptimalCPUConfigurationFinder:
         if filtered_df.empty:
             raise ValueError("No matching configuration found. Please enter a valid entry.")
 
+        # Finds for the "Total Run time for Picker (s)" the row with the smallest value and the '1' is to say I only want 
+        # only the single row where the smallest runtime is 
+        # iloc gets the selection of data from a numerical index from the df and turns that access point into a Series
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
 
         print("\nBest Configuration for Requested Input Parameters Based on Trial Data:")
