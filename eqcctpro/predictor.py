@@ -15,6 +15,7 @@ import ray
 import csv
 import time
 import glob
+import queue
 import obspy
 import shutil
 import psutil
@@ -497,26 +498,28 @@ def prepare_csv(csv_file_path, gpu:bool=False):
     if os.path.exists(csv_file_path):
         print(f"\n[{datetime.now()}] Loading existing CSV file from '{csv_file_path}'...")
         return pd.read_csv(csv_file_path)
-    print(f"\n[{datetime.now()}] CSV file not found. Creating a new CSV file at '{csv_file_path}'...")
+    print(f"[{datetime.now()}] CSV file not found. Creating a new CSV file at '{csv_file_path}'...")
     
     if gpu is False: 
         columns = [
             "Trial Number", "Stations Used", "Number of Stations Used",
-            "Number of CPUs Allocated for Ray to Use", "Number of Stations Running Predictions Concurrently",
-            "Intra-parallelism Threads", "Inter-parallelism Threads", "Total Run time for Picker (s)",
-            "Trial Success", "Error Message"
+            "Number of CPUs Allocated for Ray to Use", "Intra-parallelism Threads", "Inter-parallelism Threads", 
+            "Total Waveform Analysis Timespace (min)", "Total Number of Timechunks",
+            "Concurrent Timechunks Used", "Length of Timechunk (min)", "Number of Concurrent Station Tasks", 
+            "Total Run time for Picker (s)", "Trial Success", "Error Message"
         ]
     else: 
         columns = [
             "Trial Number", "Stations Used", "Number of Stations Used",
-            "Number of CPUs Allocated for Ray to Use", "GPUs Used", "VRAM Used Per Task", "Number of Stations Running Predictions Concurrently",
-            "Intra-parallelism Threads", "Inter-parallelism Threads", "Total Run time for Picker (s)",
-            "Trial Success", "Error Message"
+            "Number of CPUs Allocated for Ray to Use", "Intra-parallelism Threads", "Inter-parallelism Threads", 
+            "GPUs Used", "VRAM Used Per Task", "Total Waveform Analysis Timespace (min)", 
+            "Total Number of Timechunks", "Concurrent Timechunks Used", "Length of Timechunk (min)", "Number of Concurrent Station Tasks",
+            "Total Run time for Picker (s)", "Trial Success", "Error Message"
         ]
     df = pd.DataFrame(columns=columns)
     df.to_csv(csv_file_path, index=False)
 
-def update_csv(csv_filepath, trial_number, intra, inter, success, error_message, output_dir, gpu:bool=False, vram_mb=None):
+def update_csv(csv_filepath, trial_number, intra, inter, success, error_message, gpu:bool=False, vram_mb=None):
     df = pd.read_csv(csv_filepath)
     df.at[trial_number -1, "Trial Number"] = trial_number
     df.at[trial_number -1, "Intra-parallelism Threads"] = intra
@@ -528,8 +531,6 @@ def update_csv(csv_filepath, trial_number, intra, inter, success, error_message,
         df.at[trial_number -1, "VRAM Used Per Task"] = vram_mb
         
     df.to_csv(csv_filepath, index=False)
-    remove_directory(output_dir)
-
 
 def generate_station_list(starting_amount_of_stations, total_num_stations_to_use, station_list_step_size):
     if total_num_stations_to_use == 1:
@@ -561,6 +562,24 @@ def remove_directory(path):
         print(f"[{datetime.now()}] Removed directory: {path}")
     else:
         print(f"[{datetime.now()}] Directory '{path}' does not exist anymore.")
+        
+def remove_output_subdirs(path): 
+    """
+    Removes all subdirectories within the specified directory, but not the directory itself.
+    """
+    if os.path.exists(path) and os.path.isdir(path):
+        for item in os.listdir(path):
+            item_path = os.path.join(path, item)
+            if os.path.isdir(item_path):
+                try:
+                    shutil.rmtree(item_path)
+                    print(f"[{datetime.now()}] Removed subdirectory: {item_path}")
+                except Exception as e:
+                    print(f"[{datetime.now()}] Failed to remove subdirectory: {item_path}. Error: {e}")
+    elif not os.path.exists(path):
+        print(f"[{datetime.now()}] Directory '{path}' does not exist.")
+    elif not os.path.isdir(path):
+        print(f"[{datetime.now()}] '{path}' is not a directory.")
         
         
 def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold, 
@@ -623,16 +642,19 @@ def find_optimal_configurations_cpu(df):
     # Convert relevant columns to numeric, handling NaNs gracefully
     df["Number of Stations Used"] = pd.to_numeric(df["Number of Stations Used"], errors="coerce")
     df["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df["Number of CPUs Allocated for Ray to Use"], errors="coerce")
-    df["Number of Stations Running Predictions Concurrently"] = pd.to_numeric(df["Number of Stations Running Predictions Concurrently"], errors="coerce")
+    df["Total Number of Timechunks"] = pd.to_numeric(df["Total Number of Timechunks"], errors="coerce")
+    df["Concurrent Timechunks Used"] = pd.to_numeric(df["Concurrent Timechunks Used"], errors="coerce")
+    df["Number of Concurrent Station Tasks"] = pd.to_numeric(df["Number of Concurrent Station Tasks"], errors="coerce")
     df["Total Run time for Picker (s)"] = pd.to_numeric(df["Total Run time for Picker (s)"], errors="coerce")
+    
 
     # Drop rows with missing values in these essential columns
     df_cleaned = df.dropna(subset=["Number of Stations Used", "Number of CPUs Allocated for Ray to Use", 
-                                "Number of Stations Running Predictions Concurrently", "Total Run time for Picker (s)"])
+                                "Concurrent Timechunks Used", "Number of Concurrent Station Tasks", "Total Run time for Picker (s)"])
 
-    # Find the best concurrent prediction configuration for each combination of (Stations, CPUs)
+    # Find the best concurrent prediction configuration for each combination of (Stations, Timechunks, CPUs)
     optimal_concurrent_preds = df_cleaned.loc[
-        df_cleaned.groupby(["Number of Stations Used", "Number of CPUs Allocated for Ray to Use"])
+        df_cleaned.groupby(["Number of Stations Used", "Concurrent Timechunks Used", "Number of CPUs Allocated for Ray to Use"])
         ["Total Run time for Picker (s)"].idxmin()
     ]
 
@@ -649,9 +671,28 @@ def find_optimal_configurations_cpu(df):
         by=["Number of Stations Used", "Total Run time for Picker (s)"], 
         ascending=[False, True]  # Maximize stations, minimize runtime
     ).iloc[0]
+    
+    # Format the output for human readability
+    formatted_output = {
+        "Trial Number": best_overall_config["Trial Number"],
+        "Number of CPUs Allocated for Ray to Use": best_overall_config["Number of CPUs Allocated for Ray to Use"],
+        "Intra-parallelism Threads": best_overall_config["Intra-parallelism Threads"],
+        "Inter-parallelism Threads": best_overall_config["Inter-parallelism Threads"],
+        "Total Waveform Analysis Timespace (min)": str(best_overall_config["Total Waveform Analysis Timespace (min)"]),
+        "Number of Stations Used": best_overall_config["Number of Stations Used"],
+        "Total Number of Timechunks": best_overall_config["Total Number of Timechunks"],
+        "Concurrent Timechunks Used": best_overall_config["Concurrent Timechunks Used"],
+        "Length of Timechunk (min)": str(best_overall_config["Length of Timechunk (min)"]),
+        "Number of Concurrent Station Tasks per Timechunk": best_overall_config["Number of Concurrent Station Tasks"],
+        "Total Run time for Picker (s)": best_overall_config["Total Run time for Picker (s)"],
+        "Trial Success": best_overall_config["Trial Success"],
+        "Error Message": best_overall_config["Error Message"],
+    }
+    
+    best_overall_df = pd.DataFrame([formatted_output])
 
 
-    return optimal_concurrent_preds, best_overall_config
+    return optimal_concurrent_preds, best_overall_df
 
 
 def find_optimal_configuration_cpu(best_overall_usecase:bool, eval_sys_results_dir:str, cpu:int=None, station_count:int=None): 
@@ -676,7 +717,11 @@ def find_optimal_configuration_cpu(best_overall_usecase:bool, eval_sys_results_d
 
         # Extract required values
         num_cpus = best_config_dict.get("Number of CPUs Allocated for Ray to Use")
-        num_concurrent_predictions = best_config_dict.get("Number of Stations Running Predictions Concurrently")
+        waveform_timespace = best_config_dict.get("Total Waveform Analysis Timespace (min)")
+        total_num_timechunks = best_config_dict.get("Total Number of Timechunks")
+        num_concurrent_timechunks = best_config_dict.get("Concurrent Timechunks Used")
+        length_of_timechunks = best_config_dict.get("Length of Timechunk (min)")
+        num_concurrent_stations = best_config_dict.get("Number of Concurrent Station Tasks")
         intra_threads = best_config_dict.get("Intra-parallelism Threads")
         inter_threads = best_config_dict.get("Inter-parallelism Threads")
         num_stations = best_config_dict.get("Number of Stations Used")
@@ -684,14 +729,18 @@ def find_optimal_configuration_cpu(best_overall_usecase:bool, eval_sys_results_d
         
         print("\nBest Overall Usecase Configuration Based on Trial Data:")
         print(f"CPU: {num_cpus}\n"
-        f"Concurrent Predictions: {num_concurrent_predictions}\n"
         f"Intra-parallelism Threads: {intra_threads}\n"
         f"Inter-parallelism Threads: {inter_threads}\n"
+        f"Waveform Timespace: {waveform_timespace}"
+        f"Total Number of Timechunks: {total_num_timechunks}"
+        f"Length of Timechunks (min): {length_of_timechunks}"
+        f"Concurrent Timechunks: {num_concurrent_stations}\n"
+        f"Concurrent Stations: {num_concurrent_stations}\n"
         f"Stations: {num_stations}\n"
         f"Total Runtime (s): {total_runtime}")
 
         # Return the extracted values
-        return int(float(num_cpus)), int(float(num_concurrent_predictions)), int(float(intra_threads)), int(float(inter_threads)), int(float(num_stations))
+        return int(float(num_cpus)), int(float(num_concurrent_stations)), int(float(intra_threads)), int(float(inter_threads)), int(float(num_stations))
     
     else: # Optimal Configuration for User-Specified CPUs and Number of Stations to use
         # Ensure valid CPU and station count values
@@ -712,7 +761,7 @@ def find_optimal_configuration_cpu(best_overall_usecase:bool, eval_sys_results_d
         # Convert relevant columns to numeric, handling NaNs gracefully
         df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
-        df_optimal["Number of Stations Running Predictions Concurrently"] = pd.to_numeric(df_optimal["Number of Stations Running Predictions Concurrently"], errors="coerce")
+        df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
         filtered_df = df_optimal[
         (df_optimal["Number of CPUs Allocated for Ray to Use"] == cpu) &
@@ -725,12 +774,12 @@ def find_optimal_configuration_cpu(best_overall_usecase:bool, eval_sys_results_d
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
         
         print("\nBest Configuration for Requested Input Parameters Based on Trial Data:")
-        print(f"CPU: {cpu}\nConcurrent Predictions: {best_config['Number of Stations Running Predictions Concurrently']}\n"
+        print(f"CPU: {cpu}\nConcurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
             f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
             f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
             f"Stations: {station_count}\nTotal Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
-        return int(float(cpu)), int(float(best_config["Number of Stations Running Predictions Concurrently"])), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(station_count))
+        return int(float(cpu)), int(float(best_config["Number of Concurrent Station Tasks"])), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(station_count))
 
 
 def find_optimal_configurations_gpu(df):
@@ -742,7 +791,7 @@ def find_optimal_configurations_gpu(df):
     # Convert relevant columns to numeric, handling NaNs gracefully
     numeric_cols = [
         "Number of Stations Used", "Number of CPUs Allocated for Ray to Use",
-        "Number of Stations Running Predictions Concurrently", "Total Run time for Picker (s)",
+        "Number of Concurrent Station Tasks", "Total Run time for Picker (s)",
         "VRAM Used Per Task"
     ]
     for col in numeric_cols:
@@ -813,7 +862,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
 
         # Extract required values
         num_cpus = best_config_dict.get("Number of CPUs Allocated for Ray to Use")
-        num_concurrent_predictions = best_config_dict.get("Number of Stations Running Predictions Concurrently")
+        num_concurrent_stations = best_config_dict.get("Number of Concurrent Station Tasks")
         intra_threads = best_config_dict.get("Intra-parallelism Threads")
         inter_threads = best_config_dict.get("Inter-parallelism Threads")
         num_stations = best_config_dict.get("Number of Stations Used")
@@ -825,14 +874,14 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
         print("\nBest Overall Usecase Configuration Based on Trial Data:")
         print(f"CPU: {num_cpus}\n"
               f"GPU ID(s): {num_gpus}\n"
-              f"Concurrent Predictions: {num_concurrent_predictions}\n"
+              f"Concurrent Predictions: {num_concurrent_stations}\n"
               f"Intra-parallelism Threads: {intra_threads}\n"
               f"Inter-parallelism Threads: {inter_threads}\n"
               f"Stations: {num_stations}\n"
               f"VRAM Used per Task: {vram_used}\n"
               f"Total Runtime (s): {total_runtime}")
 
-        return int(float(num_cpus)), int(float(num_concurrent_predictions)), int(float(intra_threads)), int(float(inter_threads)), num_gpus, int(float(vram_used)), int(float(num_stations))
+        return int(float(num_cpus)), int(float(num_concurrent_stations)), int(float(intra_threads)), int(float(inter_threads)), num_gpus, int(float(vram_used)), int(float(num_stations))
 
     else:  # Optimal Configuration for User-Specified CPUs, GPUs, and Number of Stations to use
         # Ensure valid CPU, GPU, and station count values
@@ -852,7 +901,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
         # Convert relevant columns to numeric, handling NaNs gracefully
         df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
-        df_optimal["Number of Stations Running Predictions Concurrently"] = pd.to_numeric(df_optimal["Number of Stations Running Predictions Concurrently"], errors="coerce")
+        df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
         df_optimal["VRAM Used Per Task"] = pd.to_numeric(df_optimal["VRAM Used Per Task"], errors="coerce")
 
@@ -881,7 +930,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
         print("\nBest Configuration for Requested Application Usecase Based on Trial Data:")
         print(f"CPU: {num_cpus}\n"
               f"GPU: {num_gpus}\n"
-              f"Concurrent Predictions: {best_config['Number of Stations Running Predictions Concurrently']}\n"
+              f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
               f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
               f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
               f"Stations: {station_count}\n"
@@ -889,7 +938,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
               f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
         return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
-               int(float(best_config["Number of Stations Running Predictions Concurrently"])), \
+               int(float(best_config["Number of Concurrent Station Tasks"])), \
                int(float(best_config["Intra-parallelism Threads"])), \
                int(float(best_config["Inter-parallelism Threads"])), \
                num_gpus, \
@@ -1064,7 +1113,8 @@ class EQCCTMSeedRunner():
                 log_filepath: str, 
                 p_model_filepath: str, 
                 s_model_filepath: str, 
-                number_of_concurrent_predictions: int, 
+                number_of_concurrent_predictions: int,
+                number_of_concurrent_timechunk_predictions: int, 
                 intra_threads: int = 1, 
                 inter_threads: int = 1, 
                 P_threshold: float = 0.001, 
@@ -1074,15 +1124,20 @@ class EQCCTMSeedRunner():
                 best_usecase_config: bool = None,
                 set_vram_mb: float = None,
                 selected_gpus: list = None,
-                cpu_id_list: list = [1]): 
+                cpu_id_list: list = [1],
+                start_time:str = None, 
+                end_time:str = None, 
+                timechunk_dt:int = None,
+                waveform_overlap:int = None): 
          
-        self.use_gpu = use_gpu # 'this instance' of the classes object, use_gpu = use_gpu 
+        self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.log_filepath = log_filepath
         self.p_model_filepath = p_model_filepath
         self.s_model_filepath = s_model_filepath
         self.number_of_concurrent_predictions = number_of_concurrent_predictions
+        self.number_of_concurrent_timechunk_predictions = number_of_concurrent_timechunk_predictions
         self.intra_threads = intra_threads
         self.inter_threads = inter_threads
         self.P_threshold = P_threshold
@@ -1093,7 +1148,12 @@ class EQCCTMSeedRunner():
         self.set_vram_mb = set_vram_mb
         self.selected_gpus = selected_gpus
         self.cpu_id_list = cpu_id_list 
-        self.cpu_count = len(cpu_id_list) 
+        self.cpu_count = len(cpu_id_list)
+        self.start_time = start_time
+        self.end_time = end_time
+        self.timechunk_dt = timechunk_dt
+        self.waveform_overlap = waveform_overlap  
+        
          
     def configure_cpu(self): 
         print(f"\nRunning EQCCT over MSeed Files with CPUs...")
@@ -1101,10 +1161,10 @@ class EQCCTMSeedRunner():
             cpus_to_use, num_concurrent_predictions, intra, inter, station_count = (True, self.csv_dir)
             print(f"\n[{datetime.now()}] Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, and {inter} Inter Threads...")
             tf_environ(gpu_id=-1, intra_threads=intra, inter_threads=inter)
-            self.run_mseed_predictor(cpus_to_use, num_concurrent_predictions)
+            # self.run_mseed_predictor(cpus_to_use, num_concurrent_predictions)
         else:
             tf_environ(gpu_id=-1, intra_threads=self.intra_threads, inter_threads=self.inter_threads) 
-            self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_predictions)
+            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_predictions)
             
     def configure_gpu(self):
         print(f"\nRunning EQCCT over MSeed Files with GPUs...")
@@ -1117,14 +1177,14 @@ class EQCCTMSeedRunner():
             cpus_to_use, num_concurrent_predictions, intra, inter, gpus, vram_mb, station_count = result
             print(f"\n[{datetime.now()}] Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, {inter} Inter Threads, {gpus} GPU IDs, and {vram_mb} MB VRAM per Task...")
             tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_mb, gpus_to_use=gpus, intra_threads=intra, inter_threads=inter)
-            self.run_mseed_predictor(cpus_to_use, num_concurrent_predictions, use_gpu=True, gpu_id=gpus, gpu_memory_limit_mb=vram_mb)
+            # self.run_mseed_predictor(cpus_to_use, num_concurrent_predictions, use_gpu=True, gpu_id=gpus, gpu_memory_limit_mb=vram_mb)
         else: 
             free_vram_mb = self.set_vram_mb if self.set_vram_mb is not None else self.calculate_vram() 
             selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids() # will give a list back of all available GPUs and use them all
             print(f"[{datetime.now()}] Using GPU(s): {selected_gpus}")
             vram_per_task_mb = free_vram_mb / self.number_of_concurrent_predictions
             tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_per_task_mb, gpus_to_use=selected_gpus, intra_threads=self.intra_threads, inter_threads=self.inter_threads)
-            self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_predictions, use_gpu=True, gpu_id=selected_gpus, gpu_memory_limit_mb=vram_per_task_mb)
+            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_predictions, use_gpu=True, gpu_id=selected_gpus, gpu_memory_limit_mb=vram_per_task_mb)
             
     def calculate_vram(self):
         print(f"[{datetime.now()}] Utilizing available VRAM within Ray Memory Usage Threshold Limit of 0.95...")
@@ -1136,14 +1196,14 @@ class EQCCTMSeedRunner():
         print(f"[{datetime.now()}] Using {round(free_vram, 2)} GB VRAM (within 94.85% VRAM threshold).")
         return free_vram * 1024  # Convert to MB
 
-    def run_mseed_predictor(self, ray_cpus, num_concurrent_predictions, use_gpu=False, gpu_id=None, gpu_memory_limit_mb=None):
+    def run_mseed_predictor(self, ray_cpus, num_concurrent_predictions, input_dir, use_gpu=False, gpu_id=None, gpu_memory_limit_mb=None):
         """
         Run the mseed_predictor using multiprocessing while limiting it to specific CPU cores.
         """
         process = multiprocessing.Process(
             target=run_mseed_worker,
             args=(
-                self.input_dir,
+                input_dir,
                 self.output_dir,
                 self.log_filepath,
                 self.P_threshold,
@@ -1162,12 +1222,133 @@ class EQCCTMSeedRunner():
 
         process.start()
         process.join()  # Wait for the process to complete
+    
+    def chunk_time(self):
+        from obspy import UTCDateTime
+        starttime = UTCDateTime(self.start_time) - (self.waveform_overlap * 60)
+        endtime = UTCDateTime(self.end_time)
 
-    def run_eqcctpro(self): 
+        times_list = []
+        start = starttime
+        end = start + (self.waveform_overlap * 60) + (self.timechunk_dt * 60)
+        while start <= endtime:
+            if end >= endtime:
+                end = endtime
+                times_list.append([start, end])
+                break
+            times_list.append([start, end])
+            start = end - (self.waveform_overlap * 60)
+            end = start + (self.waveform_overlap * 60) + (self.timechunk_dt * 60)
+
+        self.times_list = times_list
+        
+    def dt_task_generator(self): 
+        tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
+        self.tasks_picker = tasks
+    
+    
+    def timechunk_parallelization(self):
+        
+        # Tell user how many stations they are using 
+        specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
+        print(f"[{datetime.now()}] Using {len(specific_stations_list)} selected station(s).\n")
+    
+        
+        # Ensure Output Dir exists and Create if doesn't 
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Create logfile
+        if not os.path.exists(self.log_filepath): 
+            print(f"[{datetime.now()}] Log file not found. Creating log file...")
+            with open(self.log_filepath, "w") as f: 
+                f.write("")
+                print(f"[{datetime.now()}] Log file: {self.log_filepath} created.")
+        else: 
+            print(f"[{datetime.now()}] Log file '{self.log_filepath}' already exists.")
+        
+        # Submit timchunk tasks to mseed_predictior
+        tasks_queue = []
+        log_queue = queue.Queue()  # Create a queue for log entries
+        
+        # Compute total analyis timeframe 
+        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+        
+        max_pending_tasks = self.number_of_concurrent_timechunk_predictions
+        with open(self.log_filepath, mode="a+", buffering=1) as log: 
+            statement = f"[{datetime.now()}] Starting EQCCTPro parallelized waveform processing..."
+            print(f"{statement}")
+            print(f"[{datetime.now()}] Detailed subprocess information can be found in the log file.")
+            log.write(f"{statement}")
+            for i in range(len(self.tasks_picker)):
+                mseed_timechunk_dir_name = self.tasks_picker[i][1]
+                timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
+            
+                # Concurrent Timechunks 
+                while True: 
+                    if len(tasks_queue) < max_pending_tasks: 
+                        tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                                            P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
+                                            number_of_concurrent_predictions=self.number_of_concurrent_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
+                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, specific_stations=specific_stations_list, 
+                                            timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
+                                            number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time))
+                        break
+                    # If there are more tasks than maximum, just process them
+                    else:
+                        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                        for finished_task in tasks_finished:
+                            log_entry = ray.get(finished_task)
+                            log_queue.put(log_entry)  # Add log entry to the queue
+                            #log.write(log_entry + "\n")
+                            #log.flush() 
+            # After adding all the tasks to queue, process what's left
+            while tasks_queue:
+                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                for finished_task in tasks_finished:
+                    log_entry = ray.get(finished_task)
+                    log_queue.put(log_entry)  # Add log entry to the queue
+                    #log.write(log_entry + "\n")
+                    #log.flush()
+            
+            ray.shutdown()
+            print(f"[{datetime.now()}] Ray Successfully Shutdown.")
+            # Write log entries from the queue to the file
+            while not log_queue.empty():
+                log_entry = log_queue.get()
+                log.write(log_entry + "\n")
+                log.flush()
+            
+            # log.write("\n------- EQCCTPro: Parallel Processing Complete -------\n")
+            log.write("\n------- Sucessfully Picked All Waveform(s) from all Timechunk(s) -------\n")
+            log.write("\n------- END OF FILE -------\n")
+            log.flush()
+        
+            
+
+
+    def run_eqcctpro(self):
+        # Set CPU affinity
+        process = psutil.Process(os.getpid())
+        process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
+        
+        self.chunk_time()
+        self.dt_task_generator()
+        
+        # GPU
         if self.use_gpu: 
             self.configure_gpu()
+            ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using GPUs 
+            print(f"[{datetime.now()}] Ray Sucessfully Initialized with {self.selected_gpus} GPU(s) and {len(self.cpu_id_list)} CPU(s).")
+            self.timechunk_parallelization()
         else: 
+        # CPU
             self.configure_cpu()
+            ray.init(ignore_reinit_error=True, num_cpus=len(self.cpu_id_list), logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using CPUs
+            print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(self.cpu_id_list)} CPU(s).")
+            print(f"[{datetime.now()}] {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
+            self.timechunk_parallelization()
+        print(f"[{datetime.now()}] Successfully picked all waveform(s) from all time chunk(s). Exiting...\n")
+        
 
 
 class EvaluateSystem(): 
@@ -1189,10 +1370,14 @@ class EvaluateSystem():
                  starting_amount_of_stations: int = 1, 
                  station_list_step_size: int = 1, 
                  min_cpu_amount: int = 1,
-                 min_conc_predictions: int = 1, 
-                 conc_predictions_step_size: int = 1,
+                 min_conc_stations: int = 1, 
+                 conc_station_tasks_step_size: int = 1,
                  set_vram_mb:float = None, 
-                 selected_gpus:list = None): 
+                 selected_gpus:list = None,
+                 start_time:str = None, 
+                 end_time:str = None, 
+                 timechunk_dt:int = None,
+                 waveform_overlap:int = None): 
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
@@ -1218,10 +1403,15 @@ class EvaluateSystem():
         self.starting_amount_of_stations = starting_amount_of_stations
         self.station_list_step_size = station_list_step_size
         self.min_cpu_amount = min_cpu_amount
-        self.min_conc_predictions = min_conc_predictions # default is = 1 
-        self.conc_predictions_step_size = conc_predictions_step_size # default is = 1 
-        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size)
-
+        self.min_conc_stations = min_conc_stations # default is = 1 
+        self.conc_station_tasks_step_size = conc_station_tasks_step_size # default is = 1 
+        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
+        self.start_time = start_time
+        self.end_time = end_time
+        self.timechunk_dt = timechunk_dt
+        self.waveform_overlap = waveform_overlap
+        
+        
     def _generate_stations_list(self):
         """Generates station list"""
         if self.station2use is None: 
@@ -1231,23 +1421,56 @@ class EvaluateSystem():
     def _prepare_environment(self):
         """Removed 'output_dir' so that there is no conflicts in the save for a clean output return"""
         remove_directory(self.output_dir)
+        
+    def chunk_time(self):
+        from obspy import UTCDateTime
+        starttime = UTCDateTime(self.start_time) - (self.waveform_overlap * 60)
+        endtime = UTCDateTime(self.end_time)
+
+        times_list = []
+        start = starttime
+        end = start + (self.waveform_overlap * 60) + (self.timechunk_dt * 60)
+        while start <= endtime:
+            if end >= endtime:
+                end = endtime
+                times_list.append([start, end])
+                break
+            times_list.append([start, end])
+            start = end - (self.waveform_overlap * 60)
+            end = start + (self.waveform_overlap * 60) + (self.timechunk_dt * 60)
+
+        self.times_list = times_list
     
-    def _run_trial(self, trial_num, cpus_to_use, num_stations, num_concurrent_predictions, use_gpu=False, gpu_memory_limit_mb=None):
+    def dt_task_generator(self): 
+        tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
+        self.tasks_picker = tasks
+    
+    def _run_trial(self, trial_num, cpus_to_use, num_stations, num_concurrent_predictions, num_concurrent_tasks, mseed_timechunk_dir_name, timechunk_dir_path, use_gpu=False, gpu_memory_limit_mb=None):
         """Runs a trial for evaluation script with a controlled cpu process"""
         print(f"\nTrial Number: {trial_num}")
         
-        process = multiprocessing.Process(
-            target=run_prediction,
-            args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold, self.S_threshold, 
-                  self.p_model_filepath, self.s_model_filepath, num_concurrent_predictions, len(cpus_to_use),
-                  use_gpu, num_stations, cpus_to_use, f"{self.csv_dir}/{self.eval_mode}_test_results.csv",
-                  self.intra_threads, self.inter_threads, use_gpu, gpu_memory_limit_mb, self.selected_gpus))
-        process.start()
-        process.join()
+        # process = multiprocessing.Process(
+        #     target=run_prediction,
+        #     args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold, self.S_threshold, 
+        #           self.p_model_filepath, self.s_model_filepath, num_concurrent_predictions, len(cpus_to_use),
+        #           use_gpu, num_stations, cpus_to_use, f"{self.csv_dir}/{self.eval_mode}_test_results.csv",
+        #           self.intra_threads, self.inter_threads, use_gpu, gpu_memory_limit_mb, self.selected_gpus))
+        # process.start()
+        # process.join()
         
-        if process.exitcode == 0:
+        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+        mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                                            P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
+                                            number_of_concurrent_predictions=self.number_of_concurrent_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
+                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
+                                            timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
+                                            number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time)
+        
+        if self.use_gpu:
+            # CPU
             update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 1, "", self.output_dir, use_gpu, gpu_memory_limit_mb)
         else:
+            # GPU
             update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, use_gpu, gpu_memory_limit_mb)
         
         
@@ -1256,22 +1479,110 @@ class EvaluateSystem():
         """Evaluate system parallelization using CPUs"""
         print(f"Evaluating System Parallelization Capability using CPUs\n")
         
-        self._prepare_environment() # Remove outputs dir 
+        
+        self._prepare_environment() # Remove any preexisting outputs dir 
         os.makedirs(self.csv_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Create logfile 
+        if not os.path.exists(self.log_filepath): 
+            print(f"[{datetime.now()}] Log file not found. Creating log file...")
+            with open(self.log_filepath, "w") as f: 
+                f.write("")
+                print(f"[{datetime.now()}] Log file: {self.log_filepath} created.")
+        else: 
+            print(f"[{datetime.now()}] Log file '{self.log_filepath}' already exists.")
+        
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/cpu_test_results.csv"
         prepare_csv(csv_filepath, False)
         
+        self.chunk_time()
+        self.dt_task_generator()
+        
         trial_num = 1
-        for i in range(self.min_cpu_amount, self.cpu_count+1):
-            cpus_to_use = self.cpu_id_list[:i]
-            for num_stations in self.stations2use_list: 
-                concurrent_predictions_list = generate_station_list(self.min_conc_predictions, num_stations, self.conc_predictions_step_size)
-                for num_concurrent_predictions in concurrent_predictions_list: 
-                    self._run_trial(trial_num, cpus_to_use, num_stations, num_concurrent_predictions)
-                    trial_num += 1 
+        log_queue = queue.Queue()  # Create a queue for log entries
+        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+        
+        if self.eval_mode == 'gpu': 
+            use_gpu = True 
+        else: 
+            use_gpu = False 
+
+        if self.min_cpu_amount > len(self.cpu_id_list): 
+            # Code won't execute because the minimum CPU amount of > the len(cpu id list)
+            # In which the rest of the code is dependent on the len for generating cpu_count 
+            print(f"CPU ID List provided has less CPUs than the minimum requested ({len(self.cpu_id_list)} vs. {self.min_cpu_amount}). Exiting...")
+            quit()
+            
+        with open(self.log_filepath, mode="a+", buffering=1) as log: 
+            for i in range(self.min_cpu_amount, self.cpu_count+1):
+                # Set CPU affinity and initialize Ray
+                cpus_to_use = self.cpu_id_list[:i]
+                process = psutil.Process(os.getpid())
+                process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
+                
+                ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), logging_level=logging.FATAL, log_to_driver=False) 
+                print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(self.cpu_id_list)} CPU(s).")
+                
+                for timechunks in range(1, len(self.tasks_picker)+1): 
+                    for num_stations in self.stations2use_list: 
+                        concurrent_predictions_list = generate_station_list(self.min_conc_stations, num_stations, self.conc_station_tasks_step_size)
+                        for num_concurrent_predictions in concurrent_predictions_list:           
+                            mseed_timechunk_dir_name = self.tasks_picker[timechunks-1][1]
+                            timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
+                            max_pending_tasks = timechunks
+                            
+                            log.write(f"Trial Number: {trial_num}")
+                            print(f"\n[{datetime.now()}] Trial Number: {trial_num}")
+                            print(f"[{datetime.now()}] CPU(s): {i}")
+                            print(f"[{datetime.now()}] Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
+                            print(f"[{datetime.now()}] Conc. Station Being Processed: {num_concurrent_predictions} / Total Amount of Stations to be Processed: {num_stations}")
+                            
+                            # Concurrent Timechunks
+                            tasks_queue = []
+                            while True: 
+                                if len(tasks_queue) < max_pending_tasks: 
+                                    tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                                                        P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
+                                                        number_of_concurrent_predictions=num_concurrent_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=use_gpu, 
+                                                        gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
+                                                        timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
+                                                        number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
+                                                        test_csv_filepath=csv_filepath))
+                                
+                                    break
+                            
+                                else: 
+                                    tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                                    for finished_task in tasks_finished:
+                                        log_entry = ray.get(finished_task)
+                                        log_queue.put(log_entry)  # Add log entry to the queue
+                            
+                            # After adding all the tasks to queue, process what's left
+                            while tasks_queue:
+                                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                                for finished_task in tasks_finished:
+                                    log_entry = ray.get(finished_task)
+                                    log_queue.put(log_entry)  # Add log entry to the queue
+
+                                update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 1, "", False, self.set_vram_mb)
+                                
+                                # Write log entries from the queue to the file
+                                while not log_queue.empty():
+                                    log_entry = log_queue.get()
+                                    log.write(log_entry + "\n")
+                                    log.flush()
+                                    
+                                remove_output_subdirs(self.output_dir)
+                                trial_num += 1 
+                            
+                ray.shutdown() 
+                print(f"[{datetime.now()}] Ray Sucessfully Shutdown.")
+                         
+                        
                     
-        print(f"[{datetime.now()}] Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
+        print(f"\n[{datetime.now()}] Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
         # Compute optimal configurations (CPU)
         df = pd.read_csv(csv_filepath)
         optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_cpu(df)
@@ -1285,6 +1596,10 @@ class EvaluateSystem():
         """Evaluate system parallelization using GPUs"""
         print(f"Evaluating System Parallelization Capability using GPUs\n")
         
+        # Set CPU affinity
+        process = psutil.Process(os.getpid())
+        process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
+        trial_num
         self._prepare_environment() # Remove outputs dir 
         
         # Create test results csv 
@@ -1298,7 +1613,7 @@ class EvaluateSystem():
         
         trial_num = 1 
         for stations in self.stations2use_list:
-            concurrent_predictions_list = generate_station_list(self.min_conc_predictions, stations, self.conc_predictions_step_size)
+            concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
             for predictions in concurrent_predictions_list:
                 vram_per_task_mb = free_vram_mb / predictions
                 step_size = vram_per_task_mb * 0.05
@@ -1331,6 +1646,7 @@ class EvaluateSystem():
         best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_gpu.csv")
 
         print(f"[{datetime.now()}] Optimal configurations found and saved.")
+
     
     def evaluate(self):
         if self.eval_mode == "cpu":
@@ -1365,24 +1681,34 @@ class OptimalCPUConfigurationFinder:
             raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
 
         df_best_overall = pd.read_csv(file_path)
-        best_config_dict = df_best_overall.set_index(df_best_overall.columns[0]).to_dict()[df_best_overall.columns[1]]
-
+        # best_config_dict = df_best_overall.set_index(df_best_overall.columns[0]).to_dict()[df_best_overall.columns[1]]
+        best_config_dict = df_best_overall.to_dict(orient='records')[0]
+        
+        # Extract required values
         num_cpus = best_config_dict.get("Number of CPUs Allocated for Ray to Use")
-        num_concurrent_predictions = best_config_dict.get("Number of Stations Running Predictions Concurrently")
+        waveform_timespace = best_config_dict.get("Total Waveform Analysis Timespace (min)")
+        total_num_timechunks = best_config_dict.get("Total Number of Timechunks")
+        num_concurrent_timechunks = best_config_dict.get("Concurrent Timechunks Used")
+        length_of_timechunks = best_config_dict.get("Length of Timechunk (min)")
+        num_concurrent_stations = best_config_dict.get("Number of Concurrent Station Tasks per Timechunk")
         intra_threads = best_config_dict.get("Intra-parallelism Threads")
         inter_threads = best_config_dict.get("Inter-parallelism Threads")
         num_stations = best_config_dict.get("Number of Stations Used")
         total_runtime = best_config_dict.get("Total Run time for Picker (s)")
+        
+        print("\nBest Overall Usecase Configuration Based on Trial Data:\n--------------------------\n")
+        print(f"CPU(s): {num_cpus}\n"
+        f"Intra-parallelism Threads: {intra_threads}\n"
+        f"Inter-parallelism Threads: {inter_threads}\n"
+        f"Waveform Timespace: {waveform_timespace}\n"
+        f"Total Number of Stations Used: {num_stations}\n"
+        f"Total Number of Timechunks: {total_num_timechunks}\n"
+        f"Length of Timechunks (min): {length_of_timechunks}\n"
+        f"Concurrent Timechunk Processes: {num_concurrent_timechunks}\n"
+        f"Concurrent Station Processes Per Timechunk: {num_concurrent_stations}\n"
+        f"Total Runtime (s): {total_runtime}")
 
-        print("\nBest Overall Usecase Configuration Based on Trial Data:")
-        print(f"CPU: {num_cpus}\n"
-              f"Concurrent Predictions: {num_concurrent_predictions}\n"
-              f"Intra-parallelism Threads: {intra_threads}\n"
-              f"Inter-parallelism Threads: {inter_threads}\n"
-              f"Stations: {num_stations}\n"
-              f"Total Runtime (s): {total_runtime}")
-
-        return int(float(num_cpus)), int(float(num_concurrent_predictions)), int(float(intra_threads)), int(float(inter_threads)), int(float(num_stations))
+        return int(float(num_cpus)), int(float(intra_threads)), int(float(inter_threads)), int(float(num_concurrent_timechunks)), int(float(num_concurrent_stations)), int(float(num_stations))
     
     def find_optimal_for(self, cpu: int, station_count: int):
         """Finds the optimal configuration for a given number of CPUs and stations."""
@@ -1398,7 +1724,7 @@ class OptimalCPUConfigurationFinder:
         # Convert relevant columns to numeric
         df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
-        df_optimal["Number of Stations Running Predictions Concurrently"] = pd.to_numeric(df_optimal["Number of Stations Running Predictions Concurrently"], errors="coerce")
+        df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
 
         filtered_df = df_optimal[
@@ -1412,13 +1738,13 @@ class OptimalCPUConfigurationFinder:
 
         print("\nBest Configuration for Requested Input Parameters Based on Trial Data:")
         print(f"CPU: {cpu}\n"
-              f"Concurrent Predictions: {best_config['Number of Stations Running Predictions Concurrently']}\n"
+              f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
               f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
               f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
               f"Stations: {station_count}\n"
               f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
-        return int(float(cpu)), int(float(best_config["Number of Stations Running Predictions Concurrently"])), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(station_count))
+        return int(float(cpu)), int(float(best_config["Number of Concurrent Station Tasks"])), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(station_count))
 
 
 class OptimalGPUConfigurationFinder:
@@ -1439,7 +1765,7 @@ class OptimalGPUConfigurationFinder:
         best_config_dict = df_best_overall.to_dict()[1]
 
         num_cpus = best_config_dict.get("Number of CPUs Allocated for Ray to Use")
-        num_concurrent_predictions = best_config_dict.get("Number of Stations Running Predictions Concurrently")
+        num_concurrent_predictions = best_config_dict.get("Number of Concurrent Station Tasks")
         intra_threads = best_config_dict.get("Intra-parallelism Threads")
         inter_threads = best_config_dict.get("Inter-parallelism Threads")
         num_stations = best_config_dict.get("Number of Stations Used")
@@ -1473,7 +1799,7 @@ class OptimalGPUConfigurationFinder:
         # Convert relevant columns to numeric, handling NaNs
         df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
-        df_optimal["Number of Stations Running Predictions Concurrently"] = pd.to_numeric(df_optimal["Number of Stations Running Predictions Concurrently"], errors="coerce")
+        df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
         df_optimal["VRAM Used Per Task"] = pd.to_numeric(df_optimal["VRAM Used Per Task"], errors="coerce")
 
@@ -1500,7 +1826,7 @@ class OptimalGPUConfigurationFinder:
         print("\nBest Configuration for Requested Application Usecase Based on Trial Data:")
         print(f"CPU: {num_cpus}\n"
               f"GPU: {gpu_list}\n"
-              f"Concurrent Predictions: {best_config['Number of Stations Running Predictions Concurrently']}\n"
+              f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
               f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
               f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
               f"Stations: {station_count}\n"
@@ -1508,7 +1834,7 @@ class OptimalGPUConfigurationFinder:
               f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
         return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
-               int(float(best_config["Number of Stations Running Predictions Concurrently"])), \
+               int(float(best_config["Number of Concurrent Station Tasks"])), \
                int(float(best_config["Intra-parallelism Threads"])), \
                int(float(best_config["Inter-parallelism Threads"])), \
                gpu_list, \
@@ -1670,9 +1996,23 @@ def run_EQCCT_mseed(
                     specific_stations=specific_stations)
         
     
+
+def parse_time_range(time_string):
+    """
+    Parses a time range string and returns start time, end time, and time delta.
+    """
+    try:
+        start_str, end_str = time_string.split('_')
+        start_time = datetime.strptime(start_str, "%Y%m%dT%H%M%SZ")
+        end_time = datetime.strptime(end_str, "%Y%m%dT%H%M%SZ")
+        time_delta = end_time - start_time
+
+        return start_time, end_time, time_delta
+
+    except ValueError as e:
+        return None, None, None #Error handling.
     
-    
-        
+@ray.remote
 def mseed_predictor(input_dir='downloads_mseeds',
               output_dir="detections",
               P_threshold=0.1,
@@ -1695,7 +2035,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
               gpu_memory_limit_mb=None,
               testing_gpu=None,
               test_csv_filepath=None,
-              specific_stations=None): 
+              specific_stations=None,
+              timechunk_id=None,
+              waveform_overlap=None,
+              total_timechunks=None,
+              number_of_concurrent_timechunk_predictions=None,
+              total_analysis_time=None): 
     
     """ 
     
@@ -1743,12 +2088,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
     --------        
       
     """ 
-    if use_gpu is False: 
-        ray.init(ignore_reinit_error=True, num_cpus=ray_cpus, logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using CPUs
-        print(f"[{datetime.now()}] Ray Sucessfully Initialized with {ray_cpus} CPU(s).")
-    elif use_gpu is True: 
-        ray.init(ignore_reinit_error=True, num_gpus=len(gpu_id), num_cpus=ray_cpus, logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using GPUs 
-        print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(gpu_id)} GPU(s) and {ray_cpus} CPU(s).")
+    # if use_gpu is False: 
+    #     ray.init(ignore_reinit_error=True, num_cpus=ray_cpus, logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using CPUs
+    #     print(f"[{datetime.now()}] Ray Sucessfully Initialized with {ray_cpus} CPU(s).")
+    # elif use_gpu is True: 
+    #     ray.init(ignore_reinit_error=True, num_gpus=len(gpu_id), num_cpus=ray_cpus, logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using GPUs 
+    #     print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(gpu_id)} GPU(s) and {ray_cpus} CPU(s).")
         
     args = {
     "input_dir": input_dir,
@@ -1767,18 +2112,18 @@ def mseed_predictor(input_dir='downloads_mseeds',
     "stations_filters": stations_filters
     }
 
-
+    log_messages = ""  # Accumulate log messages here
+    
     # Ensure Output Dir exists 
     os.makedirs(output_dir, exist_ok=True)
-    
     # Ensure logfile exists before continuing 
     if not os.path.exists(log_file): 
-        print(f"[{datetime.now()}] Log file not found: '{log_file}'. Creating log file...")
+        print(f"[{datetime.now()}] Log file not found. Creating log file...")
         with open(log_file, "w") as f: 
             f.write("")
-            print(f"[{datetime.now()}] Log file: {log_file} created.")
+            print(f"[{datetime.now()}] Created Log file: {log_file}")
     else: 
-        print(f"[{datetime.now()}] Log file '{log_file}' already exists.")
+        print(f"[{datetime.now()}] Log file already exists. Located at: '{log_file}'")
         
     with open(log_file, mode="w", buffering=1) as log:
         out_dir = os.path.join(os.getcwd(), str(args['output_dir']))    
@@ -1791,22 +2136,27 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
             station_list = sorted(set(station_list))
         except Exception as exp:
-            log.write(f"{exp}\n")
+            log_messages += f"{exp}\n"
             return
-        log.write(f"[{datetime.now()}] GPU ID: {args['gpu_id']}; Batch size: {args['batch_size']}\n")
-        log.write(f"[{datetime.now()}] {len(station_list)} station(s) in {args['input_dir']}\n")
+        # log.write(f"[{datetime.now()}] GPU ID: {args['gpu_id']}; Batch size: {args['batch_size']}\n")
+        log_messages += f"\n-----------------------------\nEQCCTPro Data Preprocessing...\n"
+        log_messages += f"\n[{datetime.now()}] {len(station_list)} station(s) in {args['input_dir']}\n"
         
         
-        if stations2use and stations2use <= len(station_list):
-            station_list = random.sample(station_list, stations2use)
-            log.write(f"[{datetime.now()}] Using {len(station_list)} station(s) after selection.\n")
-        if specific_stations is not None: 
+        if stations2use and stations2use <= len(station_list):  # For System Evaluation Execution
+            station_list = random.sample(station_list, stations2use)  # Randomly choose stations from the sample size 
+            # log.write(f"[{datetime.now()}] Using {len(station_list)} station(s) after selection.\n")
+
+        # Could be a bug if someone put None thinking that they would be able to run the whole directory in one go 
+        if specific_stations is not None:  # For "One Use Run" Over a Given Set of Stations (Just Run EQCCTPro on specific_stations)
             station_list = [x for x in station_list if x in specific_stations]
-            log.write(f"[{datetime.now()}] Using {len(station_list)} station(s) after selection.\n")
+            log_messages += f"[{datetime.now()}] Using {len(station_list)} station(s) after selection.\n"
+        # else Use all stations if specific_stations = None 
+        log_messages += f"[{datetime.now()}] Using {len(station_list)} selected station(s).\n"
     
-        # print(f"station_list: {station_list}")
+        # log.write(f"new station_list: {station_list}")
         tasks_predictor = [[f"({i+1}/{len(station_list)})", station_list[i], out_dir, args] for i in range(len(station_list))]
-        # print(f"tasks_predictor:\n{tasks_predictor}")
+        # log.write(f"tasks_predictor:\n{tasks_predictor}")
 
         
         if not tasks_predictor:
@@ -1815,11 +2165,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # Submit tasks to ray in a queue
         tasks_queue = []
         max_pending_tasks = number_of_concurrent_predictions
-        log.write(f"[{datetime.now()}] Started EQCCT picking process.\n")
+        log_messages += f"[{datetime.now()}] Starting EQCCTPro parallelized waveform processing...\n"
         start_time = time.time() 
-        print(f"\n-----------------------------\nEQCCT Pick Detection Process...\n\n[{datetime.now()}] Starting EQCCT...")
-        print(f"[{datetime.now()}] Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time...")
-        with IncrementalBar(f"[{datetime.now()}] Processing Stations", max=len(tasks_predictor)) as bar:
+        log_messages += f"\n-----------------------------\nBeginning Parallel Station Waveform Processing EQCCT...\n\n"
+        starttime, endtime, time_delta = parse_time_range(timechunk_id)
+        log_messages += f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)\n"
+        log_messages += f"\n[{datetime.now()}] Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.\n"
+        
+        # Concurrent Prediction(s) Parallel Processing
+        with IncrementalBar(f"\n[{datetime.now()}] Processing Stations", max=len(tasks_predictor)) as bar:
             for i in range(len(tasks_predictor)):
                 while True:
                     # Add new task to queue while max is not reached
@@ -1827,6 +2181,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                         if use_gpu is False: 
                             tasks_queue.append(parallel_predict.remote(tasks_predictor[i], False, None))
                         elif use_gpu is True: 
+                            log.write(f"use gpu: {use_gpu}")
                             gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_predictions  # Ensure max_pending_tasks > 0 to avoid division by zero
                             task = parallel_predict.options(num_gpus=gpu_allocation_per_task, num_cpus=0).remote(tasks_predictor[i], True, gpu_memory_limit_mb)
                             tasks_queue.append(task)
@@ -1836,8 +2191,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
                         tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                         for finished_task in tasks_finished:
                             log_entry = ray.get(finished_task)
-                            log.write(log_entry + "\n")
-                            log.flush()
+                            log_messages += f'{log_entry}\n'
+                            # log.flush()
                             bar.next()
 
             # After adding all the tasks to queue, process what's left
@@ -1845,39 +2200,50 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                 for finished_task in tasks_finished:
                     log_entry = ray.get(finished_task)
-                    log.write(log_entry + "\n")
-                    log.flush()
+                    log_messages += f'{log_entry}\n'
+                    # log.flush()
                     bar.next() 
-        log.write("------- END OF FILE -------\n")
-        log.flush()
+        log_messages += f"\n------- Parallel Station Waveform Processing Complete For {starttime} to {endtime} Timechunk-------\n"
+        # log.flush()
         end_time = time.time()
-        print(f"[{datetime.now()}] EQCCT Pick Detection Process Complete! Picks are saved at {output_dir}\n[{datetime.now()}] Process Runtime: {end_time - start_time:.2f} s")
-
+        log_messages += f"\n[{datetime.now()}] Picks saved at {output_dir}\n[{datetime.now()}] Process Runtime: {end_time - start_time:.2f} s"
+        
+        # Generate CSV for either CPU or GPU trial tests
         if testing_gpu is not None: 
             if testing_gpu is False: 
+                # CPU CSV 
                 trial_data = {
                     "Trial Number": None,
                     "Stations Used": f"{station_list}",
                     "Number of Stations Used": f"{len(station_list)}",
                     "Number of CPUs Allocated for Ray to Use": f"{ray_cpus}",
-                    "Number of Stations Running Predictions Concurrently": f"{number_of_concurrent_predictions}",  
                     "Intra-parallelism Threads": None, 
                     "Inter-parallelism Threads": None, 
+                    "Total Waveform Analysis Timespace (min)": total_analysis_time,
+                    "Total Number of Timechunks": total_timechunks,
+                    "Concurrent Timechunks Used": number_of_concurrent_timechunk_predictions, 
+                    "Length of Timechunks (min)": time_delta,
+                    "Number of Concurrent Station Tasks": number_of_concurrent_predictions,
                     "Total Run time for Picker (s)": f"{end_time - start_time:.6f}",
                     "Trial Success": None, 
                     "Error Message": None  
                 }
             else: 
+                # GPU CSV
                 trial_data = {
                     "Trial Number": None,
                     "Stations Used": f"{station_list}",
                     "Number of Stations Used": f"{len(station_list)}",
                     "Number of CPUs Allocated for Ray to Use": f"{ray_cpus}",
                     "GPUs Used": f"{gpu_id}",
-                    "VRAM Used Per Task": None,
-                    "Number of Stations Running Predictions Concurrently": f"{number_of_concurrent_predictions}",  
+                    "VRAM Used Per Task": None,  
                     "Intra-parallelism Threads": None, 
                     "Inter-parallelism Threads": None, 
+                    "Total Waveform Analysis Timespace (min)": total_analysis_time, 
+                    "Total Number of Timechunks": total_timechunks,
+                    "Concurrent Timechunks Used": number_of_concurrent_timechunk_predictions, 
+                    "Length of Timechunks (min)": time_delta,
+                    "Number of Concurrent Station Tasks": number_of_concurrent_predictions,
                     "Total Run time for Picker (s)": f"{end_time - start_time:.6f}",
                     "Trial Success": None, 
                     "Error Message": None  
@@ -1898,6 +2264,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Append the trial data directly to the CSV file
             df_trial.to_csv(test_csv_filepath, mode='a', index=False, header=not os.path.exists(test_csv_filepath))
             print(f"\n[{datetime.now()}] Successfully saved trial data to CSV at {test_csv_filepath}")
+            log_messages += f"\n[{datetime.now()}] Sucessfully ran EQCCTPro, exiting..."
+        return log_messages
 
 @ray.remote
 def parallel_predict(predict_args, gpu=False, gpu_memory_limit_mb=None):
