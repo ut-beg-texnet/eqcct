@@ -1724,6 +1724,7 @@ class OptimalCPUConfigurationFinder:
         # Convert relevant columns to numeric
         df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
+        #df["Total Number of Timechunks"]
         df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
 
@@ -1737,14 +1738,18 @@ class OptimalCPUConfigurationFinder:
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
 
         print("\nBest Configuration for Requested Input Parameters Based on Trial Data:")
-        print(f"CPU: {cpu}\n"
-              f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
+        print(f"CPU(s): {cpu}\n"
               f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
               f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
-              f"Stations: {station_count}\n"
+              f"Waveform Timespace: {best_config['Total Waveform Analysis Timespace (min)']}\n"
+              f"Total Number of Stations Used: {station_count}\n"
+              f"Total Number of Timechunks: {best_config['Total Number of Timechunks']}\n"
+              f"Length of Timechunks (min): {best_config['Length of Timechunk (min)']}\n"
+              f"Concurrent Timechunk Processes: {best_config['Concurrent Timechunks Used']}\n"
+              f"Concurrent Station Processes Per Timechunk: {best_config['Number of Concurrent Station Tasks']}\n"
               f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
-        return int(float(cpu)), int(float(best_config["Number of Concurrent Station Tasks"])), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(station_count))
+        return int(float(cpu)), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(best_config["Concurrent Timechunks Used"])), int(float(best_config["Number of Concurrent Station Tasks"])), int(float(station_count))
 
 
 class OptimalGPUConfigurationFinder:
