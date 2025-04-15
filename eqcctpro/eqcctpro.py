@@ -1,7 +1,7 @@
 
 import os 
 from eqcctpro import EQCCTMSeedRunner, EvaluateSystem, OptimalCPUConfigurationFinder, OptimalGPUConfigurationFinder
-input_mseed_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/230_stations_5_min_dt'   
+input_mseed_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/230_stations_2hrs_5_min_dt'   
 output_pick_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs'
 log_file_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs/eqcctpro.log'
 csv_filepath = '/home/skevofilaxc/workspace/eqcct/eqcctpro/csv'
@@ -47,26 +47,26 @@ eval_cpu = EvaluateSystem('cpu',
                 S_threshold=0.02, 
                 p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', 
                 s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
-                stations2use=3,
-                cpu_id_list=range(100,105), 
-                starting_amount_of_stations=2, 
+                stations2use=None,
+                cpu_id_list=range(77,128), 
+                starting_amount_of_stations=50, 
                 station_list_step_size=1,
-                min_cpu_amount=5,
+                min_cpu_amount=15,
                 min_conc_stations=2,
                 conc_station_tasks_step_size=1,
                 start_time='2024-12-15 12:00:00',
-                end_time='2024-12-15 12:10:00',
+                end_time='2024-12-15 14:00:00',
                 timechunk_dt=5, 
                 waveform_overlap=2)
 
-#eval_cpu.evaluate()  # This triggers evaluate_cpu() if mode is 'cpu'
+eval_cpu.evaluate()  # This triggers evaluate_cpu() if mode is 'cpu'
 
 # cpu_finder = OptimalCPUConfigurationFinder(csv_filepath)
 # best_cpu_config = cpu_finder.find_best_overall_usecase()
 # print(best_cpu_config)
 
 
-# optimal_cpu_config = cpu_finder.find_optimal_for(cpu=15, station_count=12)
+# optimal_cpu_config = cpu_finder.find_optimal_for(cpu=5, station_count=1)
 # print(optimal_cpu_config)
 
 

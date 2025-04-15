@@ -1523,7 +1523,7 @@ class EvaluateSystem():
                 process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
                 
                 ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), logging_level=logging.FATAL, log_to_driver=False) 
-                print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(self.cpu_id_list)} CPU(s).")
+                print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(cpus_to_use)} CPU(s).")
                 
                 for timechunks in range(1, len(self.tasks_picker)+1): 
                     for num_stations in self.stations2use_list: 
@@ -1545,7 +1545,7 @@ class EvaluateSystem():
                                 if len(tasks_queue) < max_pending_tasks: 
                                     tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                                         P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                                        number_of_concurrent_predictions=num_concurrent_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=use_gpu, 
+                                                        number_of_concurrent_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
                                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
                                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                                         number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
@@ -2121,6 +2121,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
     log_messages = ""  # Accumulate log messages here
     
+    try:
+        process = psutil.Process(os.getpid())
+        process.cpu_affinity(ray_cpus)  # ray_cpus should be a list of core IDs like [0, 1, 2]
+
+        log_messages += f"[{datetime.now()}] CPU affinity set to cores: {ray_cpus}\n"
+    except Exception as e:
+        log_messages += f"[{datetime.now()}] Failed to set CPU affinity. Reason: {e}\n"
+
+    
     # Ensure Output Dir exists 
     os.makedirs(output_dir, exist_ok=True)
     # Ensure logfile exists before continuing 
@@ -2188,7 +2197,6 @@ def mseed_predictor(input_dir='downloads_mseeds',
                         if use_gpu is False: 
                             tasks_queue.append(parallel_predict.remote(tasks_predictor[i], False, None))
                         elif use_gpu is True: 
-                            log.write(f"use gpu: {use_gpu}")
                             gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_predictions  # Ensure max_pending_tasks > 0 to avoid division by zero
                             task = parallel_predict.options(num_gpus=gpu_allocation_per_task, num_cpus=0).remote(tasks_predictor[i], True, gpu_memory_limit_mb)
                             tasks_queue.append(task)
@@ -2223,7 +2231,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     "Trial Number": None,
                     "Stations Used": f"{station_list}",
                     "Number of Stations Used": f"{len(station_list)}",
-                    "Number of CPUs Allocated for Ray to Use": f"{ray_cpus}",
+                    "Number of CPUs Allocated for Ray to Use": f"{len(ray_cpus)}",
                     "Intra-parallelism Threads": None, 
                     "Inter-parallelism Threads": None, 
                     "Total Waveform Analysis Timespace (min)": total_analysis_time,
@@ -2241,7 +2249,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     "Trial Number": None,
                     "Stations Used": f"{station_list}",
                     "Number of Stations Used": f"{len(station_list)}",
-                    "Number of CPUs Allocated for Ray to Use": f"{ray_cpus}",
+                    "Number of CPUs Allocated for Ray to Use": f"{len(ray_cpus)}",
                     "GPUs Used": f"{gpu_id}",
                     "VRAM Used Per Task": None,  
                     "Intra-parallelism Threads": None, 
