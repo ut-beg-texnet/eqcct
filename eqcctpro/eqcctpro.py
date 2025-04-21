@@ -1,10 +1,11 @@
 
 import os 
 from eqcctpro import EQCCTMSeedRunner, EvaluateSystem, OptimalCPUConfigurationFinder, OptimalGPUConfigurationFinder
-input_mseed_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/230_stations_2hrs_5_min_dt'   
+input_mseed_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/230_stations_2hr_5_min_dt'   
 output_pick_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs'
 log_file_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs/eqcctpro.log'
 csv_filepath = '/home/skevofilaxc/workspace/eqcct/eqcctpro/csv'
+tmp_dir = '/home/skevofilaxc/tmp'
 
 # Can run EQCCT on a given input dir on GPU or CPU 
 # Can also specify the number of stations you want to use as well  
@@ -47,17 +48,18 @@ eval_cpu = EvaluateSystem('cpu',
                 S_threshold=0.02, 
                 p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', 
                 s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
-                stations2use=None,
+                stations2use=225,
                 cpu_id_list=range(77,128), 
-                starting_amount_of_stations=50, 
-                station_list_step_size=1,
-                min_cpu_amount=15,
-                min_conc_stations=2,
-                conc_station_tasks_step_size=1,
+                starting_amount_of_stations=100, 
+                station_list_step_size=5,
+                min_cpu_amount=20,
+                min_conc_stations=75,
+                conc_station_tasks_step_size=5,
                 start_time='2024-12-15 12:00:00',
                 end_time='2024-12-15 14:00:00',
                 timechunk_dt=5, 
-                waveform_overlap=2)
+                waveform_overlap=2,
+                tmp_dir=tmp_dir)
 
 eval_cpu.evaluate()  # This triggers evaluate_cpu() if mode is 'cpu'
 

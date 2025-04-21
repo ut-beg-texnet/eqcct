@@ -1,4 +1,5 @@
 import os
+import gc 
 import sys
 
 # # Save the original stderr (so we can restore it later if needed)
@@ -1377,7 +1378,8 @@ class EvaluateSystem():
                  start_time:str = None, 
                  end_time:str = None, 
                  timechunk_dt:int = None,
-                 waveform_overlap:int = None): 
+                 waveform_overlap:int = None,
+                 tmp_dir:str = None): 
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
@@ -1410,6 +1412,18 @@ class EvaluateSystem():
         self.end_time = end_time
         self.timechunk_dt = timechunk_dt
         self.waveform_overlap = waveform_overlap
+        self.home_tmp_dir = tmp_dir 
+        
+        # Set up temp dir 
+        import tempfile
+        tempfile.tempfile = self.home_tmp_dir
+
+        os.environ['TMPDIR'] = self.home_tmp_dir
+        os.environ['TEMP'] = self.home_tmp_dir
+        os.environ['TMP'] = self.home_tmp_dir
+        print(f"\n[{datetime.now()}] Successfully set up temp files to be stored at {self.home_tmp_dir}")
+        
+
         
         
     def _generate_stations_list(self):
@@ -1474,10 +1488,10 @@ class EvaluateSystem():
             update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, use_gpu, gpu_memory_limit_mb)
         
         
-            
+        
     def evaluate_cpu(self): 
         """Evaluate system parallelization using CPUs"""
-        print(f"Evaluating System Parallelization Capability using CPUs\n")
+        print(f"\nEvaluating System Parallelization Capability using CPUs\n")
         
         
         self._prepare_environment() # Remove any preexisting outputs dir 
@@ -1537,7 +1551,7 @@ class EvaluateSystem():
                             print(f"\n[{datetime.now()}] Trial Number: {trial_num}")
                             print(f"[{datetime.now()}] CPU(s): {i}")
                             print(f"[{datetime.now()}] Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
-                            print(f"[{datetime.now()}] Conc. Station Being Processed: {num_concurrent_predictions} / Total Amount of Stations to be Processed: {num_stations}")
+                            print(f"[{datetime.now()}] Conc. Station Being Processed: {num_concurrent_predictions} / Total Amount of Stations to be Processed in Current Trial: {num_stations} / Total Stations: {max(self.stations2use_list)}") 
                             
                             # Concurrent Timechunks
                             tasks_queue = []
@@ -1575,10 +1589,20 @@ class EvaluateSystem():
                                     log.flush()
                                     
                                 remove_output_subdirs(self.output_dir)
-                                trial_num += 1 
-                            
-                ray.shutdown() 
-                print(f"[{datetime.now()}] Ray Sucessfully Shutdown.")
+                                trial_num += 1  
+                                
+                                # RAM cleanup
+                                process = psutil.Process(os.getpid())
+                                mem_before = process.memory_info().rss
+                                gc.collect()
+                                mem_after = process.memory_info().rss
+                                mem_freed = mem_before - mem_after
+                                print(f"[{datetime.now()}] Successfully cleaned up {mem_freed / 1e6:.2f} MB of RAM.")
+                                
+                                
+                                ray.shutdown() 
+                                print(f"[{datetime.now()}] Ray Sucessfully Shutdown.")
+                                
                          
                         
                     
