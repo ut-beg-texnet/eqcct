@@ -1368,6 +1368,7 @@ class EvaluateSystem():
                  inter_threads: int = 1,
                  stations2use:int = None, 
                  cpu_id_list:list = [1],
+                 used_cpu_test_step_size:int = 1, 
                  starting_amount_of_stations: int = 1, 
                  station_list_step_size: int = 1, 
                  min_cpu_amount: int = 1,
@@ -1377,6 +1378,7 @@ class EvaluateSystem():
                  selected_gpus:list = None,
                  start_time:str = None, 
                  end_time:str = None, 
+                 conc_timechunk_tasks_step_size: int = 1, 
                  timechunk_dt:int = None,
                  waveform_overlap:int = None,
                  tmp_dir:str = None): 
@@ -1402,6 +1404,7 @@ class EvaluateSystem():
         self.set_vram_mb = set_vram_mb
         self.selected_gpus = selected_gpus
         self.cpu_count = len(cpu_id_list)
+        self.used_cpu_test_step_size = used_cpu_test_step_size
         self.starting_amount_of_stations = starting_amount_of_stations
         self.station_list_step_size = station_list_step_size
         self.min_cpu_amount = min_cpu_amount
@@ -1410,6 +1413,7 @@ class EvaluateSystem():
         self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
         self.start_time = start_time
         self.end_time = end_time
+        self.conc_timechunk_tasks_step_size = conc_timechunk_tasks_step_size
         self.timechunk_dt = timechunk_dt
         self.waveform_overlap = waveform_overlap
         self.home_tmp_dir = tmp_dir 
@@ -1530,7 +1534,7 @@ class EvaluateSystem():
             quit()
             
         with open(self.log_filepath, mode="a+", buffering=1) as log: 
-            for i in range(self.min_cpu_amount, self.cpu_count+1):
+            for i in range(self.min_cpu_amount, self.cpu_count+1, self.used_cpu_test_step_size):
                 # Set CPU affinity and initialize Ray
                 cpus_to_use = self.cpu_id_list[:i]
                 process = psutil.Process(os.getpid())
@@ -1539,7 +1543,22 @@ class EvaluateSystem():
                 ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), logging_level=logging.FATAL, log_to_driver=False) 
                 print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(cpus_to_use)} CPU(s).")
                 
-                for timechunks in range(1, len(self.tasks_picker)+1): 
+                timechunks_list = []
+                timechunk = 1
+                step = self.conc_timechunk_tasks_step_size # Use the class attribute
+                while timechunk <= len(self.tasks_picker):
+                    timechunks_list.append(timechunk)
+                    if timechunk == 1:
+                        timechunk += 1
+                    else:
+                        timechunk += step
+
+                if len(self.tasks_picker) not in timechunks_list:
+                    timechunks_list.append(len(self.tasks_picker))
+                # sets are a set of multiple items stored in a single variable 
+                # unchangable after being set, cannot have duplicates and is unordered
+                timechunks_list = sorted(list(set(timechunks_list))) 
+                for timechunks in timechunks_list:
                     for num_stations in self.stations2use_list: 
                         concurrent_predictions_list = generate_station_list(self.min_conc_stations, num_stations, self.conc_station_tasks_step_size)
                         for num_concurrent_predictions in concurrent_predictions_list:           
