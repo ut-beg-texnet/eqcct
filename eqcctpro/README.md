@@ -174,17 +174,22 @@ eqcct_runner = EQCCTMSeedRunner(
     S_threshold=0.02,
     p_model_filepath='/path/to/model_p.h5',
     s_model_filepath='/path/to/model_s.h5',
-    number_of_concurrent_predictions=5,
+    number_of_concurrent_station_predictions=5,
+    number_of_concurrent_timechunk_predictions=2
     best_usecase_config=True,
     csv_dir='/path/to/csv',
     selected_gpus=[0],
     set_vram_mb=24750,
-    specific_stations='AT01, BP01, DG05'
-)
+    specific_stations='AT01, BP01, DG05',
+    start_time='2024-12-14 12:00:00',
+    end_time='2024-12-15 12:00:00',
+    timechunk_dt=1, 
+    waveform_overlap=2)
+
 eqcct_runner.run_eqcctpro()
 ```
 
-**EQCCTMseedRunner** has multiple input paramters that need to be configured and are defined below: 
+**EQCCTMseedRunner** has multiple input parameters that need to be configured and are defined below: 
 
 - **`use_gpu (bool)`: True or False** 
   - Tells Ray to use either the GPU(s) (True) or CPUs (False) on your computer to process the waveforms in the entire workflow
@@ -216,13 +221,16 @@ eqcct_runner.run_eqcctpro()
   - Filepath to where the P EQCCT detection model is stored
 - **`s_model_filepath (str)`**
   - Filepath to where the S EQCCT detection model is stored
-- **`number_of_concurrent_predictions (int)`**
+- **`number_of_concurrent_station_predictions (int)`**
   - The number of concurrent EQCCT detection tasks that can happen simultaneously on a given number of resources
-  - EX. if number_of_concurrent_predictions = 5, there will be up to 5 EQCCT instances analyzing 5 different waveforms at the sametime
-  - Best to use the optimal amount for your hardware, which can be identified using **EvaluateSystem** (below)
+  - EX. if number_of_concurrent_station_predictions = 5, up to 5 EQCCT instances can simultaneously analyze waveforms from 5 distinct seismic stations
+  - To use the optimal parameter value for this param, use the **EvaluateSystem** class (can be found below)
+- **`number_of_concurrent_timechunk_predictions (int)`: default = None** 
+  - The number of timechunks running in parallel 
+  - Avoids the sequential processing of timechunks by processing multiple timechunks in parallel, exponetially reducing runtime  
 - **`best_usecase_config (bool)`: default = False**
-  - If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall usecase configurations 
-  - Best overall usecase configurations are defined as the best overall input configurations that minimize runtime while doing the most amount of processing with your available hardware 
+  - If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall use-case configurations 
+  - Best overall use-case configurations are defined as the best overall input configurations that minimize runtime while doing the most amount of processing with your available hardware 
   - Can only be used if EvaluateSystem has been run 
 - **`csv_dir (str)`**
   - Directory path containing the CSV's outputted by EvaluateSystem that contain the trial data that will be used to find the best_usecase_config
@@ -237,10 +245,22 @@ eqcct_runner.run_eqcctpro()
   - String that contains the "list" of stations you want to only analyze 
   - EX. Out of the 50 sample stations in `sample_1_minute_data`, if I only want to analyze AT01, BP01, DG05, then specific_stations='AT01, BP01, DG05'. 
   - Removes the need to move station directories around to be used as input, can contain all stations in one directory for access
-- **`cpu_id_list (list)`: default = [1]**
-  - List that defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process.
-  - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
-    - "I want this program to run only on these specific cores." 
+- **`start_time (str)`: default = None** 
+  - The start time of the area of time that is being analyzed 
+  - EX. 2024-12-14 12:00:00
+  - Must follow the following convention YYYY-MO-DA HR:MI:SC
+  - Used to create a list of defined timechunks from the defined analysis timeframe 
+- **`end_time (str)`: default = None** 
+  - The end time of the area of time that is being analyzed 
+  - EX. 2024-12-15 12:00:00
+  - Must follow the following convention YYYY-MO-DA HR:MI:SC
+  - Used to create a list of defined timechunks from the defined analysis timeframe 
+- **`timechunk_dt (int)`: default = None** 
+  - The length each time chunk is (in minutes)
+  - EX. timechunk_dt = 10 and the analysis period is 30 minutes, then three 10-minute long timechunks will be created 
+- **`waveform_overlap (int)`: default = None** 
+  - The duration (in minutes) for which each waveform overlaps with the others
+
 
 ---
 
@@ -262,10 +282,10 @@ eval_gpu = EvaluateSystem(
                 S_threshold=0.02,
                 p_model_filepath='/path/to/model_p.h5',
                 s_model_filepath='/path/to/model_s.h5',
-                stations2use=2,
                 cpu_id_list=[0,1],
                 set_vram_mb=24750,
-                selected_gpus=[0]
+                selected_gpus=[0],
+                stations2use=2
 )
 eval_gpu.evaluate()
 ```
@@ -285,17 +305,24 @@ eval_cpu = EvaluateSystem(
                 S_threshold=0.02,
                 p_model_filepath='/path/to/model_p.h5',
                 s_model_filepath='/path/to/model_s.h5',
-                stations2use=12,
-                cpu_id_list=range(87,102), 
-                starting_amount_of_stations=2, 
+                cpu_id_list=range(0,49), 
+                min_cpu_amount=20,
+                cpu_test_step_size=1, 
+                stations2use=50,
+                starting_amount_of_stations=25, 
                 station_list_step_size=1,
-                min_cpu_amount=15,
-                min_conc_predictions=2,
-                conc_predictions_step_size=1)
+                min_conc_stations=25,
+                conc_station_tasks_step_size=5,
+                start_time='2024-12-15 12:00:00',
+                end_time='2024-12-15 14:00:00',
+                conc_timechunk_tasks_step_size=1,
+                timechunk_dt=30, 
+                waveform_overlap=2,
+                tmp_dir=tmp_dir)
 eval_cpu.evaluate()
 ```
 
-**EvaluateSystem** will iterate through different combinations of CPU(s), Concurrent Predictions, and Workloads (stations), as well as GPU(s), and the amount of VRAM (MB) each Concurrent Prediction can use. 
+**EvaluateSystem** will iterate through different combinations of CPU(s), Concurrent Timechunk and Station Tasks, as well as GPU(s), and the amount of VRAM (MB) each Concurrent Prediction can use. 
 **EvaluateSystem** will take time, depending on the number of CPU/GPUs, the amount of VRAM available, and the total workload that needs to be tested. However, after doing the testing once for most if not all usecases, 
 the trial data will be available and can be used to identify the optimal input parallelization configurations for **EQCCTMSeedRunner** to use to get the maximum amount of processing out of your system in the shortest amonut of time. 
 
@@ -303,7 +330,7 @@ The following input parameters need to be configurated for **EvaluateSystem** to
 
 - **`mode (str)`**
   - Can be either `cpu` or `gpu`
-  - Tells `EvaluateSystem` which configuration trials should it iterate through
+  - Tells `EvaluateSystem` which computing approach the trials should it iterate with
 - **`intra_threads (int)`: default = 1**
   - Controls how many intra-parallelism threads Tensorflow can use 
 - **`inter_threads (int)`: default = 1**
@@ -330,14 +357,20 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - Filepath to where the P EQCCT detection model is stored
 - **`s_model_filepath (str)`**
   - Filepath to where the S EQCCT detection model is stored
-- **`stations2use (int)`: default = None**
-  - Controls the maximum amount of stations EvaluateSystem can use in its trial iterations 
-  - Sample data has been provided so that the maximum is 50, however, if using custom data, configure for your specific usecase 
 - **`cpu_id_list (list)`: default = [1]**
   - List that defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process and **is the maximum amount of cores EvaluteSystem can use in its trial iterations**
   - Allows for specific allocation and limitation of CPUs for a given EQCCTPro process 
     - "I want this program to run only on these specific cores." 
   - Must be at least 1 CPU if using GPUs (Ray needs CPUs to manage the Raylets (concurrent tasks), however the processing of the waveform is done on the GPU)
+- **`min_cpu_amount (int)`: default = 1**
+  - Is the minimum amount of CPUs you want to start your trials with 
+  - By default, trials will start iterating with 1 CPU up to the maximum allocated 
+  - Can now set a value as the starting point, such as 15 CPUs up to the maximum of for instance 25
+- **`cpu_test_step_size`: default = 1**
+  - Is the desired step size for the trials will march from `min_cpu_amount` to `len(cpu_id_list)`
+- **`stations2use (int)`: default = None**
+  - Controls the maximum amount of stations EvaluateSystem can use in its trial iterations 
+  - Sample data has been provided so that the maximum is 50, however, if using custom data, configure for your specific usecase 
 - **`starting_amount_of_stations (int)`: default = 1** 
   - For evaluating your system, you have the option to set a starting amount of stations you want to use in the test
   - By default, the test will start using 1 station but now is configurable 
@@ -345,16 +378,32 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - You can set a step size for the station list that is generated 
   - For example if the stepsize is set to 10 and you start with 50 stations with a max of 100, then your list would be: [50, 60, 70, 80, 80, 100]
   - Using 1 will use the default step size of 1-10, then step size of 5 up to station2use
-- **`min_cpu_amount (int)`: default = 1**
-  - Is the minimum amount of CPUs you want to start your trials with 
-  - By default, trials will start iterating with 1 CPU up to the maximum allocated 
-  - Can now set a value as the starting point, such as 15 CPUs up to the maximum of for instance 25
-- **`min_conc_predictions (int)`: default = 1** 
-  - Is the minimum amount of concurrent predictions you want each trial iteration to start with 
+- **`min_conc_stations (int)`: default = 1** 
+  - Is the minimum amount of concurrent stations predictions you want each trial iteration to start with 
   - By default, if `min_conc_predictions` and `conc_predictions_step_size` are set to 1, a custom step size iteration will be applied to test the 50 sample waveforms. The sequence follows: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, n+5, 50].
-- **`conc_predictions_step_size (int)`: default = 1** 
-  - Is the concurrent predictions step size you want each trial iteration to iterate with with 
+- **`conc_station_tasks_step_size (int)`: default = 1** 
+  - Is the concurrent station predictions step size you want each trial iteration to iterate with 
   - By default, if `min_conc_predictions` and `conc_predictions_step_size` are set to 1, a custom step size iteration will be applied to test the 50 sample waveforms. The sequence follows: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, n+5, 50]
+- **`start_time (str)`: default = None** 
+  - The start time of the area of time that is being analyzed 
+  - EX. 2024-12-14 12:00:00
+  - Must follow the following convention YYYY-MO-DA HR:MI:SC
+  - Used to create a list of defined timechunks from the defined analysis timeframe 
+- **`end_time (str)`: default = None** 
+  - The end time of the area of time that is being analyzed 
+  - EX. 2024-12-15 12:00:00
+  - Must follow the following convention YYYY-MO-DA HR:MI:SC
+  - Used to create a list of defined timechunks from the defined analysis timeframe 
+- **`conc_timechunk_tasks_step_size (int)`: default = 1** 
+  - Is the concurrent timechunk predictions step size you want each trial iteration to iterate with 
+- **`timechunk_dt (int)`: default = None** 
+  - The length each time chunk is (in minutes)
+  - EX. timechunk_dt = 10 and the analysis period is 30 minutes, then three 10-minute long timechunks will be created 
+- **`waveform_overlap (int)`: default = None** 
+  - The duration (in minutes) for which each waveform overlaps with the others
+- **`tmp_dir (str)`: default = 1** 
+  - A temporary directory to store all temp files produced by EQCCTPro
+  - Used to help ease system cleanup and to not write to system's default temporary directory 
 - **`set_vram_mb (float)`**
   - Value of the maximum amount of VRAM EQCCTPro can use 
   - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 

@@ -607,7 +607,7 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
             S_threshold=S_threshold, 
             p_model=p_model_filepath, 
             s_model=s_model_filepath, 
-            number_of_concurrent_predictions=num_concurrent_predictions, 
+            number_of_concurrent_station_predictions=num_concurrent_predictions, 
             ray_cpus=ray_cpus,
             use_gpu=use_gpu,
             stations2use=stations2use,
@@ -623,7 +623,7 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
                 S_threshold=S_threshold, 
                 p_model=p_model_filepath, 
                 s_model=s_model_filepath, 
-                number_of_concurrent_predictions=num_concurrent_predictions, 
+                number_of_concurrent_station_predictions=num_concurrent_predictions, 
                 ray_cpus=ray_cpus,
                 use_gpu=True,
                 gpu_id=gpus_to_use, 
@@ -1114,7 +1114,7 @@ class EQCCTMSeedRunner():
                 log_filepath: str, 
                 p_model_filepath: str, 
                 s_model_filepath: str, 
-                number_of_concurrent_predictions: int,
+                number_of_concurrent_station_predictions: int,
                 number_of_concurrent_timechunk_predictions: int, 
                 intra_threads: int = 1, 
                 inter_threads: int = 1, 
@@ -1137,7 +1137,7 @@ class EQCCTMSeedRunner():
         self.log_filepath = log_filepath
         self.p_model_filepath = p_model_filepath
         self.s_model_filepath = s_model_filepath
-        self.number_of_concurrent_predictions = number_of_concurrent_predictions
+        self.number_of_concurrent_station_predictions = number_of_concurrent_station_predictions
         self.number_of_concurrent_timechunk_predictions = number_of_concurrent_timechunk_predictions
         self.intra_threads = intra_threads
         self.inter_threads = inter_threads
@@ -1165,7 +1165,7 @@ class EQCCTMSeedRunner():
             # self.run_mseed_predictor(cpus_to_use, num_concurrent_predictions)
         else:
             tf_environ(gpu_id=-1, intra_threads=self.intra_threads, inter_threads=self.inter_threads) 
-            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_predictions)
+            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_station_predictions)
             
     def configure_gpu(self):
         print(f"\nRunning EQCCT over MSeed Files with GPUs...")
@@ -1183,9 +1183,9 @@ class EQCCTMSeedRunner():
             free_vram_mb = self.set_vram_mb if self.set_vram_mb is not None else self.calculate_vram() 
             selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids() # will give a list back of all available GPUs and use them all
             print(f"[{datetime.now()}] Using GPU(s): {selected_gpus}")
-            vram_per_task_mb = free_vram_mb / self.number_of_concurrent_predictions
+            vram_per_task_mb = free_vram_mb / self.number_of_concurrent_station_predictions
             tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_per_task_mb, gpus_to_use=selected_gpus, intra_threads=self.intra_threads, inter_threads=self.inter_threads)
-            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_predictions, use_gpu=True, gpu_id=selected_gpus, gpu_memory_limit_mb=vram_per_task_mb)
+            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_station_predictions, use_gpu=True, gpu_id=selected_gpus, gpu_memory_limit_mb=vram_per_task_mb)
             
     def calculate_vram(self):
         print(f"[{datetime.now()}] Utilizing available VRAM within Ray Memory Usage Threshold Limit of 0.95...")
@@ -1289,7 +1289,7 @@ class EQCCTMSeedRunner():
                     if len(tasks_queue) < max_pending_tasks: 
                         tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                             P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                            number_of_concurrent_predictions=self.number_of_concurrent_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
+                                            number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
                                             gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, specific_stations=specific_stations_list, 
                                             timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                             number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time))
@@ -1368,7 +1368,7 @@ class EvaluateSystem():
                  inter_threads: int = 1,
                  stations2use:int = None, 
                  cpu_id_list:list = [1],
-                 used_cpu_test_step_size:int = 1, 
+                 cpu_test_step_size:int = 1, 
                  starting_amount_of_stations: int = 1, 
                  station_list_step_size: int = 1, 
                  min_cpu_amount: int = 1,
@@ -1404,7 +1404,7 @@ class EvaluateSystem():
         self.set_vram_mb = set_vram_mb
         self.selected_gpus = selected_gpus
         self.cpu_count = len(cpu_id_list)
-        self.used_cpu_test_step_size = used_cpu_test_step_size
+        self.cpu_test_step_size = cpu_test_step_size
         self.starting_amount_of_stations = starting_amount_of_stations
         self.station_list_step_size = station_list_step_size
         self.min_cpu_amount = min_cpu_amount
@@ -1479,7 +1479,7 @@ class EvaluateSystem():
         total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
         mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                             P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                            number_of_concurrent_predictions=self.number_of_concurrent_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
+                                            number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
                                             gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
                                             timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                             number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time)
@@ -1534,7 +1534,7 @@ class EvaluateSystem():
             quit()
             
         with open(self.log_filepath, mode="a+", buffering=1) as log: 
-            for i in range(self.min_cpu_amount, self.cpu_count+1, self.used_cpu_test_step_size):
+            for i in range(self.min_cpu_amount, self.cpu_count+1, self.cpu_test_step_size):
                 # Set CPU affinity and initialize Ray
                 cpus_to_use = self.cpu_id_list[:i]
                 process = psutil.Process(os.getpid())
@@ -1578,7 +1578,7 @@ class EvaluateSystem():
                                 if len(tasks_queue) < max_pending_tasks: 
                                     tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                                         P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                                        number_of_concurrent_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
+                                                        number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
                                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
                                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                                         number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
@@ -1911,7 +1911,7 @@ def run_mseed_worker(input_dir, output_dir, log_file, P_threshold, S_threshold, 
         S_threshold=S_threshold, 
         p_model=p_model, 
         s_model=s_model, 
-        number_of_concurrent_predictions=num_concurrent_predictions, 
+        number_of_concurrent_station_predictions=num_concurrent_predictions, 
         ray_cpus=ray_cpus,
         use_gpu=use_gpu,
         gpu_id=gpu_id,
@@ -1927,7 +1927,7 @@ def run_EQCCT_mseed(
         log_filepath: str, 
         p_model_filepath: str, 
         s_model_filepath: str, 
-        number_of_concurrent_predictions: int, 
+        number_of_concurrent_station_predictions: int, 
         intra_threads: int = 1, 
         inter_threads: int = 1, 
         P_threshold: float = 0.001, 
@@ -1958,7 +1958,7 @@ def run_EQCCT_mseed(
                     S_threshold=S_threshold, 
                     p_model=p_model_filepath, 
                     s_model=s_model_filepath, 
-                    number_of_concurrent_predictions=num_concurrent_predictions, 
+                    number_of_concurrent_station_predictions=num_concurrent_predictions, 
                     ray_cpus=cpus_to_use,
                     use_gpu=False,
                     specific_stations=specific_stations)    
@@ -1971,7 +1971,7 @@ def run_EQCCT_mseed(
                     S_threshold=S_threshold, 
                     p_model=p_model_filepath, 
                     s_model=s_model_filepath, 
-                    number_of_concurrent_predictions=number_of_concurrent_predictions, 
+                    number_of_concurrent_station_predictions=number_of_concurrent_station_predictions, 
                     ray_cpus=cpu_count,
                     use_gpu=False,
                     specific_stations=specific_stations)
@@ -1996,7 +1996,7 @@ def run_EQCCT_mseed(
                         S_threshold=S_threshold, 
                         p_model=p_model_filepath, 
                         s_model=s_model_filepath, 
-                        number_of_concurrent_predictions=num_concurrent_predictions, 
+                        number_of_concurrent_station_predictions=num_concurrent_predictions, 
                         ray_cpus=cpus_to_use,
                         use_gpu=True,
                         gpu_id=gpus,
@@ -2028,7 +2028,7 @@ def run_EQCCT_mseed(
             print(f"[{datetime.now()}] Using GPU(s): {selected_gpus}")
 
                 
-            vram_per_task_mb = free_vram_mb / number_of_concurrent_predictions
+            vram_per_task_mb = free_vram_mb / number_of_concurrent_station_predictions
             
             tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_per_task_mb, gpus_to_use=selected_gpus, intra_threads=intra_threads, inter_threads=inter_threads)
             mseed_predictor(input_dir=input_dir, 
@@ -2038,7 +2038,7 @@ def run_EQCCT_mseed(
                     S_threshold=S_threshold, 
                     p_model=p_model_filepath, 
                     s_model=s_model_filepath, 
-                    number_of_concurrent_predictions=number_of_concurrent_predictions, 
+                    number_of_concurrent_station_predictions=number_of_concurrent_station_predictions, 
                     ray_cpus=cpu_count,
                     use_gpu=True,
                     gpu_id=selected_gpus, 
@@ -2079,7 +2079,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
               stations_filters=None,
               p_model=None,
               s_model=None,
-              number_of_concurrent_predictions=None,
+              number_of_concurrent_station_predictions=None,
               ray_cpus=None,
               use_gpu=False,
               gpu_memory_limit_mb=None,
@@ -2223,7 +2223,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
         # Submit tasks to ray in a queue
         tasks_queue = []
-        max_pending_tasks = number_of_concurrent_predictions
+        max_pending_tasks = number_of_concurrent_station_predictions
         log_messages += f"[{datetime.now()}] Starting EQCCTPro parallelized waveform processing...\n"
         start_time = time.time() 
         log_messages += f"\n-----------------------------\nBeginning Parallel Station Waveform Processing EQCCT...\n\n"
@@ -2240,7 +2240,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                         if use_gpu is False: 
                             tasks_queue.append(parallel_predict.remote(tasks_predictor[i], False, None))
                         elif use_gpu is True: 
-                            gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_predictions  # Ensure max_pending_tasks > 0 to avoid division by zero
+                            gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_station_predictions  # Ensure max_pending_tasks > 0 to avoid division by zero
                             task = parallel_predict.options(num_gpus=gpu_allocation_per_task, num_cpus=0).remote(tasks_predictor[i], True, gpu_memory_limit_mb)
                             tasks_queue.append(task)
                         break
@@ -2281,7 +2281,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     "Total Number of Timechunks": total_timechunks,
                     "Concurrent Timechunks Used": number_of_concurrent_timechunk_predictions, 
                     "Length of Timechunks (min)": time_delta,
-                    "Number of Concurrent Station Tasks": number_of_concurrent_predictions,
+                    "Number of Concurrent Station Tasks": number_of_concurrent_station_predictions,
                     "Total Run time for Picker (s)": f"{end_time - start_time:.6f}",
                     "Trial Success": None, 
                     "Error Message": None  
@@ -2301,7 +2301,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     "Total Number of Timechunks": total_timechunks,
                     "Concurrent Timechunks Used": number_of_concurrent_timechunk_predictions, 
                     "Length of Timechunks (min)": time_delta,
-                    "Number of Concurrent Station Tasks": number_of_concurrent_predictions,
+                    "Number of Concurrent Station Tasks": number_of_concurrent_station_predictions,
                     "Total Run time for Picker (s)": f"{end_time - start_time:.6f}",
                     "Trial Success": None, 
                     "Error Message": None  
