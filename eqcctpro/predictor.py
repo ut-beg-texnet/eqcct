@@ -966,7 +966,8 @@ def evaluate_system(eval_mode:str, intra_threads:int, inter_threads:int, input_d
         stations2use_list = generate_station_list(stations2use)
         
     if eval_mode == "cpu":
-        print(f"Evaluating System Parallelization Capability using CPUs\n")
+        statement = "Evaluating System Parallelization Capability using CPUs"
+        print(f"{statement}\n")
         remove_directory(output_dir) # Remove output dir before it begins for maximum cleaning
         csv_filepath = f"{csv_dir}/cpu_test_results.csv" # Define csv filepath for test results 
  
@@ -983,7 +984,7 @@ def evaluate_system(eval_mode:str, intra_threads:int, inter_threads:int, input_d
                 concurrent_predictions_list = generate_station_list(j) 
                 for k in concurrent_predictions_list: 
                     # Start a new process with CPU affinity
-                    print(f"\nTrial Number: {trial_num}")
+                    print(f"\nTrial Number: {trial_num}\n")
                     process = multiprocessing.Process(
                         target=run_prediction,
                         args=(input_dir, output_dir, log_filepath, P_threshold, 
@@ -1250,7 +1251,7 @@ class EQCCTMSeedRunner():
         self.tasks_picker = tasks
     
     
-    def timechunk_parallelization(self):
+    def timechunk_parallelization(self, ray_statement):
         # Tell user how many stations they are using 
         if self.specific_stations is None: 
             first_timechunk = sorted(os.listdir(self.input_dir))[0]
@@ -1258,6 +1259,12 @@ class EQCCTMSeedRunner():
             specific_stations_list = [d for d in os.listdir(station_dir) if os.path.isdir(os.path.join(station_dir, d))]
         else: 
             specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
+            if self.specific_stations is None: 
+             first_timechunk = sorted(os.listdir(self.input_dir))[0]
+             station_dir = os.path.join(self.input_dir, first_timechunk)
+             specific_stations_list = [d for d in os.listdir(station_dir) if os.path.isdir(os.path.join(station_dir, d))]
+            else: 
+                specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
         print(f"[{datetime.now()}] Using {len(specific_stations_list)} selected station(s).\n")
     
         
@@ -1282,10 +1289,11 @@ class EQCCTMSeedRunner():
         
         max_pending_tasks = self.number_of_concurrent_timechunk_predictions
         with open(self.log_filepath, mode="a+", buffering=1) as log: 
-            statement = f"[{datetime.now()}] Starting EQCCTPro parallelized waveform processing..."
+            statement = f"[{datetime.now()}] Starting EQCCTPro..."
             print(f"{statement}")
             print(f"[{datetime.now()}] Detailed subprocess information can be found in the log file.")
-            log.write(f"{statement}")
+            log.write(f"Starting EQCCTPro...\n-----------------------------\n")
+            log.write(f"{ray_statement}")
             for i in range(len(self.tasks_picker)):
                 mseed_timechunk_dir_name = self.tasks_picker[i][1]
                 timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
@@ -1295,7 +1303,7 @@ class EQCCTMSeedRunner():
                     if len(tasks_queue) < max_pending_tasks: 
                         tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                             P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                            number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
+                                            number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=self.cpu_id_list, use_gpu=self.use_gpu, 
                                             gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, specific_stations=specific_stations_list, 
                                             timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                             number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time))
@@ -1306,16 +1314,16 @@ class EQCCTMSeedRunner():
                         for finished_task in tasks_finished:
                             log_entry = ray.get(finished_task)
                             log_queue.put(log_entry)  # Add log entry to the queue
-                            #log.write(log_entry + "\n")
-                            #log.flush() 
+                            # log.write(log_entry + "\n")
+                            # log.flush() 
             # After adding all the tasks to queue, process what's left
             while tasks_queue:
                 tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                 for finished_task in tasks_finished:
                     log_entry = ray.get(finished_task)
                     log_queue.put(log_entry)  # Add log entry to the queue
-                    #log.write(log_entry + "\n")
-                    #log.flush()
+                    # log.write(log_entry + "\n")
+                    # log.flush()
             
             ray.shutdown()
             print(f"[{datetime.now()}] Ray Successfully Shutdown.")
@@ -1326,7 +1334,7 @@ class EQCCTMSeedRunner():
                 log.flush()
             
             # log.write("\n------- EQCCTPro: Parallel Processing Complete -------\n")
-            log.write("\n------- Sucessfully Picked All Waveform(s) from all Timechunk(s) -------\n")
+            log.write("\n------- Successfully Picked All Waveform(s) from all Timechunk(s) -------\n")
             log.write("\n------- END OF FILE -------\n")
             log.flush()
         
@@ -1345,15 +1353,17 @@ class EQCCTMSeedRunner():
         if self.use_gpu: 
             self.configure_gpu()
             ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using GPUs 
-            print(f"[{datetime.now()}] Ray Sucessfully Initialized with {self.selected_gpus} GPU(s) and {len(self.cpu_id_list)} CPU(s).")
-            self.timechunk_parallelization()
+            statement = f"[{datetime.now()}] Ray Successfully Initialized with {self.selected_gpus} GPU(s) and {len(self.cpu_id_list)} CPU(s)."
+            print(f"{statement}")
+            self.timechunk_parallelization(statement)
         else: 
         # CPU
             self.configure_cpu()
             ray.init(ignore_reinit_error=True, num_cpus=len(self.cpu_id_list), logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using CPUs
-            print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(self.cpu_id_list)} CPU(s).")
+            statement = f"[{datetime.now()}] Ray Successfully Initialized with {len(self.cpu_id_list)} CPU(s)."
+            print(f"{statement}")
             print(f"[{datetime.now()}] {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
-            self.timechunk_parallelization()
+            self.timechunk_parallelization(statement)
         print(f"[{datetime.now()}] Successfully picked all waveform(s) from all time chunk(s). Exiting...\n")
         
 
@@ -1501,8 +1511,11 @@ class EvaluateSystem():
         
     def evaluate_cpu(self): 
         """Evaluate system parallelization using CPUs"""
-        print(f"\nEvaluating System Parallelization Capability using CPUs\n")
-        
+        statement = "Evaluating System Parallelization Capability using CPU"
+        print(f"\n{statement}\n")
+        with open(self.log_filepath, "w") as f: 
+            f.write(f"\n{statement}\n")
+            f.close()
         
         self._prepare_environment() # Remove any preexisting outputs dir 
         os.makedirs(self.csv_dir, exist_ok=True)
@@ -1547,7 +1560,7 @@ class EvaluateSystem():
                 process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
                 
                 ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), logging_level=logging.FATAL, log_to_driver=False) 
-                print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(cpus_to_use)} CPU(s).")
+                print(f"[{datetime.now()}] Ray Successfully Initialized with {len(cpus_to_use)} CPU(s).")
                 
                 timechunks_list = []
                 timechunk = 1
@@ -1572,7 +1585,7 @@ class EvaluateSystem():
                             timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
                             max_pending_tasks = timechunks
                             
-                            log.write(f"Trial Number: {trial_num}")
+                            log.write(f"\nTrial Number: {trial_num}")
                             print(f"\n[{datetime.now()}] Trial Number: {trial_num}")
                             print(f"[{datetime.now()}] CPU(s): {i}")
                             print(f"[{datetime.now()}] Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
@@ -1626,7 +1639,7 @@ class EvaluateSystem():
                                 
                                 
                                 ray.shutdown() 
-                                print(f"[{datetime.now()}] Ray Sucessfully Shutdown.")
+                                print(f"[{datetime.now()}] Ray Successfully Shutdown.")
                                 
                          
                         
@@ -2146,10 +2159,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
     """ 
     # if use_gpu is False: 
     #     ray.init(ignore_reinit_error=True, num_cpus=ray_cpus, logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using CPUs
-    #     print(f"[{datetime.now()}] Ray Sucessfully Initialized with {ray_cpus} CPU(s).")
+    #     print(f"[{datetime.now()}] Ray Successfully Initialized with {ray_cpus} CPU(s).")
     # elif use_gpu is True: 
     #     ray.init(ignore_reinit_error=True, num_gpus=len(gpu_id), num_cpus=ray_cpus, logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using GPUs 
-    #     print(f"[{datetime.now()}] Ray Sucessfully Initialized with {len(gpu_id)} GPU(s) and {ray_cpus} CPU(s).")
+    #     print(f"[{datetime.now()}] Ray Successfully Initialized with {len(gpu_id)} GPU(s) and {ray_cpus} CPU(s).")
         
     args = {
     "input_dir": input_dir,
@@ -2169,12 +2182,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
     }
 
     log_messages = ""  # Accumulate log messages here
-    
+    log_messages += f"\n\n-----------------------------\nHardware Configuration...\n"
     try:
         process = psutil.Process(os.getpid())
         process.cpu_affinity(ray_cpus)  # ray_cpus should be a list of core IDs like [0, 1, 2]
 
-        log_messages += f"[{datetime.now()}] CPU affinity set to cores: {ray_cpus}\n"
+        log_messages += f"\n[{datetime.now()}] CPU affinity set to cores: {ray_cpus}\n"
     except Exception as e:
         log_messages += f"[{datetime.now()}] Failed to set CPU affinity. Reason: {e}\n"
 
@@ -2182,17 +2195,16 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # Ensure Output Dir exists 
     os.makedirs(output_dir, exist_ok=True)
     # Ensure logfile exists before continuing 
-    if not os.path.exists(log_file): 
+    if not os.path.exists(log_file):
         print(f"[{datetime.now()}] Log file not found. Creating log file...")
-        with open(log_file, "w") as f: 
-            f.write("")
-            print(f"[{datetime.now()}] Created Log file: {log_file}")
-    else: 
-        print(f"[{datetime.now()}] Log file already exists. Located at: '{log_file}'")
+        with open(log_file, "a") as log:
+            log.write(f"[{datetime.now()}] Created log file: {log_file}\n")
+    else:
+        with open(log_file, "a") as log:
+            log.write(f"\n[{datetime.now()}] Log file already exists. Located at: '{log_file}'\n")
         
-    with open(log_file, mode="w", buffering=1) as log:
+    with open(log_file, mode="a", buffering=1) as log:
         out_dir = os.path.join(os.getcwd(), str(args['output_dir']))    
-           
         try:
             if platform.system() == 'Windows':
                 station_list = [ev.split(".")[0] for ev in listdir(args['input_dir']) if ev.split("\\")[-1] != ".DS_Store"]
@@ -2202,9 +2214,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
             station_list = sorted(set(station_list))
         except Exception as exp:
             log_messages += f"{exp}\n"
-            return
+            return log_messages
         # log.write(f"[{datetime.now()}] GPU ID: {args['gpu_id']}; Batch size: {args['batch_size']}\n")
-        log_messages += f"\n-----------------------------\nEQCCTPro Data Preprocessing...\n"
+        log_messages += f"\n-----------------------------\nData Preprocessing for EQCCTPro...\n"
         log_messages += f"\n[{datetime.now()}] {len(station_list)} station(s) in {args['input_dir']}\n"
         
         
@@ -2215,7 +2227,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # Could be a bug if someone put None thinking that they would be able to run the whole directory in one go 
         if specific_stations is not None:  # For "One Use Run" Over a Given Set of Stations (Just Run EQCCTPro on specific_stations)
             station_list = [x for x in station_list if x in specific_stations]
-            log_messages += f"[{datetime.now()}] Using {len(station_list)} station(s) after selection.\n"
+            # log_messages += f"[{datetime.now()}] Using {len(station_list)} station(s) after selection.\n"
         # else Use all stations if specific_stations = None 
         log_messages += f"[{datetime.now()}] Using {len(station_list)} selected station(s).\n"
     
@@ -2232,7 +2244,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         max_pending_tasks = number_of_concurrent_station_predictions
         log_messages += f"[{datetime.now()}] Starting EQCCTPro parallelized waveform processing...\n"
         start_time = time.time() 
-        log_messages += f"\n-----------------------------\nBeginning Parallel Station Waveform Processing EQCCT...\n\n"
+        log_messages += f"\n-----------------------------\nAnalyzing Seismic Waveforms for P and S Picks via EQCCT...\n\n"
         starttime, endtime, time_delta = parse_time_range(timechunk_id)
         log_messages += f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)\n"
         log_messages += f"\n[{datetime.now()}] Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.\n"
@@ -2328,7 +2340,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Append the trial data directly to the CSV file
             df_trial.to_csv(test_csv_filepath, mode='a', index=False, header=not os.path.exists(test_csv_filepath))
             print(f"\n[{datetime.now()}] Successfully saved trial data to CSV at {test_csv_filepath}")
-            log_messages += f"\n[{datetime.now()}] Sucessfully ran EQCCTPro, exiting..."
+        log_messages += f"\n[{datetime.now()}] Successfully ran EQCCTPro, exiting..."
         return log_messages
 
 @ray.remote
