@@ -1513,9 +1513,6 @@ class EvaluateSystem():
         """Evaluate system parallelization using CPUs"""
         statement = "Evaluating System Parallelization Capability using CPU"
         print(f"\n{statement}\n")
-        with open(self.log_filepath, "w") as f: 
-            f.write(f"\n{statement}\n")
-            f.close()
         
         self._prepare_environment() # Remove any preexisting outputs dir 
         os.makedirs(self.csv_dir, exist_ok=True)
@@ -1526,6 +1523,7 @@ class EvaluateSystem():
             print(f"[{datetime.now()}] Log file not found. Creating log file...")
             with open(self.log_filepath, "w") as f: 
                 f.write("")
+                f.write(f"{statement}")
                 print(f"[{datetime.now()}] Log file: {self.log_filepath} created.")
         else: 
             print(f"[{datetime.now()}] Log file '{self.log_filepath}' already exists.")
