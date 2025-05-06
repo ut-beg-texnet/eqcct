@@ -93,20 +93,25 @@ For additional details and package updates, visit the **EQCCTPro PyPI page**:
 ### **Using Sample Waveform Data**
 To understand how **EQCCTPro** works, it is **highly recommended** to use provided sample seismic waveform data as the data source when testing the package. 
 
-Sample seismic waveform data from 50 TexNet stations have provided in the repository under `sample_1_minute_data.zip`. 
+1-minute long sample seismic waveforms from 229 TexNet stations have been provided in the repository under the `230_stations_1_min_dt.zip` file. 
 
 ### **Step 1: Unzip the Sample Wavefrom Data**
 After downloading the `.zip` file through the GitHub methods above, run:
 ```sh
-[skevofilaxc] unzip sample_1_minute_data.zip
+[skevofilaxc] unzip 230_stations_1_min_dt.zip
 ```
 ### **Step 2: Check and Understand the Directory Structure**
-The extracted data will contain multiple station directories:
+The extracted data will contain a timechunk subdirectories, comprised of multiple station directories:
 ```sh
-[skevofilaxc sample_1_minute_data]$ ls
-AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35  PB52  PH02  SM03  WB11
-BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
-BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
+[skevofilaxc 230_stations_1_min_dt]$ ls
+20241215T120000Z_20241215T120100Z
+[skevofilaxc 230_stations_1_min_dt]$ cd 20241215T120000Z_20241215T120100Z
+237B  BP01  CT02  DG02  DG10  EE04  EF07  EF54  EF63  EF69  EF77   FOAK3  FW06  FW14  HBVL  LWM2  MB05  MB12  MB19   MBBB3  MID03  NM01  OG02  PB05  PB11  PB19  PB26  PB34  PB41  PB51  PB57  PH03  SA06  SGCY  SN02  SN10  WB03  WB09  YK01
+435B  BRDY  CV01  DG04  DKNS  EF02  EF08  EF56  EF64  EF71  ELG6   FOAK4  FW07  FW15  HNDO  LWM3  MB06  MB13  MB21   MBBB5  MLDN   NM02  OG04  PB06  PB12  PB21  PB28  PB35  PB42  PB52  PB58  PL01  SA07  SM01  SN03  SNAG  WB04  WB10
+ALPN  BW01  CW01  DG05  DRIO  EF03  EF09  EF58  EF65  EF72  ET02   FW01   FW09  GV01  HP01  MB01  MB07  MB15  MB22   MBBB6  MNHN   NM03  OZNA  PB07  PB14  PB22  PB29  PB37  PB43  PB53  PB59  PLPT  SA09  SM02  SN04  TREL  WB05  WB11
+APMT  CF01  DB02  DG06  DRZT  EF04  EF51  EF59  EF66  EF74  FLRS   FW02   FW11  GV02  HP02  MB02  MB08  MB16  MB25   MG01   MO01   ODSA  PB01  PB08  PB16  PB23  PB30  PB38  PB44  PB54  PCOS  POST  SAND  SM03  SN07  VHRN  WB06  WB12
+AT01  CRHG  DB03  DG07  EE02  EF05  EF52  EF61  EF67  EF75  FOAK1  FW04   FW12  GV03  INDO  MB03  MB09  MB17  MBBB1  MID01  NGL01  OE01  PB03  PB09  PB17  PB24  PB32  PB39  PB46  PB55  PECS  SA02  SD01  SM04  SN08  VW01  WB07  WTFS
+BB01  CT01  DB04  DG09  EE03  EF06  EF53  EF62  EF68  EF76  FOAK2  FW05   FW13  GV04  LWM1  MB04  MB11  MB18  MBBB2  MID02  NGL02  OG01  PB04  PB10  PB18  PB25  PB33  PB40  PB47  PB56  PH02  SA04  SE01  SMWD  SN09  WB02  WB08  WW01
 ```
 Each subdirectory contains **mSEED** files of different waveform components:
 ```sh
@@ -142,14 +147,29 @@ To process mSEED from various seismic stations, use the **EQCCTMSeedRunner** cla
 **EQCCTMSeedRunner** enables users to process multiple mSEED from a given input directory, which consists of station directories formatted as follows:
 
 ```sh
-[skevofilaxc sample_1_minute_data]$ ls
-AT01  CF01  DG05  EF54  EF76   HBVL  MB09  MB21   MID02  ODSA  PB16  PB25  PB35  PB52  PH02  SM03  WB11
-BB01  CT02  DG09  EF63  FOAK4  HNDO  MB13  MB25   MID03  PB04  PB17  PB26  PB39  PB54  PL01  SMWD  WB12
-BP01  DB02  EF02  EF75  FW13   MB06  MB19  MID01  MO01   PB11  PB18  PB34  PB42  PECS  SM02  WB06
+[skevofilaxc 230_stations_1_min_dt]$ ls
+20241215T120000Z_20241215T120100Z
+[skevofilaxc 230_stations_1_min_dt]$ cd 20241215T120000Z_20241215T120100Z
+237B  BP01  CT02  DG02  DG10  EE04  EF07  EF54  EF63  EF69  EF77   FOAK3  FW06  FW14  HBVL  LWM2  MB05  MB12  MB19   MBBB3  MID03  NM01  OG02  PB05  PB11  PB19  PB26  PB34  PB41  PB51  PB57  PH03  SA06  SGCY  SN02  SN10  WB03  WB09  YK01
+435B  BRDY  CV01  DG04  DKNS  EF02  EF08  EF56  EF64  EF71  ELG6   FOAK4  FW07  FW15  HNDO  LWM3  MB06  MB13  MB21   MBBB5  MLDN   NM02  OG04  PB06  PB12  PB21  PB28  PB35  PB42  PB52  PB58  PL01  SA07  SM01  SN03  SNAG  WB04  WB10
+ALPN  BW01  CW01  DG05  DRIO  EF03  EF09  EF58  EF65  EF72  ET02   FW01   FW09  GV01  HP01  MB01  MB07  MB15  MB22   MBBB6  MNHN   NM03  OZNA  PB07  PB14  PB22  PB29  PB37  PB43  PB53  PB59  PLPT  SA09  SM02  SN04  TREL  WB05  WB11
+APMT  CF01  DB02  DG06  DRZT  EF04  EF51  EF59  EF66  EF74  FLRS   FW02   FW11  GV02  HP02  MB02  MB08  MB16  MB25   MG01   MO01   ODSA  PB01  PB08  PB16  PB23  PB30  PB38  PB44  PB54  PCOS  POST  SAND  SM03  SN07  VHRN  WB06  WB12
+AT01  CRHG  DB03  DG07  EE02  EF05  EF52  EF61  EF67  EF75  FOAK1  FW04   FW12  GV03  INDO  MB03  MB09  MB17  MBBB1  MID01  NGL01  OE01  PB03  PB09  PB17  PB24  PB32  PB39  PB46  PB55  PECS  SA02  SD01  SM04  SN08  VW01  WB07  WTFS
+BB01  CT01  DB04  DG09  EE03  EF06  EF53  EF62  EF68  EF76  FOAK2  FW05   FW13  GV04  LWM1  MB04  MB11  MB18  MBBB2  MID02  NGL02  OG01  PB04  PB10  PB18  PB25  PB33  PB40  PB47  PB56  PH02  SA04  SE01  SMWD  SN09  WB02  WB08  WW01
 ```
-Where each subdirectory is named after station code. If you wish to use create your own input directory with custom waveform mSEED files, **please follow the above naming convention.** Otherwise, EQCCTPro will **not** work. 
+Where each subdirectory is named after station code. If you wish to use create your own input directory with custom waveform mSEED files, **please follow the above naming conventions.** Otherwise, EQCCTPro will **not** work. 
+Create subdirectories for each timechunk (sub-parent directories) and for each station (child directories). The station directories should be named as shown above.
+Each timechunk directory spans from the **start of the analysis period minus the waveform overlap** to the **end of the analysis period**, based on the defined timechunk duration.
 
-Within each subdirectory, such as PB35, it is made up of mSEED files of different poses (EX. N, E, Z): 
+For example: 
+```sh
+[skevofilaxc 230_stations_2hr_1_hr_dt]$ ls
+20241215T115800Z_20241215T130000Z  20241215T125800Z_20241215T140000Z
+```
+The timechunk time length is 1 hour long. At the same time, we use a waveform overlap of 2 minutes. Hence: `20241215T115800Z_20241215T130000Z` spans from `11:58:00 to 13:00:00 UTC on Dec 15, 2024` and `20241215T125800Z_20241215T140000Z` spans from `12:58:00 to 14:00:00 UTC on Dec 15, 2024`
+
+
+Each station subdirectory, such as PB35, are made up of mSEED files from seismometer different poses (EX. N, E, Z): 
 ```sh
 [skevofilaxc PB35]$ ls
 TX.PB35.00.HH1__20241215T115800Z__20241215T120100Z.mseed  TX.PB35.00.HHZ__20241215T115800Z__20241215T120100Z.mseed
@@ -204,7 +224,7 @@ eqcct_runner.run_eqcctpro()
     - "I want this program to run only on these specific cores." 
 - **`input_dir (str)`**
   - Directory path to the the mSEED directory
-  - EX. `/home/skevofilaxc/my_work_directory/eqcct/eqcctpro/sample_1_minute_data`
+  - EX. `/home/skevofilaxc/my_work_directory/eqcct/eqcctpro/230_stations_1_min_dt`
 - **`output_dir (str)`**
   - Directory path to where the output picks and logs will be sent 
   - Doesn't need to exist, will be created if doesn't exist 
@@ -243,7 +263,7 @@ eqcct_runner.run_eqcctpro()
   - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to **OutOfMemoryError**
 - **`specific_stations (str)`: default = None**
   - String that contains the "list" of stations you want to only analyze 
-  - EX. Out of the 50 sample stations in `sample_1_minute_data`, if I only want to analyze AT01, BP01, DG05, then specific_stations='AT01, BP01, DG05'. 
+  - EX. Out of the 50 sample stations in `230_stations_1_min_dt`, if I only want to analyze AT01, BP01, DG05, then specific_stations='AT01, BP01, DG05'. 
   - Removes the need to move station directories around to be used as input, can contain all stations in one directory for access
 - **`start_time (str)`: default = None** 
   - The start time of the area of time that is being analyzed 
@@ -339,7 +359,7 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - Controls how many inter-parallelism threads Tensorflow can use 
 - **`input_dir (str)`**
   - Directory path to the the mSEED directory
-  - EX. /home/skevofilaxc/my_work_directory/eqcct/eqcctpro/sample_1_minute_data
+  - EX. /home/skevofilaxc/my_work_directory/eqcct/eqcctpro/230_stations_1_min_dt
 - **`output_dir (str)`**
   - Directory path to where the output picks and logs will be sent 
   - Doesn't need to exist, will be created if doesn't exist 
