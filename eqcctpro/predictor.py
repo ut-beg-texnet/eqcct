@@ -2180,7 +2180,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     }
 
     log_messages = ""  # Accumulate log messages here
-    log_messages += f"\n\n-----------------------------\nHardware Configuration...\n"
+    log_messages += f"\n-----------------------------\nHardware Configuration...\n"
     try:
         process = psutil.Process(os.getpid())
         process.cpu_affinity(ray_cpus)  # ray_cpus should be a list of core IDs like [0, 1, 2]
