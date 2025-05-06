@@ -250,11 +250,13 @@ eqcct_runner.run_eqcctpro()
   - EX. 2024-12-14 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
   - Used to create a list of defined timechunks from the defined analysis timeframe 
+  - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`end_time (str)`: default = None** 
   - The end time of the area of time that is being analyzed 
   - EX. 2024-12-15 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
   - Used to create a list of defined timechunks from the defined analysis timeframe 
+  - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`timechunk_dt (int)`: default = None** 
   - The length each time chunk is (in minutes)
   - EX. timechunk_dt = 10 and the analysis period is 30 minutes, then three 10-minute long timechunks will be created 
@@ -388,19 +390,21 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - The start time of the area of time that is being analyzed 
   - EX. 2024-12-14 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
-  - Used to create a list of defined timechunks from the defined analysis timeframe 
+  - Used to create a list of defined timechunks from the defined analysis timeframe
+  - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`end_time (str)`: default = None** 
   - The end time of the area of time that is being analyzed 
   - EX. 2024-12-15 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
   - Used to create a list of defined timechunks from the defined analysis timeframe 
+  - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`conc_timechunk_tasks_step_size (int)`: default = 1** 
   - Is the concurrent timechunk predictions step size you want each trial iteration to iterate with 
 - **`timechunk_dt (int)`: default = None** 
   - The length each time chunk is (in minutes)
   - EX. timechunk_dt = 10 and the analysis period is 30 minutes, then three 10-minute long timechunks will be created 
 - **`waveform_overlap (int)`: default = None** 
-  - The duration (in minutes) for which each waveform overlaps with the others
+  - The duration (in minutes) for which each waveform oself.start_timeverlaps with the others
 - **`tmp_dir (str)`: default = 1** 
   - A temporary directory to store all temp files produced by EQCCTPro
   - Used to help ease system cleanup and to not write to system's default temporary directory 

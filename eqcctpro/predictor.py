@@ -1225,6 +1225,8 @@ class EQCCTMSeedRunner():
         process.join()  # Wait for the process to complete
     
     def chunk_time(self):
+        # Creates the timechunks, EI. from X specific time to Y specific time to generate the dt tasks (timechunk tasks that are run in parallel first at the top level)
+        # EX. [[UTCDateTime(2024, 12, 15, 11, 58), UTCDateTime(2024, 12, 15, 13, 0)], [UTCDateTime(2024, 12, 15, 12, 58), UTCDateTime(2024, 12, 15, 14, 0)]]
         from obspy import UTCDateTime
         starttime = UTCDateTime(self.start_time) - (self.waveform_overlap * 60)
         endtime = UTCDateTime(self.end_time)
@@ -1249,9 +1251,13 @@ class EQCCTMSeedRunner():
     
     
     def timechunk_parallelization(self):
-        
         # Tell user how many stations they are using 
-        specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
+        if self.specific_stations is None: 
+            first_timechunk = sorted(os.listdir(self.input_dir))[0]
+            station_dir = os.path.join(self.input_dir, first_timechunk)
+            specific_stations_list = [d for d in os.listdir(station_dir) if os.path.isdir(os.path.join(station_dir, d))]
+        else: 
+            specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
         print(f"[{datetime.now()}] Using {len(specific_stations_list)} selected station(s).\n")
     
         
