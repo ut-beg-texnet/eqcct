@@ -1587,7 +1587,7 @@ class EvaluateSystem():
                             print(f"\n[{datetime.now()}] Trial Number: {trial_num}")
                             print(f"[{datetime.now()}] CPU(s): {i}")
                             print(f"[{datetime.now()}] Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
-                            print(f"[{datetime.now()}] Conc. Station Being Processed: {num_concurrent_predictions} / Total Amount of Stations to be Processed in Current Trial: {num_stations} / Total Stations: {max(self.stations2use_list)}") 
+                            print(f"[{datetime.now()}] Total Amount of Stations to be Processed in Current Trial: {num_stations} / Number of Stations Being Processed Concurrently: {num_concurrent_predictions} / Total Overall Trial Station Count: {max(self.stations2use_list)}") 
                             
                             # Concurrent Timechunks
                             tasks_queue = []
