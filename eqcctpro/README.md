@@ -269,13 +269,15 @@ eqcct_runner.run_eqcctpro()
   - The start time of the area of time that is being analyzed 
   - EX. 2024-12-14 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
-  - Used to create a list of defined timechunks from the defined analysis timeframe 
+  - Used to create a list of defined timechunks from the defined analysis timeframe
+  - Must be the exact start time of the analysis time period (does not include the prior waveform overlap time IE. 2024-12-15 11:58:00 for a 2 minute waveform overlap time) 
   - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`end_time (str)`: default = None** 
   - The end time of the area of time that is being analyzed 
   - EX. 2024-12-15 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
   - Used to create a list of defined timechunks from the defined analysis timeframe 
+  - Must be the exact end time of the analysis time period
   - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`timechunk_dt (int)`: default = None** 
   - The length each time chunk is (in minutes)
@@ -411,12 +413,14 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - EX. 2024-12-14 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
   - Used to create a list of defined timechunks from the defined analysis timeframe
+  - Must be the exact start time of the analysis time period (does not include the prior waveform overlap time IE. 2024-12-15 11:58:00 for a 2 minute waveform overlap time)
   - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`end_time (str)`: default = None** 
   - The end time of the area of time that is being analyzed 
   - EX. 2024-12-15 12:00:00
   - Must follow the following convention YYYY-MO-DA HR:MI:SC
   - Used to create a list of defined timechunks from the defined analysis timeframe 
+  - Must be the exact end time of the analysis time period
   - Also used in the EvaluateSystem() class to help users note the analysis timeframe in the results CSV file for future result review
 - **`conc_timechunk_tasks_step_size (int)`: default = 1** 
   - Is the concurrent timechunk predictions step size you want each trial iteration to iterate with 
