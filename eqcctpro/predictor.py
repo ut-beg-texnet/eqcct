@@ -1523,7 +1523,7 @@ class EvaluateSystem():
             print(f"[{datetime.now()}] Log file not found. Creating log file...")
             with open(self.log_filepath, "w") as f: 
                 f.write("")
-                f.write(f"{statement}")
+                f.write(f"{statement}\n-----------------------------\n")
                 print(f"[{datetime.now()}] Log file: {self.log_filepath} created.")
         else: 
             print(f"[{datetime.now()}] Log file '{self.log_filepath}' already exists.")
