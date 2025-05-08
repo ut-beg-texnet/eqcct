@@ -1549,7 +1549,7 @@ class EvaluateSystem():
             # In which the rest of the code is dependent on the len for generating cpu_count 
             print(f"CPU ID List provided has less CPUs than the minimum requested ({len(self.cpu_id_list)} vs. {self.min_cpu_amount}). Exiting...")
             quit()
-            
+        
         with open(self.log_filepath, mode="a+", buffering=1) as log: 
             for i in range(self.min_cpu_amount, self.cpu_count+1, self.cpu_test_step_size):
                 # Set CPU affinity and initialize Ray
@@ -1576,9 +1576,17 @@ class EvaluateSystem():
                 # unchangable after being set, cannot have duplicates and is unordered
                 timechunks_list = sorted(list(set(timechunks_list))) 
                 for timechunks in timechunks_list:
+                    tested_concurrency = set() # Rest for each cpu / timechunk
                     for num_stations in self.stations2use_list: 
                         concurrent_predictions_list = generate_station_list(self.min_conc_stations, num_stations, self.conc_station_tasks_step_size)
-                        for num_concurrent_predictions in concurrent_predictions_list:           
+                        
+                        # We do this so that we don't repeat concurrent prediction tests 
+                        # Because a number of concurrent predictions running can be equivilated to the number of total stations that need to be processed
+                        # There is no need to duplicate more tests that will be doing the same amount of concurrent testing for a different number of total stations
+                        new_concurrent_values = [x for x in concurrent_predictions_list if x not in tested_concurrency and x <= num_stations]
+                        if not new_concurrent_values:
+                            continue  # All concurrency values already tested
+                        for num_concurrent_predictions in new_concurrent_values:           
                             mseed_timechunk_dir_name = self.tasks_picker[timechunks-1][1]
                             timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
                             max_pending_tasks = timechunks
@@ -1638,6 +1646,7 @@ class EvaluateSystem():
                                 
                                 ray.shutdown() 
                                 print(f"[{datetime.now()}] Ray Successfully Shutdown.")
+                        tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
                                 
                          
                         
