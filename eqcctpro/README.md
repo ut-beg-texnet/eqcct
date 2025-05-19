@@ -504,5 +504,5 @@ The `environment.yml` file specifies the dependencies required to run EQCCTPro. 
 EQCCTPro is provided under an open-source license. See LICENSE for details.
 
 ## **Contact**
-For inquiries or issues, please contact cgs2528@eid.utexas.edu or victor.salles@beg.utexas.edu.
+For inquiries or issues, please contact constantinos.skevofilax@austin.utexas.edu or victor.salles@beg.utexas.edu.
 
