@@ -26,9 +26,9 @@ This method installs only the EQCCTPro package **without** the sample waveform d
 EQCCTPro **requires Python 3.10.14 or higher as well as minimum Tensorflow packages**. If you have a clean working environment, you can simply run `pip install eqcctpro`. However, if you have a nonclean environment, its highly recommended to create a new conda environment so that you can install the necessary packages safely with no issues. You can create a new conda environment with the correct Python version by using the following commands:
 
 ```sh
-[skevofilaxc] conda create --name yourenvironemntname python=3.10.14 -y
-[skevofilaxc] conda activate yourenvironemntname 
-[skevofilaxc] python3 --version
+conda create --name yourenvironemntname python=3.10.14 -y
+conda activate yourenvironemntname 
+python3 --version
 ```
 Expected output:
 ```
@@ -37,7 +37,7 @@ Python 3.10.14
 
 After activating your new conda environment, run the following command:  
 ```sh
-[skevofilaxc] pip install eqcctpro
+pip install eqcctpro
 ```
 You will have access to EQCCTPro and its functionality. However you will not have immediate access to the provided sample waveform data to use for testing. Youcan pull the waveform data either by downloading the .zip file from the repository or by following step 3. 
 
@@ -45,11 +45,11 @@ You will have access to EQCCTPro and its functionality. However you will not hav
 Although not required, **it is highly recommended** to pull the `EQCCTPro` folder to gain access to sample waveform data for testing.
 
 ```sh
-[skevofilaxc] mkdir my_work_directory
-[skevofilaxc] cd my_work_directory
-[skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
-[skevofilaxc] cd eqcct
-[skevofilaxc] git sparse-checkout set eqcctpro
+mkdir my_work_directory
+cd my_work_directory
+git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+cd eqcct
+git sparse-checkout set eqcctpro
 ```
 
 ---
@@ -59,25 +59,25 @@ This method sets up EQCCTPro **with a pre-created conda environment and sample w
 
 ### **Step 1: Clone the EQCCTPro Repository**
 ```sh
-[skevofilaxc] mkdir my_work_directory
-[skevofilaxc] cd my_work_directory
-[skevofilaxc] git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
-[skevofilaxc] cd eqcct
-[skevofilaxc] git sparse-checkout set eqcctpro
+mkdir my_work_directory
+cd my_work_directory
+git clone --depth 1 --filter=tree:0 https://github.com/ut-beg-texnet/eqcct.git --sparse
+cd eqcct
+git sparse-checkout set eqcctpro
 ```
 
 ### **Step 2: Create and Activate the Conda Environment**
 A **pre-configured conda environment** is included in the repository to handle all dependencies.
 
 ```sh
-[skevofilaxc] conda env create -f environment.yml
-[skevofilaxc] conda activate eqcctpro
+conda env create -f environment.yml
+conda activate eqcctpro
 ```
 
 ### **Step 3: Install EQCCTPro**
 After activating the environment, install the EQCCTPro package:
 ```sh
-[skevofilaxc] pip install eqcctpro
+pip install eqcctpro
 ```
 
 This will install any remaining dependencies needed for **EQCCTPro**.
@@ -98,7 +98,7 @@ To understand how **EQCCTPro** works, it is **highly recommended** to use provid
 ### **Step 1: Unzip the Sample Wavefrom Data**
 After downloading the `.zip` file through the GitHub methods above, run:
 ```sh
-[skevofilaxc] unzip 230_stations_1_min_dt.zip
+unzip 230_stations_1_min_dt.zip
 ```
 ### **Step 2: Check and Understand the Directory Structure**
 The extracted data will contain a timechunk subdirectories, comprised of multiple station directories:
