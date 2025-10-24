@@ -352,7 +352,7 @@ the trial data will be available and can be used to identify the optimal input p
 
 The following input parameters need to be configurated for **EvaluateSystem** to evaluate your system based on your desired utilization of EQCCTPro: 
 
-- **`mode (str)`**
+- **`eval_mode (str)`**
   - Can be either `cpu` or `gpu`
   - Tells `EvaluateSystem` which computing approach the trials should it iterate with
 - **`intra_threads (int)`: default = 1**

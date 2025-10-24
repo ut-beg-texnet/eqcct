@@ -1401,7 +1401,7 @@ class EvaluateSystem():
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
-            raise ValueError(f"Invalid mode '{mode}'. Choose either 'cpu' or 'gpu'.")
+            raise ValueError(f"Invalid mode '{eval_mode}'. Choose either 'cpu' or 'gpu'.")
             exit()
         
         self.eval_mode = eval_mode.lower()

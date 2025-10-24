@@ -1,68 +1,67 @@
 
 import os 
 from eqcctpro import EQCCTMSeedRunner, EvaluateSystem, OptimalCPUConfigurationFinder, OptimalGPUConfigurationFinder
-input_mseed_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/230_stations_1_min_dt'   
-output_pick_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs'
-log_file_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs/eqcctpro.log'
-csv_filepath = '/home/skevofilaxc/workspace/eqcct/eqcctpro/csv'
-tmp_dir = '/home/skevofilaxc/tmp'
+input_mseed_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/230_stations_1_min_dt' # Change to local path 
+output_pick_directory_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs' # Change
+log_file_path = '/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs/eqcctpro.log' # Change
+csv_filepath = '/home/skevofilaxc/workspace/eqcct/eqcctpro/csv' # Change
+tmp_dir = '/home/skevofilaxc/tmp' # Change
 
-# Can run EQCCT on a given input dir on GPU or CPU 
-# Can also specify the number of stations you want to use as well  
+# EQCCTPro can run EQCCT on a given input dir on either your GPU or CPU     
+eqcct_runner = EQCCTMSeedRunner(use_gpu=False, # Defines if you use the GPU to run EQCCTMSeedRunner (bool)
+                intra_threads=1, # Defines the number of intra-parallelism threads (int)
+                inter_threads=1, # Defines the number of inter-parallelism threads (int)
+                cpu_id_list=range(77,128), # Defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process (list)
+                input_dir=input_mseed_directory_path, # Directory path to the the mSEED directory (str)
+                output_dir=output_pick_directory_path, # Directory path to where the output picks and logs will be sent (str)
+                log_filepath=log_file_path, # Filepath to where the EQCCTPro log will be written to and stored (str)
+                P_threshold=0.001, # Threshold in which the P probabilities above it will be considered as P arrival (float)
+                S_threshold=0.02, # Threshold in which the S probabilities above it will be considered as S arrival (float)
+                p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', # Filepath to where the P EQCCT detection model is stored (str)
+                s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5', # Filepath to where the S EQCCT detection model is stored (str)
+                number_of_concurrent_station_predictions=100, # Number of stations that are being analyzed by EQCCT in parallel (int)
+                number_of_concurrent_timechunk_predictions=1, # Number of timechunks that are being analyzed by EQCCT in parallel (int)
+                best_usecase_config=False, # If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall use-case configurations (bool)
+                csv_dir=csv_filepath, # Directory path containing the CSV's outputted by EvaluateSystem that contain the trial data that will be used to find the best_usecase_config (str)
+                selected_gpus=[0], # List of GPU IDs on your computer you want to use if use_gpu = True (list)
+                set_vram_mb=24750, # Value of the maximum amount of VRAM EQCCTPro can use (float)
+                start_time='2024-12-15 12:00:00', # The start time of the area of time that is being analyzed | Must follow the following convention YYYY-MO-DA HR:MI:SC (str)
+                end_time='2024-12-15 12:01:00', # The end time of the area of time that is being analyzed | Must follow the following convention YYYY-MO-DA HR:MI:SC (str)
+                timechunk_dt=1, # The length each time chunk is (in minutes) (int)
+                waveform_overlap=0, # The duration (in minutes) for which each waveform overlaps with the others (int)
+                specific_stations='AT01, BP01, DG05') # String that contains the "list" of stations you want to only analyze (str)
 
-eqcct_runner = EQCCTMSeedRunner(use_gpu=False, 
-                intra_threads=1, 
-                inter_threads=1, 
-                cpu_id_list=range(77,128),
-                input_dir=input_mseed_directory_path, 
-                output_dir=output_pick_directory_path, 
-                log_filepath=log_file_path, 
-                P_threshold=0.001, 
-                S_threshold=0.02, 
-                p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', 
-                s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5', 
-                number_of_concurrent_station_predictions=100,
-                number_of_concurrent_timechunk_predictions=1,
-                best_usecase_config=False,
-                csv_dir=csv_filepath,
-                selected_gpus=[0],
-                set_vram_mb=24750,
-                start_time='2024-12-15 12:00:00',
-                end_time='2024-12-15 12:01:00',
-                timechunk_dt=1, 
-                waveform_overlap=0,
-                specific_stations='AT01, BP01, DG05')
+eqcct_runner.run_eqcctpro() # Runs EQCCTPro on one instance of waveform data  
 
-eqcct_runner.run_eqcctpro()
+# We can also evaluate your systems hardware capabilities for running several waveforms in parallel to see what configuration of resources enables real-time processing 
+eval_cpu = EvaluateSystem(
+                eval_mode='cpu', # Tells EvaluateSystem which computing approach the trials should it iterate with, either 'cpu' or 'gpu' (str)
+                intra_threads=1, # Defines the number of intra-parallelism threads (int)
+                inter_threads=1, # Defines the number of inter-parallelism threads (int)
+                input_dir=input_mseed_directory_path, # Directory path to the the mSEED directory (str)
+                output_dir=output_pick_directory_path, # Directory path to where the output picks and logs will be sent (str)
+                log_filepath=log_file_path, # Filepath to where the EQCCTPro log will be written to and stored (str)
+                csv_dir=csv_filepath, # Directory path where the CSV's outputted by EvaluateSystem will be saved, doesn't need to exist, will be created if doesn't exist (str)
+                P_threshold=0.001,  # Threshold in which the P probabilities above it will be considered as P arrival (float)
+                S_threshold=0.02,   # Threshold in which the S probabilities above it will be considered as S arrival (float)
+                p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', # Filepath to where the P EQCCT detection model is stored (str)
+                s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5', # Filepath to where the S EQCCT detection model is stored (str)
+                cpu_id_list=range(77,128), # Defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process and is the maximum amount of cores EvaluteSystem can use in its trial iterations (list)
+                min_cpu_amount=20, # Is the minimum amount of CPUs you want to start your trials with (int)
+                cpu_test_step_size=5, # Is the desired step size for the trials will march from min_cpu_amount to len(cpu_id_list) (int)
+                stations2use=50, # Controls the maximum amount of stations EvaluateSystem can use in its trial iterations (int)
+                starting_amount_of_stations=10, # For evaluating your system, you have the option to set a starting amount of stations you want to use in the test (default=1, int)
+                station_list_step_size=1, # Set a step size for the station list that is generated (default stepsize of 1 for stations 1-10, then stepsize of 5 up to stations2use) (int)
+                min_conc_stations=1, # Is the minimum amount of concurrent stations predictions you want each trial iteration to start with (int) | By default, if min_conc_predictions and conc_predictions_step_size are set to 1, a custom step size iteration will be applied (README)
+                conc_station_tasks_step_size=5, # Is the concurrent station predictions step size you want each trial iteration to iterate with (int)
+                start_time='2024-12-15 12:00:00', # The start time of the area of time that is being analyzed | Must follow the following convention YYYY-MO-DA HR:MI:SC (str)
+                end_time='2024-12-15 12:01:00', # The end time of the area of time that is being analyzed | Must follow the following convention YYYY-MO-DA HR:MI:SC (str)
+                conc_timechunk_tasks_step_size=1, # Is the concurrent timechunk predictions step size you want each trial iteration to iterate with
+                timechunk_dt=1, # The length each time chunk is (in minutes) (int)
+                waveform_overlap=0, # The duration (in minutes) for which each waveform overlaps with the others (int)
+                tmp_dir=tmp_dir) # A temporary directory to store all temp files produced by EQCCTPro (str) | Used to help ease system cleanup and to not write to system's default temporary directory
 
-
-eval_cpu = EvaluateSystem('cpu',
-                intra_threads=1,
-                inter_threads=1,
-                input_dir=input_mseed_directory_path, 
-                output_dir=output_pick_directory_path, 
-                log_filepath=log_file_path,
-                csv_dir=csv_filepath,
-                P_threshold=0.001, 
-                S_threshold=0.02, 
-                p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', 
-                s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
-                cpu_id_list=range(77,128),
-                min_cpu_amount=20,
-                cpu_test_step_size=5, 
-                stations2use=225,
-                starting_amount_of_stations=100, 
-                station_list_step_size=5,
-                min_conc_stations=75,
-                conc_station_tasks_step_size=5,
-                start_time='2024-12-15 12:00:00',
-                end_time='2024-12-15 12:01:00',
-                conc_timechunk_tasks_step_size=4,
-                timechunk_dt=1, 
-                waveform_overlap=0,
-                tmp_dir=tmp_dir)
-
-eval_cpu.evaluate()  # This triggers evaluate_cpu() if mode is 'cpu'
+eval_cpu.evaluate()  # This triggers evaluate_cpu() with cpu mode
 
 cpu_finder = OptimalCPUConfigurationFinder(csv_filepath)
 best_cpu_config = cpu_finder.find_best_overall_usecase()
@@ -72,6 +71,37 @@ print(best_cpu_config)
 optimal_cpu_config = cpu_finder.find_optimal_for(cpu=5, station_count=1)
 print(optimal_cpu_config)
 
+
+# eval_gpu = EvaluateSystem(
+#                 eval_mode='gpu', # Tells EvaluateSystem which computing approach the trials should it iterate with, either 'cpu' or 'gpu' (str)
+#                 intra_threads=1, # Defines the number of intra-parallelism threads (int)
+#                 inter_threads=1, # Defines the number of inter-parallelism threads (int)
+#                 input_dir=input_mseed_directory_path, # Directory path to the the mSEED directory (str)
+#                 output_dir=output_pick_directory_path, # Directory path to where the output picks and logs will be sent (str)
+#                 log_filepath=log_file_path, # Filepath to where the EQCCTPro log will be written to and stored (str)
+#                 csv_dir=csv_filepath, # Directory path where the CSV's outputted by EvaluateSystem will be saved, doesn't need to exist, will be created if doesn't exist (str)
+#                 P_threshold=0.001,  # Threshold in which the P probabilities above it will be considered as P arrival (float)
+#                 S_threshold=0.02,   # Threshold in which the S probabilities above it will be considered as S arrival (float)
+#                 p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5', # Filepath to where the P EQCCT detection model is stored (str)
+#                 s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5', # Filepath to where the S EQCCT detection model is stored (str)
+#                 cpu_id_list=range(77,128), # Defines which specific CPU cores that sched_setaffinity will allocate for executing the current EQCCTPro process and is the maximum amount of cores EvaluteSystem can use in its trial iterations (list)
+#                 min_cpu_amount=20, # Is the minimum amount of CPUs you want to start your trials with (int)
+#                 cpu_test_step_size=5, # Is the desired step size for the trials will march from min_cpu_amount to len(cpu_id_list) (int)
+#                 stations2use=50, # Controls the maximum amount of stations EvaluateSystem can use in its trial iterations (int)
+#                 starting_amount_of_stations=10, # For evaluating your system, you have the option to set a starting amount of stations you want to use in the test (default=1, int)
+#                 station_list_step_size=1, # Set a step size for the station list that is generated (default stepsize of 1 for stations 1-10, then stepsize of 5 up to stations2use) (int)
+#                 min_conc_stations=1, # Is the minimum amount of concurrent stations predictions you want each trial iteration to start with (int) | By default, if min_conc_predictions and conc_predictions_step_size are set to 1, a custom step size iteration will be applied (README)
+#                 conc_station_tasks_step_size=5, # Is the concurrent station predictions step size you want each trial iteration to iterate with (int)
+#                 start_time='2024-12-15 12:00:00', # The start time of the area of time that is being analyzed | Must follow the following convention YYYY-MO-DA HR:MI:SC (str)
+#                 end_time='2024-12-15 12:01:00', # The end time of the area of time that is being analyzed | Must follow the following convention YYYY-MO-DA HR:MI:SC (str)
+#                 conc_timechunk_tasks_step_size=1, # Is the concurrent timechunk predictions step size you want each trial iteration to iterate with
+#                 timechunk_dt=1, # The length each time chunk is (in minutes) (int)
+#                 waveform_overlap=0, # The duration (in minutes) for which each waveform overlaps with the others (int)
+#                 tmp_dir=tmp_dir, # A temporary directory to store all temp files produced by EQCCTPro (str) | Used to help ease system cleanup and to not write to system's default temporary directory
+#                 set_vram_mb=45000, # Value of the maximum amount of VRAM EQCCTPro can use (float) | Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError
+#                 selected_gpus=[0]) # List of GPU IDs on your computer you want to use (list) | Non-existing GPU IDs will cause the code to exit
+
+# eval_gpu.evaluate()  # This triggers evaluate_gpu() with gpu mode
 
 # gpu_finder = OptimalGPUConfigurationFinder(csv_filepath)
 # best_gpu_config = gpu_finder.find_best_overall_usecase()
