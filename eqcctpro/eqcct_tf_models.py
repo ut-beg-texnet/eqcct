@@ -137,97 +137,80 @@ class StochasticDepth(tf.keras.layers.Layer):
     
 
 class PreLoadGeneratorTest(tf.keras.utils.Sequence):
-    
-    """ 
-    
-    Keras generator with preprocessing. For testing. Pre-load version.
-    
-    Parameters
-    ----------
-    list_IDsx: str
-        List of trace names.
-            
-    file_name: str
-        Path to the input hdf5 file.
-            
-    dim: tuple
-        Dimension of input traces. 
-           
-    batch_size: int, default=32.
-        Batch size.
-            
-    n_channels: int, default=3.
-        Number of channels.
-            
-    norm_mode: str, default=max
-        The mode of normalization, 'max' or 'std'                
-            
-    Returns
-    --------        
-    Batches of two dictionaries: {'input': X}: pre-processed waveform as input {'picker_P': y2, 'picker_S': y3}: outputs including two separate numpy arrays as labels for P, and S respectively.
-    
-    
-    """
+    def __init__(self, list_IDs, inp_data, batch_size=32, norm_mode='std',
+                 dim=None, n_channels=None, dtype=np.float32, **kwargs):
+        self.batch_size  = int(batch_size)
+        self.list_IDs    = list_IDs
+        self.inp_data    = inp_data
+        self.norm_mode   = norm_mode
+        self.dtype       = dtype
 
-    def __init__(self, list_IDs, inp_data, batch_size=32, norm_mode='std', **kwargs):
-        'Initialization'
-        self.batch_size = batch_size
-        self.list_IDs = list_IDs
-        self.inp_data = inp_data        
+        # Infer input shape if not provided
+        sample = np.array(next(iter(self.inp_data.values())))
+        if dim is None or n_channels is None:
+            if sample.ndim == 2:
+                # Expect (T, C) like (6000, 3)
+                self.dim = (int(sample.shape[0]),)
+                self.n_channels = int(sample.shape[1])
+            elif sample.ndim == 1:
+                # Fallback to (T, 1)
+                self.dim = (int(sample.shape[0]),)
+                self.n_channels = 1
+            else:
+                raise ValueError(f"Unsupported sample shape: {sample.shape}")
+        else:
+            self.dim = tuple(dim)
+            self.n_channels = int(n_channels)
+
         self.on_epoch_end()
-        self.norm_mode = norm_mode
-        
+
     def __len__(self):
-        'Denotes the number of batches per epoch'
-        try:
-            return int(np.ceil(len(self.list_IDs) / self.batch_size))
-        except ZeroDivisionError:
-            print("Your data duration in mseed file is too short! Try either longer files or reducing batch_size. ")
+        return int(np.ceil(len(self.list_IDs) / self.batch_size))
 
     def __getitem__(self, index):
-        'Generate one batch of data'
         start_idx = index * self.batch_size
-        end_idx = min((index + 1) * self.batch_size, len(self.list_IDs))
-        indexes = self.indexes[start_idx:end_idx]
-
+        end_idx   = min((index + 1) * self.batch_size, len(self.list_IDs))
+        indexes   = self.indexes[start_idx:end_idx]
         list_IDs_temp = [self.list_IDs[k] for k in indexes]
+
         X = self.__data_generation(list_IDs_temp)
 
-        # Handle case where the batch is not full
-        if len(list_IDs_temp) < self.batch_size:
-            X = X[:len(list_IDs_temp)]
-
-        return {'input': X}
+        # Keras tolerates a short last batch; we already sized X to the true count.
+        return {'input': X.astype(self.dtype, copy=False)}
 
     def on_epoch_end(self):
-        'Updates indexes after each epoch'
         self.indexes = np.arange(len(self.list_IDs))
-    
+
+    def __data_generation(self, list_IDs_temp):
+        batch_count = len(list_IDs_temp)
+        X = np.empty((batch_count, self.dim[0], self.n_channels), dtype=self.dtype)
+
+        for i, ID in enumerate(list_IDs_temp):
+            # Use the correct storage and make a writable float32 copy
+            data = np.array(self.inp_data[ID], dtype=self.dtype, copy=True)
+
+            data = self._normalize(data, self.norm_mode)
+            # Ensure (T, C) layout
+            if data.ndim == 1:
+                data = data[:, None]
+            if data.shape != (self.dim[0], self.n_channels):
+                raise ValueError(f"Sample {ID} has shape {data.shape}, expected {(self.dim[0], self.n_channels)}")
+            X[i] = data
+
+        return X
+
     def _normalize(self, data, mode='max'):
-        data -= np.mean(data, axis=0, keepdims=True)
+        # Out-of-place ops to be safe even if upstream hands us a read-only view
+        data = data - np.mean(data, axis=0, keepdims=True)
         if mode == 'max':
             max_data = np.max(data, axis=0, keepdims=True)
-            assert(max_data.shape[-1] == data.shape[-1])
             max_data[max_data == 0] = 1
-            data /= max_data
-
+            data = data / max_data
         elif mode == 'std':
             std_data = np.std(data, axis=0, keepdims=True)
-            assert(std_data.shape[-1] == data.shape[-1])
             std_data[std_data == 0] = 1
-            data /= std_data
+            data = data / std_data
         return data
-                       
-    def __data_generation(self, list_IDs_temp):
-        'readint the waveforms'
-        X = np.zeros((self.batch_size, 6000, 3))
-        # Generate data
-        for i, ID in enumerate(list_IDs_temp):
-            data = self.inp_data[ID]
-            data = self._normalize(data, self.norm_mode)
-            X[i, :, :] = data
-        return X
-    
 
 def load_eqcct_model(input_modelP, input_modelS, log_file="results/logs/model.log"):
     # print(f"[{datetime.now()}] Loading EQCCT model.")

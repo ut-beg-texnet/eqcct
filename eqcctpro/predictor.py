@@ -61,49 +61,119 @@ transformer_units = [
 transformer_layers = 4
 
 
-def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True):
-    print("-----------------------------\nTensorflow and Ray Configuration...\n")
+# def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True):
+#     print("-----------------------------\nTensorflow and Ray Configuration...\n")
+#     import os, tensorflow as tft 
+#     global tf
+#     tf = tft # importlib.import_module("tensorflow")
+#     # 0) Set visibility FIRST (subset only the GPUs you want to use)
+#     if gpu_id == -1 or not gpus_to_use:
+#         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+#         print(f"[{datetime.now()}] GPU processing disabled, using CPU.")
+#     else:
+#         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus_to_use))
+#         print(f"[{datetime.now()}] GPU processing enabled. Using GPUs (by ID): {gpus_to_use}")
 
-    # 0) Set visibility FIRST (subset only the GPUs you want to use)
+#     # 1) Now import TF (device list will honor the ENV above)\
+#     if log_device:
+#         tf.debugging.set_log_device_placement(True)
+
+#     # 2) Work only with the *visible* devices in this process
+#     vis_gpus = tf.config.list_physical_devices("GPU")
+#     if not vis_gpus:
+#         print(f"[{datetime.now()}] No GPUs visible; using CPU.")
+#     else: 
+#         try:
+#             for gpu in vis_gpus: 
+#                 if gpu_memory_limit_mb: 
+#                     # Option A: Hardcap the memory usage per raylet for the GPU
+#                     tf.config.experimental.set_virtual_device_configuration(gpu, [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)])
+#                     print(f"[{datetime.now()}] GPU and system memory configuration enabled.")
+#                 else:
+#                     print(f"[{datetime.now()}] Please specify the amount of VRAM you want each Raylet will use. Exiting....")
+#                     exit()
+#         except RuntimeError as e: 
+#             print(f"Error configuring TensorFlow: {e}")
+#             exit()
+    
+
+#     if intra_threads is not None:
+#         tf.config.threading.set_intra_op_parallelism_threads(intra_threads)
+#         print(f"[{datetime.now()}] Intraparallelism thread successfully set.")
+#     if inter_threads is not None:
+#         tf.config.threading.set_inter_op_parallelism_threads(inter_threads)
+#         print(f"[{datetime.now()}] Interparallelism thread successfully set.")
+#     print(f"[{datetime.now()}] Tensorflow successfully set up for model operations.")
+
+def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True,):
+    """
+    Configure TensorFlow to use fixed VRAM slices per visible GPU.
+    Call this ONCE per Ray actor, BEFORE building/loading any TF model.
+    """
+    from datetime import datetime
+    import os
+
+    # 0) Visibility must be set BEFORE importing tensorflow
     if gpu_id == -1 or not gpus_to_use:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-        print(f"[{datetime.now()}] GPU processing disabled, using CPU.")
+        print(f"[{datetime.now()}] GPU disabled (CPU-only).")
     else:
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus_to_use))
-        print(f"[{datetime.now()}] GPU processing enabled. Using GPUs (by ID): {gpus_to_use}")
+        print(f"[{datetime.now()}] GPU enabled. Visible GPU IDs: {gpus_to_use}")
 
-    # 1) Now import TF (device list will honor the ENV above)\
-    global tf 
-    tf = importlib.import_module("tensorflow")
+    # 1) Now import TF (it will honor visibility)
+    import tensorflow as tf
+
     if log_device:
         tf.debugging.set_log_device_placement(True)
 
-    # 2) Work only with the *visible* devices in this process
+    # 2) Threading (optional)
+    if intra_threads is not None:
+        tf.config.threading.set_intra_op_parallelism_threads(int(intra_threads))
+        print(f"[{datetime.now()}] Intra-op threads = {intra_threads}")
+    if inter_threads is not None:
+        tf.config.threading.set_inter_op_parallelism_threads(int(inter_threads))
+        print(f"[{datetime.now()}] Inter-op threads = {inter_threads}")
+
+    # 3) Configure fixed VRAM slices on all visible GPUs
     vis_gpus = tf.config.list_physical_devices("GPU")
     if not vis_gpus:
-        print(f"[{datetime.now()}] No GPUs visible; using CPU.")
-    else: 
-        try:
-            for gpu in vis_gpus: 
-                if gpu_memory_limit_mb: 
-                    # Option A: Hardcap the memory usage per raylet for the GPU
-                    tf.config.experimental.set_virtual_device_configuration(gpu, [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)])
-                    print(f"[{datetime.now()}] GPU and system memory configuration enabled.")
-                else:
-                    print(f"[{datetime.now()}] Please specify the amount of VRAM you want each Raylet will use. Exiting....")
-                    exit()
-        except RuntimeError as e: 
-            print(f"Error configuring TensorFlow: {e}")
-            exit()
-    
+        print(f"[{datetime.now()}] No GPUs visible; proceeding on CPU.")
+        return {"logical_gpus": [], "physical_gpus": []}
 
-    if intra_threads is not None:
-        tf.config.threading.set_intra_op_parallelism_threads(intra_threads)
-        print(f"[{datetime.now()}] Intraparallelism thread successfully set.")
-    if inter_threads is not None:
-        tf.config.threading.set_inter_op_parallelism_threads(inter_threads)
-        print(f"[{datetime.now()}] Interparallelism thread successfully set.")
-    print(f"[{datetime.now()}] Tensorflow successfully set up for model operations.")
+    if gpu_memory_limit_mb is None or gpu_memory_limit_mb <= 0:
+        raise ValueError(
+            "gpu_memory_limit_mb must be a positive integer when using fixed VRAM slicing."
+        )
+
+    try:
+        for gpu in vis_gpus:
+            # One logical device per physical GPU, each with a hard VRAM cap
+            tf.config.set_logical_device_configuration(
+                gpu,
+                [tf.config.LogicalDeviceConfiguration(memory_limit=int(gpu_memory_limit_mb))]
+            )
+        # Force logical devices to materialize
+        logical = tf.config.list_logical_devices("GPU")
+        print(
+            f"[{datetime.now()}] Fixed VRAM slicing enabled: "
+            f"{gpu_memory_limit_mb} MB per logical GPU "
+            f"({len(logical)} logical over {len(vis_gpus)} physical)."
+        )
+    except RuntimeError as e:
+        # Happens if any TF GPU context was already initialized
+        raise RuntimeError(
+            "Failed to set logical device configuration. "
+            "Ensure tf_environ() is called before any TensorFlow GPU ops or model creation.\n"
+            f"Original error: {e}"
+        )
+
+    # return {
+    #     "logical_gpus": [d.name for d in tf.config.list_logical_devices("GPU")],
+    #     "physical_gpus": [d.name for d in vis_gpus],
+    #     "memory_limit_mb": int(gpu_memory_limit_mb),
+    # }
 
 
 def get_gpu_vram():
@@ -634,23 +704,30 @@ class EQCCTMSeedRunner():
 
         # We need to ensure that the vram specified does not exceed the capabilities of the system, if not, we need to exit safely before it happens
         if set_vram_mb is not None: 
-            _, available_vram = get_gpu_vram() # in GB 
+            _, available_vram = get_gpu_vram()
             available_vram_mb = available_vram * 1024 
-            intended_workers  = self.number_of_concurrent_station_predictions * self.number_of_concurrent_timechunk_predictions
-            eqcct_usage = 1.1*1024*intended_workers
-            updated_available_vram_mb = available_vram_mb - eqcct_usage # Because each worker (raylet) spawns a EQCCT instance that takes up 1.5 GB of RAM/VRAM, we need to give space for it to be allocated on the system PLUS how many workers we have 
-            requested_vram_mb = intended_workers  * self.set_vram_mb
-            avail_vram_mb_90 = updated_available_vram_mb * len(self.selected_gpus) * 0.90
+            intended_workers = self.number_of_concurrent_station_predictions * self.number_of_concurrent_timechunk_predictions
+            
+            # UPDATED: Account for model actors
+            model_vram_mb = 3000  # Reserve 3GB per GPU for model
+            num_model_actors = len(self.selected_gpus)
+            total_model_vram = model_vram_mb * num_model_actors
+            
+            eqcct_usage = 1.1 * 1024 * intended_workers
+            requested_vram_mb = intended_workers * self.set_vram_mb
+            total_vram_needed = total_model_vram + requested_vram_mb + eqcct_usage
+            
+            avail_vram_mb_90 = available_vram_mb * len(self.selected_gpus) * 0.90
 
-            if requested_vram_mb > avail_vram_mb_90:
-                print(f"[{datetime.now()}] You are requesting for each of your raylets to use {requested_vram_mb} MB of VRAM, which based off your GPU VRAM availability, {round(available_vram_mb, 2)} MB, is not feasible." 
-                      f"\n                             EQCCT uses ~1.1 GB of VRAM when initalized into memory. With {intended_workers} intended parallelized workers using up to {round(eqcct_usage, 2)} MB ({updated_available_vram_mb} MB left) of your storage, you will have OOMEs. " \
-                      f"\n                             Please adhere to the rule mentioned in the documentation regarding setting vram_mb and number of concurrent raylets to an appropriate value. " \
-                      f"\n                             Exiting...")
-                exit() 
-            else: 
-                print(f"[{datetime.now()}] Sucessfully requested up to {round(requested_vram_mb, 2)} MB of VRAM ({round(avail_vram_mb_90, 2)} MB available). Continuing...")
-        
+            if total_vram_needed > avail_vram_mb_90:
+                print(f"[{datetime.now()}] ERROR: Insufficient VRAM!")
+                print(f"  Model actors need: {total_model_vram:.0f} MB")
+                print(f"  Workers need: {requested_vram_mb:.0f} MB")
+                print(f"  EQCCT overhead: {eqcct_usage:.0f} MB")
+                print(f"  Total needed: {total_vram_needed:.0f} MB")
+                print(f"  Available (90%): {avail_vram_mb_90:.0f} MB")
+                print(f"  Reduce concurrent workers or vram_mb setting")
+                exit()
          
     def configure_cpu(self): 
         print(f"\nRunning EQCCT over MSeed Files with CPUs...")
@@ -769,7 +846,7 @@ class EQCCTMSeedRunner():
                 # Concurrent Timechunks 
                 while True: 
                     if len(tasks_queue) < max_pending_tasks: 
-                        tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=len(self.cpu_id_list)).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                        tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                             P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
                                             number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=self.cpu_id_list, use_gpu=self.use_gpu, 
                                             gpu_id=self.selected_gpus, gpu_memory_limit_mb=vram_per_task_mb, specific_stations=specific_stations_list, 
@@ -1081,7 +1158,7 @@ class EvaluateSystem():
                             tasks_queue = []
                             while True: 
                                 if len(tasks_queue) < max_pending_tasks: 
-                                    tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=cpus_to_use).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                                    tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                                         P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
                                                         number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
                                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
@@ -1414,7 +1491,7 @@ def parse_time_range(time_string):
 
     except ValueError as e:
         return None, None, None #Error handling.
-    
+
 @ray.remote
 def mseed_predictor(input_dir='downloads_mseeds',
               output_dir="detections",
@@ -1577,10 +1654,32 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # log.write(f"new station_list: {station_list}")
         tasks_predictor = [[f"({i+1}/{len(station_list)})", station_list[i], out_dir, args] for i in range(len(station_list))]
         # log.write(f"tasks_predictor:\n{tasks_predictor}")
-
         
         if not tasks_predictor:
             return
+        
+        # CREATE MODEL ACTOR(S) - Add this before the task loop
+        log_messages += f"[{datetime.now()}] Creating model actor(s)...\n"
+        
+        if use_gpu:
+            # Allocate more VRAM to model actors (they need to hold the full model)
+            # Reserve ~2-3GB per model actor, adjust based on your model size
+            model_vram_mb = min(gpu_memory_limit_mb * 2, 3000)  # At least 2x task VRAM or 3GB
+            
+            # Create one model actor per GPU
+            model_actors = []
+            for gpu_idx in gpu_id:
+                actor = ModelActor.options(
+                    num_gpus=1,
+                    num_cpus=0
+                ).remote(gpus_to_use=gpu_id, p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
+                model_actors.append(actor)
+            
+            log_messages += f"[{datetime.now()}] Created {len(model_actors)} GPU model actor(s) with {model_vram_mb/1024:.2f}GB VRAM each\n"
+        else:
+            # Create CPU model actor
+            model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit=None, use_gpu=False)]
+            log_messages += f"[{datetime.now()}] Created 1 CPU model actor\n"
 
         # Submit tasks to ray in a queue
         tasks_queue = []
@@ -1598,12 +1697,22 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 while True:
                     # Add new task to queue while max is not reached
                     if len(tasks_queue) < max_pending_tasks:
-                        if use_gpu is False: 
-                            tasks_queue.append(parallel_predict.remote(tasks_predictor[i], False, None))
-                        elif use_gpu is True: 
-                            gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_station_predictions  # Ensure max_pending_tasks > 0 to avoid division by zero
-                            task = parallel_predict.options(num_gpus=gpu_allocation_per_task, num_cpus=0).remote(tasks_predictor[i], True, gpu_memory_limit_mb)
-                            tasks_queue.append(task)
+                        # SELECT WHICH MODEL ACTOR TO USE (round-robin across GPUs)
+                        model_actor = model_actors[i % len(model_actors)]
+                        
+                        if use_gpu is False:
+                            tasks_queue.append(
+                                parallel_predict.options(num_cpus=0).remote(
+                                    tasks_predictor[i], model_actor, False, None
+                                )
+                            )
+                        elif use_gpu is True:
+                            # Don't allocate GPUs to workers, only to model actors
+                            tasks_queue.append(
+                                parallel_predict.options(num_cpus=0, num_gpus=0).remote(
+                                    tasks_predictor[i], model_actor, True, gpu_memory_limit_mb
+                                )
+                            )
                         break
                     # If there are more tasks than maximum, just process them
                     else:
@@ -1611,17 +1720,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
                         for finished_task in tasks_finished:
                             log_entry = ray.get(finished_task)
                             log_messages += f'{log_entry}\n'
-                            # log.flush()
                             bar.next()
 
-            # After adding all the tasks to queue, process what's left
-            while tasks_queue:
-                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-                for finished_task in tasks_finished:
-                    log_entry = ray.get(finished_task)
-                    log_messages += f'{log_entry}\n'
-                    # log.flush()
-                    bar.next() 
+                # After adding all the tasks to queue, process what's left
+                while tasks_queue:
+                    tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                    for finished_task in tasks_finished:
+                        log_entry = ray.get(finished_task)
+                        log_messages += f'{log_entry}\n'
+                        bar.next() 
         log_messages += f"\n------- Parallel Station Waveform Processing Complete For {starttime} to {endtime} Timechunk-------\n"
         # log.flush()
         end_time = time.time()
@@ -1685,28 +1792,45 @@ def mseed_predictor(input_dir='downloads_mseeds',
             print(f"\n[{datetime.now()}] Successfully saved trial data to CSV at {test_csv_filepath}")
         log_messages += f"\n[{datetime.now()}] Successfully ran EQCCTPro, exiting..."
         return log_messages
+    
+@ray.remote
+class ModelActor:
+    def __init__(self, gpus_to_use, p_model_path, s_model_path, intra_threads=1, inter_threads=1, gpu_memory_limit_mb=None, use_gpu=True):
+        from eqcct_tf_models import load_eqcct_model
+        
+        if use_gpu and gpu_memory_limit_mb:
+            # Configure GPU memory for this actor
+            try: 
+                tf_environ(
+                    gpu_id=-1, 
+                    gpus_to_use=gpus_to_use,
+                    gpu_memory_limit_mb=gpu_memory_limit_mb,
+                    intra_threads=intra_threads,
+                    inter_threads=inter_threads,
+                    log_device=False)
+            except RuntimeError as e:
+                print(f"[ModelActor] Error setting memory limit: {e}")
+        
+        # Load the model once
+        self.model = load_eqcct_model(p_model_path, s_model_path)
+        print(f"[ModelActor] Model loaded successfully")
+    
+    def predict(self, data_generator):
+        """Perform prediction using the loaded model"""
+        return self.model.predict(data_generator, verbose=0)
+
 
 @ray.remote
-def parallel_predict(predict_args, gpu=False, gpu_memory_limit_mb=None):
+def parallel_predict(predict_args, model_actor, gpu=False, gpu_memory_limit_mb=None):
+    """
+    Modified to use shared ModelActor instead of loading model per task
+    """
     from eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
-    if gpu is True: 
-        # Ensure TensorFlow only sees its assigned VRAM
-        gpus = tf.config.experimental.list_physical_devices('GPU')
-
-        if gpus:
-            try:
-                tf.config.experimental.set_virtual_device_configuration(
-                    gpus[0],
-                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)]
-                )
-                print(f"[Task] VRAM Limited to {gpu_memory_limit_mb / 1024:.2f} GB")
-                sys.stdout.flush() # Try to flush print statment out to console immediantly 
-            except RuntimeError as e:
-                print(f"[Task] Error setting memory limit - {e}")
-                sys.stdout.flush()
-    
     pos, station, out_dir, args = predict_args
-    model = load_eqcct_model(args["p_model"], args["s_model"])
+    
+    # NOTE: We removed the model loading code that was causing OOM errors
+    # The model is now shared via the model_actor
+    
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
 
@@ -1733,28 +1857,30 @@ def parallel_predict(predict_args, gpu=False, gpu_memory_limit_mb=None):
     csvPr_gen.flush()
     
     start_Predicting = time.time()
-    # if mode == 'network': 
     files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-    # if mode == 'single_station': 
-    #     files_list = glob.glob(f"{args['input_dir']}/*mseed")
     
     try:
         meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
-    except Exception: #InternalMSEEDError:
+    except Exception:
         return f"[{datetime.now()}] {pos} {station}: FAILED reading mSEED."
 
     try:
         params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
         pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-        predP,predS = model.predict(pred_generator, verbose=0)
+        
+        # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
+        predP, predS = ray.get(model_actor.predict.remote(pred_generator))
         
         detection_memory = []
-        prob_memory=[]
+        prob_memory = []
         for ix in range(len(predP)):
-            Ppicks, Pprob =  _picker(args, predP[ix,:, 0])   
-            Spicks, Sprob =  _picker(args, predS[ix,:, 0], 'S_threshold')
+            Ppicks, Pprob = _picker(args, predP[ix,:, 0])   
+            Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
 
-            detection_memory,prob_memory=_output_writter_prediction(meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, detection_memory,prob_memory,predict_writer, ix,len(predP),len(predS))
+            detection_memory, prob_memory = _output_writter_prediction(
+                meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, 
+                detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
+            )
                                         
         end_Predicting = time.time()
         delta = (end_Predicting - start_Predicting)
