@@ -401,7 +401,7 @@ The following input parameters need to be configurated for **EvaluateSystem** to
 - **`station_list_step_size (int)`: default = 1** 
   - You can set a step size for the station list that is generated 
   - For example if the stepsize is set to 10 and you start with 50 stations with a max of 100, then your list would be: [50, 60, 70, 80, 80, 100]
-  - Using 1 will use the default step size of 1-10, then step size of 5 up to station2use
+  - Using 1 will use the default step size of 1-10, then step size of 5 up to stations2use
 - **`min_conc_stations (int)`: default = 1** 
   - Is the minimum amount of concurrent stations predictions you want each trial iteration to start with 
   - By default, if `min_conc_predictions` and `conc_predictions_step_size` are set to 1, a custom step size iteration will be applied to test the 50 sample waveforms. The sequence follows: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, n+5, 50].
@@ -433,8 +433,9 @@ The following input parameters need to be configurated for **EvaluateSystem** to
   - A temporary directory to store all temp files produced by EQCCTPro
   - Used to help ease system cleanup and to not write to system's default temporary directory 
 - **`set_vram_mb (float)`**
-  - Value of the maximum amount of VRAM EQCCTPro can use 
-  - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to OutOfMemoryError 
+  - Maximum amount of VRAM each Raylet can use (float).  
+  - Must be a real value that is based on your GPU's physical VRAM space, if it exceeds the space the code will break due to OutOfMemoryError 
+  - Good rule of thumb for calculating `set_vram_mb` = (GPU VRAM * .90 (to be safe)) / number_of_concurrent_station_predictions * number_of_concurrent_timechunk_predictions
 - **`selected_gpus (list)`: default = None**
   - List of GPU IDs on your computer you want to use if `mode = 'gpu'`
   - Non-existing GPU IDs will cause the code to exit 

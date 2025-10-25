@@ -1,3 +1,4 @@
+import importlib
 import os
 import gc 
 import sys
@@ -26,51 +27,15 @@ import platform
 import numpy as np
 import pandas as pd
 from os import listdir
-from io import StringIO
 from progress.bar import IncrementalBar
-from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
 os.environ['KERAS_BACKEND'] = 'tensorflow'
-import tensorflow as tf
 import pynvml 
 import warnings
 import multiprocessing
-import absl.logging
-from silence_tensorflow import silence_tensorflow
-
-# Silence TensorFlow logging
-absl.logging.set_verbosity(absl.logging.ERROR)
-tf.get_logger().setLevel('ERROR')
-tf.autograph.set_verbosity(0)
-warnings.filterwarnings("ignore")
-silence_tensorflow()
-
-def recall(y_true, y_pred):
-    true_positives = tf.keras.backend.sum(tf.keras.backend.round(tf.keras.backend.clip(y_true * y_pred, 0, 1)))
-    possible_positives = tf.keras.backend.sum(tf.keras.backend.round(tf.keras.backend.clip(y_true, 0, 1)))
-    recall = true_positives / (possible_positives + tf.keras.backend.epsilon())
-    return recall
-
-
-def precision(y_true, y_pred):
-    true_positives = tf.keras.backend.sum(tf.keras.backend.round(tf.keras.backend.clip(y_true * y_pred, 0, 1)))
-    predicted_positives = tf.keras.backend.sum(tf.keras.backend.round(tf.keras.backend.clip(y_pred, 0, 1)))
-    precision = true_positives / (predicted_positives + tf.keras.backend.epsilon())
-    return precision
-
- 
-def f1(y_true, y_pred):
-    precisionx = precision(y_true, y_pred)
-    recallx = recall(y_true, y_pred)
-    return 2*((precisionx*recallx)/(precisionx+recallx+tf.keras.backend.epsilon()))
-
-
-def wbceEdit( y_true, y_pred) :
-    ms = tf.keras.backend.mean(tf.keras.backend.square(y_true-y_pred)) 
-    ssim = 1-tf.reduce_mean(tf.image.ssim(y_true,y_pred,1.0))
-    return (ssim + ms)
+tf = None 
 
 w1 = 6000
 w2 = 3
@@ -96,334 +61,42 @@ transformer_units = [
 transformer_layers = 4
 
 
-class Patches(tf.keras.layers.Layer):
-    def __init__(self, patch_size, **kwargs):
-        super(Patches, self).__init__()
-        self.patch_size = patch_size
+def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True):
+    print("-----------------------------\nTensorflow and Ray Configuration...\n")
 
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({
-            'patch_size' : self.patch_size, 
-            
-        })
-        
-        return config
-        
-    def call(self, images):
-        batch_size = tf.shape(images)[0]
-        patches = tf.image.extract_patches(
-            images=images,
-            sizes=[1, self.patch_size, 1, 1],
-            strides=[1, self.patch_size, 1, 1],
-            rates=[1, 1, 1, 1],
-            padding="VALID",
-        )
-        patch_dims = patches.shape[-1]
-        patches = tf.reshape(patches, [batch_size, -1, patch_dims])
-        return patches
-    
-class PatchEncoder(tf.keras.layers.Layer):
-    def __init__(self, num_patches, projection_dim, **kwargs):
-        super(PatchEncoder, self).__init__()
-        self.num_patches = num_patches
-        self.projection = tf.keras.layers.Dense(units=projection_dim)
-        self.position_embedding = tf.keras.layers.Embedding(
-            input_dim=num_patches, output_dim=projection_dim
-        )
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({
-            'num_patches' : self.num_patches, 
-            'projection_dim' : projection_dim, 
-            
-        })
-        
-        return config
-    
-    def call(self, patch):
-        positions = tf.range(start=0, limit=self.num_patches, delta=1)
-        encoded = self.projection(patch) + self.position_embedding(positions)
-        
-        #print(patch,positions)
-        #temp = self.position_embedding(positions)
-        #temp = tf.reshape(temp,(1,int(temp.shape[0]),int(temp.shape[1])))
-        #encoded = tf.keras.layers.Add()([self.projection(patch), temp])
-        #print(temp,encoded)
-        
-        return encoded
-    
-# Referred from: github.com:rwightman/pytorch-image-models.
-class StochasticDepth(tf.keras.layers.Layer):
-    def __init__(self, drop_prop, **kwargs):
-        super(StochasticDepth, self).__init__(**kwargs)
-        self.drop_prob = drop_prop
-
-    def call(self, x, training=None):
-        if training:
-            keep_prob = 1 - self.drop_prob
-            shape = (tf.shape(x)[0],) + (1,) * (len(tf.shape(x)) - 1)
-            random_tensor = keep_prob + tf.random.uniform(shape, 0, 1)
-            random_tensor = tf.floor(random_tensor)
-            return (x / keep_prob) * random_tensor
-        return x
-    
-
-
-def convF1(inpt, D1, fil_ord, Dr):
-
-    channel_axis = 1 if tf.keras.backend.image_data_format() == "channels_first" else -1
-    #filters = inpt._keras_shape[channel_axis]
-    filters = int(inpt.shape[-1])
-    
-    #infx = tf.keras.layers.Activation(tf.nn.gelu')(inpt)
-    pre = tf.keras.layers.Conv1D(filters,  fil_ord, strides =(1), padding='same',kernel_initializer='he_normal')(inpt)
-    pre = tf.keras.layers.BatchNormalization()(pre)    
-    pre = tf.keras.layers.Activation(tf.nn.gelu)(pre)
-    
-    #shared_conv = tf.keras.layers.Conv1D(D1,  fil_ord, strides =(1), padding='same')
-    
-    inf = tf.keras.layers.Conv1D(filters,  fil_ord, strides =(1), padding='same',kernel_initializer='he_normal')(pre)
-    inf = tf.keras.layers.BatchNormalization()(inf)    
-    inf = tf.keras.layers.Activation(tf.nn.gelu)(inf)
-    inf = tf.keras.layers.Add()([inf,inpt])
-    
-    inf1 = tf.keras.layers.Conv1D(D1,  fil_ord, strides =(1), padding='same',kernel_initializer='he_normal')(inf)
-    inf1 = tf.keras.layers.BatchNormalization()(inf1)  
-    inf1 = tf.keras.layers.Activation(tf.nn.gelu)(inf1)    
-    encode = tf.keras.layers.Dropout(Dr)(inf1)
-
-    return encode
-
-
-def mlp(x, hidden_units, dropout_rate):
-    for units in hidden_units:
-        x = tf.keras.layers.Dense(units, activation=tf.nn.gelu)(x)
-        #x = tf.keras.layers.Dense(units, activation='relu')(x)
-        x = tf.keras.layers.Dropout(dropout_rate)(x)
-    return x
-
-
-class Patches(tf.keras.layers.Layer):
-    def __init__(self, patch_size, **kwargs):
-        super(Patches, self).__init__()
-        self.patch_size = patch_size
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({
-            'patch_size' : self.patch_size, 
-            
-        })
-        
-        return config
-        
-    def call(self, images):
-        batch_size = tf.shape(images)[0]
-        patches = tf.image.extract_patches(
-            images=images,
-            sizes=[1, self.patch_size, 1, 1],
-            strides=[1, self.patch_size, 1, 1],
-            rates=[1, 1, 1, 1],
-            padding="VALID",
-        )
-        patch_dims = patches.shape[-1]
-        patches = tf.reshape(patches, [batch_size, -1, patch_dims])
-        return patches
-    
-class PatchEncoder(tf.keras.layers.Layer):
-    def __init__(self, num_patches, projection_dim, **kwargs):
-        super(PatchEncoder, self).__init__()
-        self.num_patches = num_patches
-        self.projection = tf.keras.layers.Dense(units=projection_dim)
-        self.position_embedding = tf.keras.layers.Embedding(
-            input_dim=num_patches, output_dim=projection_dim
-        )
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({
-            'num_patches' : self.num_patches, 
-            'projection_dim' : projection_dim, 
-            
-        })
-        
-        return config
-    
-    def call(self, patch):
-        positions = tf.range(start=0, limit=self.num_patches, delta=1)
-        encoded = self.projection(patch) + self.position_embedding(positions)
-        
-        #print(patch,positions)
-        #temp = self.position_embedding(positions)
-        #temp = tf.reshape(temp,(1,int(temp.shape[0]),int(temp.shape[1])))
-        #encoded = tf.keras.layers.Add()([self.projection(patch), temp])
-        #print(temp,encoded)
-        
-        return encoded
-
-
-def create_cct_modelP(inputs):
-
-    inputs1 = convF1(inputs,  10, 11, 0.1)
-    inputs1 = convF1(inputs1, 20, 11, 0.1)
-    inputs1 = convF1(inputs1, 40, 11, 0.1)
-    
-    inputreshaped = tf.keras.layers.Reshape((6000,1,40))(inputs1)
-    # Augment data.
-    #augmented = data_augmentation(inputs)
-    # Create patches.
-    patches = Patches(patch_size)(inputreshaped)
-    # Encode patches.
-    encoded_patches = PatchEncoder(num_patches, projection_dim)(patches)
-    #print('done')
-        
-    # Calculate Stochastic Depth probabilities.
-    dpr = [x for x in np.linspace(0, stochastic_depth_rate, transformer_layers)]
-
-    # Create multiple layers of the Transformer block.
-    for i in range(transformer_layers):
-        #encoded_patches = convF1(encoded_patches, 40,11, 0.1)
-        # Layer normalization 1.
-        x1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-
-        # Create a multi-head attention layer.
-        attention_output = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=projection_dim, dropout=0.1
-        )(x1, x1)
-        #attention_output = convF1(attention_output, 40,11, 0.1)
-    
-
-        # Skip connection 1.
-        attention_output = StochasticDepth(dpr[i])(attention_output)
-        x2 = tf.keras.layers.Add()([attention_output, encoded_patches])
-
-        # Layer normalization 2.
-        x3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x2)
-
-        # MLP.
-        x3 = mlp(x3, hidden_units=transformer_units, dropout_rate=0.1)
-
-        # Skip connection 2.
-        x3 = StochasticDepth(dpr[i])(x3)
-        encoded_patches = tf.keras.layers.Add()([x3, x2])
-
-    # Apply sequence pooling.
-    representation = tf.keras.layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    #print(representation)
-    ''' 
-    attention_weights = tf.nn.softmax(tf.keras.layers.Dense(1)(representation), axis=1)
-    weighted_representation = tf.matmul(
-        attention_weights, representation, transpose_a=True
-    )
-    weighted_representation = tf.squeeze(weighted_representation, -2)
-
-    return weighted_representation
-    '''
-    return representation
-
-
-def create_cct_modelS(inputs):
-
-    inputs1 = convF1(inputs,  10, 11, 0.1)
-    inputs1 = convF1(inputs1, 20, 11, 0.1)
-    inputs1 = convF1(inputs1, 40, 11, 0.1)
-    
-    inputreshaped = tf.keras.layers.Reshape((6000,1,40))(inputs1)
-    # Augment data.
-    #augmented = data_augmentation(inputs)
-    # Create patches.
-    patches = Patches(patch_size)(inputreshaped)
-    # Encode patches.
-    encoded_patches = PatchEncoder(num_patches, projection_dim)(patches)
-    #print('done')
-        
-    # Calculate Stochastic Depth probabilities.
-    dpr = [x for x in np.linspace(0, stochastic_depth_rate, transformer_layers)]
-
-    # Create multiple layers of the Transformer block.
-    for i in range(transformer_layers):
-        encoded_patches = convF1(encoded_patches, 40,11, 0.1)
-        # Layer normalization 1.
-        x1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-
-        # Create a multi-head attention layer.
-        attention_output = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=projection_dim, dropout=0.1
-        )(x1, x1)
-        attention_output = convF1(attention_output, 40,11, 0.1)
-    
-
-        # Skip connection 1.
-        attention_output = StochasticDepth(dpr[i])(attention_output)
-        x2 = tf.keras.layers.Add()([attention_output, encoded_patches])
-
-        # Layer normalization 2.
-        x3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x2)
-
-        # MLP.
-        x3 = mlp(x3, hidden_units=transformer_units, dropout_rate=0.1)
-
-        # Skip connection 2.
-        x3 = StochasticDepth(dpr[i])(x3)
-        encoded_patches = tf.keras.layers.Add()([x3, x2])
-
-    # Apply sequence pooling.
-    representation = tf.keras.layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
-    #print(representation)
-    ''' 
-    attention_weights = tf.nn.softmax(tf.keras.layers.Dense(1)(representation), axis=1)
-    weighted_representation = tf.matmul(
-        attention_weights, representation, transpose_a=True
-    )
-    weighted_representation = tf.squeeze(weighted_representation, -2)
-
-    return weighted_representation
-    '''
-    return representation
-
-
-def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None):
-    print(f"-----------------------------\nTensorflow and Ray Configuration...\n")
-    tf.debugging.set_log_device_placement(True)
-    gpus = tf.config.experimental.list_physical_devices('GPU')  # Get available GPUs
-    available_gpu_ids = list(range(len(gpus)))  # Create a list of available GPU indices, e.g., [0, 1, 2]
-    
-    if gpu_id != -1:
-        if gpus_to_use is None:
-            print(f"[{datetime.now()}] No GPUs specified, using CPUs.")
-            return
-        
-        # Check if all requested GPUs exist
-        invalid_gpus = [gpu for gpu in gpus_to_use if gpu not in available_gpu_ids]
-        
-        if invalid_gpus:
-            print(f"[{datetime.now()}] Inputted GPU ID(s) {invalid_gpus} do not exist. Exiting...")
-            # os.environ['CUDA_VISIBLE_DEVICES'] = ""  # Disable GPU usage
-            # print(f"")
-            exit() 
-        else:
-            os.environ['CUDA_VISIBLE_DEVICES'] = ",".join(map(str, gpus_to_use))  # Set visible GPUs
-            print(f"[{datetime.now()}] GPU processing enabled. Using GPUs: {gpus_to_use}")
-        
-        if gpus:
-            try:
-                for gpu in gpus:
-                    if gpu_memory_limit_mb:
-                        tf.config.experimental.set_virtual_device_configuration(
-                            gpu,
-                            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)]
-                        )
-                print(f"[{datetime.now()}] GPU and system memory configuration enabled.")
-            except RuntimeError as e:
-                print(f"Error configuring TensorFlow: {e}")
-        else:
-            os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-            print(f"[{datetime.now()}] No GPUs found, using CPU.")
-    else:
-        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    # 0) Set visibility FIRST (subset only the GPUs you want to use)
+    if gpu_id == -1 or not gpus_to_use:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
         print(f"[{datetime.now()}] GPU processing disabled, using CPU.")
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus_to_use))
+        print(f"[{datetime.now()}] GPU processing enabled. Using GPUs (by ID): {gpus_to_use}")
+
+    # 1) Now import TF (device list will honor the ENV above)\
+    global tf 
+    tf = importlib.import_module("tensorflow")
+    if log_device:
+        tf.debugging.set_log_device_placement(True)
+
+    # 2) Work only with the *visible* devices in this process
+    vis_gpus = tf.config.list_physical_devices("GPU")
+    if not vis_gpus:
+        print(f"[{datetime.now()}] No GPUs visible; using CPU.")
+    else: 
+        try:
+            for gpu in vis_gpus: 
+                if gpu_memory_limit_mb: 
+                    # Option A: Hardcap the memory usage per raylet for the GPU
+                    tf.config.experimental.set_virtual_device_configuration(gpu, [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)])
+                    print(f"[{datetime.now()}] GPU and system memory configuration enabled.")
+                else:
+                    print(f"[{datetime.now()}] Please specify the amount of VRAM you want each Raylet will use. Exiting....")
+                    exit()
+        except RuntimeError as e: 
+            print(f"Error configuring TensorFlow: {e}")
+            exit()
+    
+
     if intra_threads is not None:
         tf.config.threading.set_intra_op_parallelism_threads(intra_threads)
         print(f"[{datetime.now()}] Intraparallelism thread successfully set.")
@@ -431,48 +104,6 @@ def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads
         tf.config.threading.set_inter_op_parallelism_threads(inter_threads)
         print(f"[{datetime.now()}] Interparallelism thread successfully set.")
     print(f"[{datetime.now()}] Tensorflow successfully set up for model operations.")
-
-
-def load_eqcct_model(input_modelP, input_modelS, log_file="results/logs/model.log"):
-    # print(f"[{datetime.now()}] Loading EQCCT model.")
-    
-    # with open(log_file, mode="w", buffering=1) as log:
-    #     log.write(f"*** Loading the model ...\n")
-
-    # Model CCT
-    inputs = tf.keras.layers.Input(shape=input_shape,name='input')
-
-    featuresP = create_cct_modelP(inputs)
-    featuresP = tf.keras.layers.Reshape((6000,1))(featuresP)
-
-    featuresS = create_cct_modelS(inputs)
-    featuresS = tf.keras.layers.Reshape((6000,1))(featuresS)
-
-    logitp  = tf.keras.layers.Conv1D(1,  15, strides =(1), padding='same',activation='sigmoid', kernel_initializer='he_normal',name='picker_P')(featuresP)
-    logits  = tf.keras.layers.Conv1D(1,  15, strides =(1), padding='same',activation='sigmoid', kernel_initializer='he_normal',name='picker_S')(featuresS)
-
-    modelP = tf.keras.models.Model(inputs=[inputs], outputs=[logitp])
-    modelS = tf.keras.models.Model(inputs=[inputs], outputs=[logits])
-
-    model = tf.keras.models.Model(inputs=[inputs], outputs=[logitp,logits])
-
-    summary_output = StringIO()
-    with redirect_stdout(summary_output):
-        model.summary()
-    # log.write(summary_output.getvalue())
-    # log.write('\n')
-
-    sgd = tf.keras.optimizers.Adam()
-    model.compile(optimizer=sgd,
-                loss=['binary_crossentropy','binary_crossentropy'],
-                metrics=['acc',f1,precision, recall])    
-    
-    modelP.load_weights(input_modelP)
-    modelS.load_weights(input_modelS)
-
-    # log.write(f"*** Loading is complete!")
-
-    return model
 
 
 def get_gpu_vram():
@@ -612,7 +243,9 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
             use_gpu=use_gpu,
             stations2use=stations2use,
             testing_gpu=testing_gpu,
-            test_csv_filepath=csv_filepath)
+            test_csv_filepath=csv_filepath,
+            intra_threads=intra_threads, 
+            inter_threads=inter_threads)
     else: 
         # Initialize TensorFlow environment with GPUs 
         tf_environ(gpu_id=1, gpu_memory_limit_mb=gpu_memory_limit_mb, gpus_to_use=gpus_to_use,intra_threads=intra_threads, inter_threads=inter_threads)
@@ -630,7 +263,9 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
                 testing_gpu=testing_gpu,
                 gpu_memory_limit_mb=gpu_memory_limit_mb,
                 test_csv_filepath=csv_filepath,
-                stations2use=stations2use)
+                stations2use=stations2use,
+                intra_threads=intra_threads, 
+                inter_threads=inter_threads)
  
  
 def find_optimal_configurations_cpu(df):
@@ -946,165 +581,6 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
                int(float(best_config["VRAM Used Per Task"])), \
                int(float(station_count))
 
-
-def evaluate_system(eval_mode:str, intra_threads:int, inter_threads:int, input_dir:str, output_dir:str, log_filepath, csv_dir, P_threshold, S_threshold, p_model_filepath, s_model_filepath, stations2use:int=None, cpu_id_list:list=[1], set_vram_mb:float=None, selected_gpus:list=None): 
-    """
-    evaluate_system will evaluate a given system's hardware to find the optimal amount of CPUs/GPUs and concurrent predictions to use 
-    """    
-    # Set options to display all rows and columns
-    pd.set_option('display.max_rows', None)
-    pd.set_option('display.max_columns', None)
-    pd.set_option('display.width', 0)
-    pd.set_option('display.max_colwidth', None)
-    valid_modes = {"cpu", "gpu"}
-    if eval_mode not in valid_modes:
-        raise ValueError(f"Invalid mode '{mode}'. Choose either 'cpu' or 'gpu'.")
-
-    if stations2use is None: 
-        stations2use_list = list(range(1, 11)) + list(range(15, 50, 5))
-    else: 
-        stations2use_list = generate_station_list(stations2use)
-        
-    if eval_mode == "cpu":
-        statement = "Evaluating System Parallelization Capability using CPUs"
-        print(f"{statement}\n")
-        remove_directory(output_dir) # Remove output dir before it begins for maximum cleaning
-        csv_filepath = f"{csv_dir}/cpu_test_results.csv" # Define csv filepath for test results 
- 
-        cpu_count = len(cpu_id_list)
-        cpu_list = cpu_id_list
-        print(f"[{datetime.now()}] Testing using up to all {cpu_count} available CPUs...")
-                    
-        prepare_csv(csv_filepath, False)
-        trial_num = 1
-        for i in range(1, cpu_count+1):
-            cpus_to_use = cpu_list[:i]
-            for j in stations2use_list:
-                # Define num of concurrent predictions per iteration
-                concurrent_predictions_list = generate_station_list(j) 
-                for k in concurrent_predictions_list: 
-                    # Start a new process with CPU affinity
-                    print(f"\nTrial Number: {trial_num}\n")
-                    process = multiprocessing.Process(
-                        target=run_prediction,
-                        args=(input_dir, output_dir, log_filepath, P_threshold, 
-                                S_threshold, p_model_filepath, s_model_filepath, 
-                                k, i, False, j, cpus_to_use, csv_filepath, intra_threads, inter_threads, False)
-                    )
-                    process.start()
-                    process.join()  # Wait for process to complete before continuing
-                    
-                    if process.exitcode == 0: 
-                        update_csv(csv_filepath, trial_num, intra_threads, inter_threads, 1, "", output_dir)
-                    else: 
-                        update_csv(csv_filepath, trial_num, intra_threads, inter_threads, 0, process.exitcode, output_dir)
-                    trial_num += 1
-
-            
-        print(f"[{datetime.now()}] Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
-        # Compute optimal configurations (CPU)
-        df = pd.read_csv(csv_filepath)
-        optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_cpu(df)
-        optimal_configuration_df.to_csv(f"{csv_dir}/optimal_configurations_cpu.csv")
-        best_overall_usecase_df.to_csv(f"{csv_dir}/best_overall_usecase_cpu.csv")
-        print(f"[{datetime.now()}] Optimal Configurations Found. Findings saved to:\n" 
-                f" 1) Optimal CPU/Station/Concurrent Prediction Configurations: {csv_dir}/optimal_configurations_cpu.csv\n" 
-                f" 2) Best Overall Usecase Configuration: {csv_dir}/best_overall_usecase_cpu.csv")
-    
-    if eval_mode == "gpu":
-        print(f"Evaluating System Parallelization Capability using GPUs\n")
-        remove_directory(output_dir) # Remove output dir before it begins for maximum cleaning
-        csv_filepath = f"{csv_dir}/gpu_test_results.csv" # Define csv filepath for test results 
-        if stations2use is None: 
-            stations2use_list = list(range(1, 11)) + list(range(15, 51, 5))
-        else: 
-            stations2use_list = generate_station_list(stations2use)
-
-        if set_vram_mb is not None: 
-            free_vram_mb = set_vram_mb
-            print(f"[{datetime.now()}] VRAM set to {free_vram_mb} MB.")
-        else:
-            # Setting VRAM
-            print(f"[{datetime.now()}] Utilizing available VRAM within Ray Memory Usage Threshold Limit of 0.95...")
-            total_vram, available_vram = get_gpu_vram()
-            print(f"[{datetime.now()}] Total VRAM: {total_vram:.2f} GB")
-            print(f"[{datetime.now()}] Available VRAM: {available_vram:.2f} GB")
-            # 95% of the Node's memory can be used by Ray and it's Raylets. 
-            # Beyond the threshold, Ray will begin to kill process to save the node's memory             
-            if available_vram / total_vram >= 0.9486: # 94.86% as a saftey value threshold, can use 94.85% and below 
-                free_vram = total_vram * 0.9485        
-            
-            print(f"[{datetime.now()}] Using up to {round(free_vram, 2)} GB of VRAM (within 94.85% VRAM threshold)")
-            free_vram_mb = free_vram * 1024 # Convert to MB 
-            
-        # Setting GPUs to use 
-        if selected_gpus: 
-            selected_gpus = selected_gpus
-        else: 
-            selected_gpus = list_gpu_ids()
-        print(f"[{datetime.now()}] Using GPU(s): {selected_gpus}")
-        
-        tf.debugging.set_log_device_placement(True)
-        gpus = tf.config.experimental.list_physical_devices('GPU')  # Get available GPUs
-        available_gpu_ids = list(range(len(gpus)))  # Create a list of available GPU indices, e.g., [0, 1, 2]
-    
-        # Check if all requested GPUs exist
-        invalid_gpus = [gpu for gpu in selected_gpus if gpu not in available_gpu_ids]
-        
-        if invalid_gpus:
-            print(f"[{datetime.now()}] Inputted GPU ID(s) {invalid_gpus} do not exist. Exiting...")
-            exit()
-        
-        
-        cpu_count = len(cpu_id_list)
-        if cpu_count < 1: 
-            print(f"Must use at least 1 CPU. Exiting")
-            exit()
-            
-        cpu_list = cpu_id_list
-        print(f"[{datetime.now()}] Testing using up to all {cpu_count} available CPUs...")
-        
-        prepare_csv(csv_filepath, True)
-        trial_num = 1 
-        
-        for num_stations in stations2use_list: # i is the num_stations to use 
-            concurrent_predictions_list = generate_station_list(num_stations)
-            for conc_predictions in concurrent_predictions_list:    
-                vram_per_task_mb = free_vram_mb / conc_predictions
-                # Define step size (5% of max)
-                step_size = vram_per_task_mb * 0.05  
-                # Generate range of values from 5% to 100% of vram_per_task_mb
-                vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
-                for gpu_memory_limit_mb in vram_steps:           
-                    # Start GPU process
-                    print(f"\n[{datetime.now()}] VRAM Limited to {gpu_memory_limit_mb / 1024:.2f} GB per Task")
-                    print(f"\nTrial Number: {trial_num}")
-                    process = multiprocessing.Process(
-                        target=run_prediction,
-                        args=(input_dir, output_dir, log_filepath, P_threshold, 
-                            S_threshold, p_model_filepath, s_model_filepath, 
-                            conc_predictions, len(cpu_list), True, num_stations, 
-                            cpu_list, csv_filepath, intra_threads, inter_threads, True, gpu_memory_limit_mb, selected_gpus)
-                    )
-                    process.start()
-                    process.join()  # Wait for process to complete
-
-                    # Handle exit codes
-                    if process.exitcode == 0:
-                        update_csv(csv_filepath, trial_num, intra_threads, inter_threads, 1, "", output_dir, True, gpu_memory_limit_mb)
-                    else:
-                        update_csv(csv_filepath, trial_num, intra_threads, inter_threads, 0, process.exitcode, output_dir, True, gpu_memory_limit_mb)
-                    trial_num += 1
-                    
-        print(f"[{datetime.now()}] Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
-        # Compute optimal configurations (GPU)
-        df = pd.read_csv(csv_filepath)
-        optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_gpu(df)
-        optimal_configuration_df.to_csv(f"{csv_dir}/optimal_configurations_gpu.csv")
-        best_overall_usecase_df.to_csv(f"{csv_dir}/best_overall_usecase_gpu.csv")
-        print(f"[{datetime.now()}] Optimal Configurations Found. Findings saved to:\n" 
-                f" 1) Optimal CPU/Station/Concurrent Prediction Configurations: {csv_dir}/optimal_configurations_gpu.csv\n" 
-                f" 2) Best Overall Usecase Configuration: {csv_dir}/best_overall_usecase_gpu.csv")
                     
 class EQCCTMSeedRunner():  
     """run_EQCCT_Mseed class for running the run_EQCCT_Mseed functions for multiple instances of the class"""
@@ -1154,7 +630,26 @@ class EQCCTMSeedRunner():
         self.start_time = start_time
         self.end_time = end_time
         self.timechunk_dt = timechunk_dt
-        self.waveform_overlap = waveform_overlap  
+        self.waveform_overlap = waveform_overlap 
+
+        # We need to ensure that the vram specified does not exceed the capabilities of the system, if not, we need to exit safely before it happens
+        if set_vram_mb is not None: 
+            _, available_vram = get_gpu_vram() # in GB 
+            available_vram_mb = available_vram * 1024 
+            intended_workers  = self.number_of_concurrent_station_predictions * self.number_of_concurrent_timechunk_predictions
+            eqcct_usage = 1.1*1024*intended_workers
+            updated_available_vram_mb = available_vram_mb - eqcct_usage # Because each worker (raylet) spawns a EQCCT instance that takes up 1.5 GB of RAM/VRAM, we need to give space for it to be allocated on the system PLUS how many workers we have 
+            requested_vram_mb = intended_workers  * self.set_vram_mb
+            avail_vram_mb_90 = updated_available_vram_mb * len(self.selected_gpus) * 0.90
+
+            if requested_vram_mb > avail_vram_mb_90:
+                print(f"[{datetime.now()}] You are requesting for each of your raylets to use {requested_vram_mb} MB of VRAM, which based off your GPU VRAM availability, {round(available_vram_mb, 2)} MB, is not feasible." 
+                      f"\n                             EQCCT uses ~1.1 GB of VRAM when initalized into memory. With {intended_workers} intended parallelized workers using up to {round(eqcct_usage, 2)} MB ({updated_available_vram_mb} MB left) of your storage, you will have OOMEs. " \
+                      f"\n                             Please adhere to the rule mentioned in the documentation regarding setting vram_mb and number of concurrent raylets to an appropriate value. " \
+                      f"\n                             Exiting...")
+                exit() 
+            else: 
+                print(f"[{datetime.now()}] Sucessfully requested up to {round(requested_vram_mb, 2)} MB of VRAM ({round(avail_vram_mb_90, 2)} MB available). Continuing...")
         
          
     def configure_cpu(self): 
@@ -1163,10 +658,8 @@ class EQCCTMSeedRunner():
             cpus_to_use, num_concurrent_predictions, intra, inter, station_count = (True, self.csv_dir)
             print(f"\n[{datetime.now()}] Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, and {inter} Inter Threads...")
             tf_environ(gpu_id=-1, intra_threads=intra, inter_threads=inter)
-            # self.run_mseed_predictor(cpus_to_use, num_concurrent_predictions)
         else:
             tf_environ(gpu_id=-1, intra_threads=self.intra_threads, inter_threads=self.inter_threads) 
-            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_station_predictions)
             
     def configure_gpu(self):
         print(f"\nRunning EQCCT over MSeed Files with GPUs...")
@@ -1179,14 +672,12 @@ class EQCCTMSeedRunner():
             cpus_to_use, num_concurrent_predictions, intra, inter, gpus, vram_mb, station_count = result
             print(f"\n[{datetime.now()}] Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, {inter} Inter Threads, {gpus} GPU IDs, and {vram_mb} MB VRAM per Task...")
             tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_mb, gpus_to_use=gpus, intra_threads=intra, inter_threads=inter)
-            # self.run_mseed_predictor(cpus_to_use, num_concurrent_predictions, use_gpu=True, gpu_id=gpus, gpu_memory_limit_mb=vram_mb)
         else: 
             free_vram_mb = self.set_vram_mb if self.set_vram_mb is not None else self.calculate_vram() 
             selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids() # will give a list back of all available GPUs and use them all
             print(f"[{datetime.now()}] Using GPU(s): {selected_gpus}")
             vram_per_task_mb = free_vram_mb / self.number_of_concurrent_station_predictions
             tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_per_task_mb, gpus_to_use=selected_gpus, intra_threads=self.intra_threads, inter_threads=self.inter_threads)
-            # self.run_mseed_predictor(self.cpu_count, self.number_of_concurrent_station_predictions, use_gpu=True, gpu_id=selected_gpus, gpu_memory_limit_mb=vram_per_task_mb)
             
     def calculate_vram(self):
         print(f"[{datetime.now()}] Utilizing available VRAM within Ray Memory Usage Threshold Limit of 0.95...")
@@ -1197,33 +688,6 @@ class EQCCTMSeedRunner():
         free_vram = total_vram * 0.9485 if available_vram / total_vram >= 0.9486 else available_vram
         print(f"[{datetime.now()}] Using {round(free_vram, 2)} GB VRAM (within 94.85% VRAM threshold).")
         return free_vram * 1024  # Convert to MB
-
-    def run_mseed_predictor(self, ray_cpus, num_concurrent_predictions, input_dir, use_gpu=False, gpu_id=None, gpu_memory_limit_mb=None):
-        """
-        Run the mseed_predictor using multiprocessing while limiting it to specific CPU cores.
-        """
-        process = multiprocessing.Process(
-            target=run_mseed_worker,
-            args=(
-                input_dir,
-                self.output_dir,
-                self.log_filepath,
-                self.P_threshold,
-                self.S_threshold,
-                self.p_model_filepath,
-                self.s_model_filepath,
-                num_concurrent_predictions,
-                ray_cpus,
-                use_gpu,
-                gpu_id,
-                gpu_memory_limit_mb,
-                self.specific_stations,
-                self.cpu_id_list  # Pass the limited CPU IDs
-            )
-        )
-
-        process.start()
-        process.join()  # Wait for the process to complete
     
     def chunk_time(self):
         # Creates the timechunks, EI. from X specific time to Y specific time to generate the dt tasks (timechunk tasks that are run in parallel first at the top level)
@@ -1280,7 +744,11 @@ class EQCCTMSeedRunner():
         else: 
             print(f"[{datetime.now()}] Log file '{self.log_filepath}' already exists.")
         
-        # Submit timchunk tasks to mseed_predictior
+        # Calculate how much VRAM & GPU to use 
+        free_vram_mb = self.set_vram_mb if self.set_vram_mb else self.calculate_vram()
+        vram_per_task_mb = free_vram_mb / self.number_of_concurrent_station_predictions
+        
+        # Submit timechunk tasks to mseed_predictor
         tasks_queue = []
         log_queue = queue.Queue()  # Create a queue for log entries
         
@@ -1301,12 +769,13 @@ class EQCCTMSeedRunner():
                 # Concurrent Timechunks 
                 while True: 
                     if len(tasks_queue) < max_pending_tasks: 
-                        tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                        tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=len(self.cpu_id_list)).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                             P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
                                             number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=self.cpu_id_list, use_gpu=self.use_gpu, 
-                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, specific_stations=specific_stations_list, 
+                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=vram_per_task_mb, specific_stations=specific_stations_list, 
                                             timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
-                                            number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time))
+                                            number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time,
+                                            intra_threads=self.intra_threads, inter_threads=self.inter_threads))
                         break
                     # If there are more tasks than maximum, just process them
                     else:
@@ -1443,7 +912,19 @@ class EvaluateSystem():
         os.environ['TMP'] = self.home_tmp_dir
         print(f"\n[{datetime.now()}] Successfully set up temp files to be stored at {self.home_tmp_dir}")
         
-
+        # We need to ensure that the vram specified does not exceed the capabilities of t  he system, if not, we need to exit safely before it happens
+        if set_vram_mb is not None: 
+            _, available_vram = get_gpu_vram() # in GB 
+            self.chunk_time()
+            available_vram_mb = available_vram * 1024
+            max_intended_workers = self.stations2use * len(self.times_list)
+            requested_vram_mb = max_intended_workers * self.set_vram_mb
+            avail_vram_mb_90 = available_vram_mb * 0.90
+            if requested_vram_mb > avail_vram_mb_90:
+                print(f"[{datetime.now()}] You are requesting to use too much VRAM ({requested_vram_mb} MB) than what your GPU is capable of using ({round((avail_vram_mb_90),2)} MB - 90% safety threshold). Please adhere to the rule mentioned in the documentation regarding setting vram_mb. Exiting...")
+                exit() 
+            else: 
+                print(f"[{datetime.now()}] Sucessfully requested up to {round(requested_vram_mb, 2)} MB of VRAM ({round(avail_vram_mb_90, 2)} MB available - 90% safety threshold). Continuing...")
         
         
     def _generate_stations_list(self):
@@ -1479,34 +960,34 @@ class EvaluateSystem():
         tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
         self.tasks_picker = tasks
     
-    def _run_trial(self, trial_num, cpus_to_use, num_stations, num_concurrent_predictions, num_concurrent_tasks, mseed_timechunk_dir_name, timechunk_dir_path, use_gpu=False, gpu_memory_limit_mb=None):
-        """Runs a trial for evaluation script with a controlled cpu process"""
-        print(f"\nTrial Number: {trial_num}")
+    # def _run_trial(self, trial_num, cpus_to_use, num_stations, num_concurrent_predictions, num_concurrent_tasks, mseed_timechunk_dir_name, timechunk_dir_path, use_gpu=False, gpu_memory_limit_mb=None):
+    #     """Runs a trial for evaluation script with a controlled cpu process"""
+    #     print(f"\nTrial Number: {trial_num}")
         
-        # process = multiprocessing.Process(
-        #     target=run_prediction,
-        #     args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold, self.S_threshold, 
-        #           self.p_model_filepath, self.s_model_filepath, num_concurrent_predictions, len(cpus_to_use),
-        #           use_gpu, num_stations, cpus_to_use, f"{self.csv_dir}/{self.eval_mode}_test_results.csv",
-        #           self.intra_threads, self.inter_threads, use_gpu, gpu_memory_limit_mb, self.selected_gpus))
-        # process.start()
-        # process.join()
+    #     # process = multiprocessing.Process(
+    #     #     target=run_prediction,
+    #     #     args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold, self.S_threshold, 
+    #     #           self.p_model_filepath, self.s_model_filepath, num_concurrent_predictions, len(cpus_to_use),
+    #     #           use_gpu, num_stations, cpus_to_use, f"{self.csv_dir}/{self.eval_mode}_test_results.csv",
+    #     #           self.intra_threads, self.inter_threads, use_gpu, gpu_memory_limit_mb, self.selected_gpus))
+    #     # process.start()
+    #     # process.join()
         
-        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
-        mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
-                                            P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                            number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
-                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
-                                            timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
-                                            number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time)
+    #     total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+    #     mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+    #                                         P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
+    #                                         number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
+    #                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
+    #                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
+    #                                         number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time, 
+    #                                         intra_threads=self.intra_threads, inter_threads=self.inter_threads)
         
-        if self.use_gpu:
-            # CPU
-            update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 1, "", self.output_dir, use_gpu, gpu_memory_limit_mb)
-        else:
-            # GPU
-            update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, use_gpu, gpu_memory_limit_mb)
-        
+    #     if self.use_gpu:
+    #         # CPU
+    #         update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 1, "", self.output_dir, use_gpu, gpu_memory_limit_mb)
+    #     else:
+    #         # GPU
+    #         update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, use_gpu, gpu_memory_limit_mb)
         
         
     def evaluate_cpu(self): 
@@ -1600,13 +1081,13 @@ class EvaluateSystem():
                             tasks_queue = []
                             while True: 
                                 if len(tasks_queue) < max_pending_tasks: 
-                                    tasks_queue.append(mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                                    tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=cpus_to_use).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
                                                         P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
                                                         number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
                                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
                                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                                         number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
-                                                        test_csv_filepath=csv_filepath))
+                                                        test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads))
                                 
                                     break
                             
@@ -1688,23 +1169,23 @@ class EvaluateSystem():
                 vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
 
                 for gpu_memory_limit_mb in vram_steps:
-                    print(f"\n[{datetime.now()}] VRAM Limited to {gpu_memory_limit_mb / 1024:.2f} GB per Task")
+                    print(f"\n[{datetime.now()}] VRAM Limited to {vram_per_task_mb / 1024:.2f} GB per Task")
                     print(f"\nTrial Number: {trial_num}")
                     process = multiprocessing.Process(
                         target=run_prediction,
                         args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold,
                               self.S_threshold, self.p_model_filepath, self.s_model_filepath,
                               predictions, self.cpu_count, True, stations, self.cpu_id_list, csv_filepath,
-                              self.intra_threads, self.inter_threads, True, gpu_memory_limit_mb, self.selected_gpus)
+                              self.intra_threads, self.inter_threads, True, vram_per_task_mb, self.selected_gpus)
                     )
                     process.start()
                     process.join()
 
                     # Handle exit codes
                     if process.exitcode == 0:
-                        update_csv(csv_filepath, trial_num, self.intra_threads, self.inter_threads, 1, "", self.output_dir, True, gpu_memory_limit_mb)
+                        update_csv(csv_filepath, trial_num, self.intra_threads, self.inter_threads, 1, "", self.output_dir, True, vram_per_task_mb)
                     else:
-                        update_csv(csv_filepath, trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, True, gpu_memory_limit_mb)
+                        update_csv(csv_filepath, trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, True, vram_per_task_mb)
                     trial_num += 1
 
         print(f"[{datetime.now()}] GPU Testing complete. Finding optimal configurations...")
@@ -1736,6 +1217,7 @@ class EvaluateSystem():
         return free_vram * 1024  # Convert to MB
 
 class OptimalCPUConfigurationFinder: 
+
     """Finds the optimal CPU configuration based on evaluation results"""
     def __init__(self, eval_sys_results_dir: str):
         if not eval_sys_results_dir or not os.path.isdir(eval_sys_results_dir): 
@@ -1915,161 +1397,7 @@ class OptimalGPUConfigurationFinder:
                gpu_list, \
                int(float(best_config["VRAM Used Per Task"])), \
                int(float(station_count))
-               
-               
-def run_mseed_worker(input_dir, output_dir, log_file, P_threshold, S_threshold, p_model, s_model, 
-                     num_concurrent_predictions, ray_cpus, use_gpu, gpu_id, gpu_memory_limit_mb, 
-                     specific_stations, cpu_id_list):
-    """
-    Worker function to execute mseed_predictor within a specific CPU affinity.
-    """
-    # Set CPU affinity
-    process = psutil.Process(os.getpid())
-    process.cpu_affinity(cpu_id_list)  # Limit process to the given CPU IDs
-
-    # Run the predictor
-    mseed_predictor(
-        input_dir=input_dir, 
-        output_dir=output_dir, 
-        log_file=log_file, 
-        P_threshold=P_threshold, 
-        S_threshold=S_threshold, 
-        p_model=p_model, 
-        s_model=s_model, 
-        number_of_concurrent_station_predictions=num_concurrent_predictions, 
-        ray_cpus=ray_cpus,
-        use_gpu=use_gpu,
-        gpu_id=gpu_id,
-        gpu_memory_limit_mb=gpu_memory_limit_mb,
-        specific_stations=specific_stations
-    )
-    
-                
-def run_EQCCT_mseed(
-        use_gpu: bool, 
-        input_dir: str, 
-        output_dir: str, 
-        log_filepath: str, 
-        p_model_filepath: str, 
-        s_model_filepath: str, 
-        number_of_concurrent_station_predictions: int, 
-        intra_threads: int = 1, 
-        inter_threads: int = 1, 
-        P_threshold: float = 0.001, 
-        S_threshold: float = 0.02,
-        specific_stations: str = None,
-        csv_dir: str = None,
-        best_usecase_config: bool = None,
-        set_vram_mb: float = None,
-        selected_gpus: list = None,
-        cpu_id_list: list = [1]):
-    """
-    run_EQCCT_mseed enables users to use EQCCT to generate picks on MSEED files
-    """
-    cpu_count = len(cpu_id_list)
-    cpu_list = cpu_id_list
-    
-    # CPU Usage
-    if use_gpu is False:
-        print(f"\nRunning EQCCT over MSeed Files with CPUs") 
-        if best_usecase_config is True:
-            cpus_to_use, num_concurrent_predictions, intra, inter, station_count = (True, csv_dir)
-            print(f"\n[{datetime.now()}] Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, and {inter} Inter Threads")
-            tf_environ(gpu_id=-1, intra_threads=intra, inter_threads=inter)
-            mseed_predictor(input_dir=input_dir, 
-                    output_dir=output_dir, 
-                    log_file=log_filepath, 
-                    P_threshold=P_threshold, 
-                    S_threshold=S_threshold, 
-                    p_model=p_model_filepath, 
-                    s_model=s_model_filepath, 
-                    number_of_concurrent_station_predictions=num_concurrent_predictions, 
-                    ray_cpus=cpus_to_use,
-                    use_gpu=False,
-                    specific_stations=specific_stations)    
-        else: 
-            tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads)
-            mseed_predictor(input_dir=input_dir, 
-                    output_dir=output_dir, 
-                    log_file=log_filepath, 
-                    P_threshold=P_threshold, 
-                    S_threshold=S_threshold, 
-                    p_model=p_model_filepath, 
-                    s_model=s_model_filepath, 
-                    number_of_concurrent_station_predictions=number_of_concurrent_station_predictions, 
-                    ray_cpus=cpu_count,
-                    use_gpu=False,
-                    specific_stations=specific_stations)
-        
-    # GPU Usage   
-    if use_gpu is True:  
-        print(f"\nRunning EQCCT over MSeed Files with GPUs")    
-        if best_usecase_config is True: 
-            result = find_optimal_configuration_gpu(True, csv_dir)
-            if result is None:
-                print(f"\n[{datetime.now()}] Error: Could not retrieve an optimal GPU configuration. Please check the CSV file and try again.")
-                exit()  # Exit gracefully
-            # Unpack values only if result is valid
-            cpus_to_use, num_concurrent_predictions, intra, inter, gpus, vram_mb, station_count = result
             
-            print(f"\n[{datetime.now()}] Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, {inter} Inter Threads, {gpus} GPU IDs, and {vram_mb} MB VRAM per Task")
-            tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_mb, gpus_to_use=gpus, intra_threads=intra, inter_threads=inter)
-            mseed_predictor(input_dir=input_dir, 
-                        output_dir=output_dir, 
-                        log_file=log_filepath, 
-                        P_threshold=P_threshold, 
-                        S_threshold=S_threshold, 
-                        p_model=p_model_filepath, 
-                        s_model=s_model_filepath, 
-                        number_of_concurrent_station_predictions=num_concurrent_predictions, 
-                        ray_cpus=cpus_to_use,
-                        use_gpu=True,
-                        gpu_id=gpus,
-                        gpu_memory_limit_mb=vram_mb,
-                        specific_stations=specific_stations)
-        else: 
-            if set_vram_mb is not None: 
-                free_vram_mb = set_vram_mb
-                print(f"[{datetime.now()}] VRAM set to {free_vram_mb} MB.")
-            else:
-                # Setting VRAM
-                print(f"[{datetime.now()}] Utilizing available VRAM within Ray Memory Usage Threshold Limit of 0.95...")
-                total_vram, available_vram = get_gpu_vram()
-                print(f"[{datetime.now()}] Total VRAM: {total_vram:.2f} GB")
-                print(f"[{datetime.now()}] Available VRAM: {available_vram:.2f} GB")
-                # 95% of the Node's memory can be used by Ray and it's Raylets. 
-                # Beyond the threshold, Ray will begin to kill process to save the node's memory             
-                if available_vram / total_vram >= 0.9486: # 94.86% as a saftey value threshold, can use 94.85% and below 
-                    free_vram = total_vram * 0.9485        
-                
-                print(f"[{datetime.now()}] Using {round(free_vram, 2)} GB VRAM (within 94.85% VRAM threshold)")
-                free_vram_mb = free_vram * 1024 # Convert to MB 
-                
-            # Setting GPUs to use 
-            if selected_gpus: 
-                selected_gpus = selected_gpus
-            else: 
-                selected_gpus = list_gpu_ids()
-            print(f"[{datetime.now()}] Using GPU(s): {selected_gpus}")
-
-                
-            vram_per_task_mb = free_vram_mb / number_of_concurrent_station_predictions
-            
-            tf_environ(gpu_id=1, gpu_memory_limit_mb=vram_per_task_mb, gpus_to_use=selected_gpus, intra_threads=intra_threads, inter_threads=inter_threads)
-            mseed_predictor(input_dir=input_dir, 
-                    output_dir=output_dir, 
-                    log_file=log_filepath, 
-                    P_threshold=P_threshold, 
-                    S_threshold=S_threshold, 
-                    p_model=p_model_filepath, 
-                    s_model=s_model_filepath, 
-                    number_of_concurrent_station_predictions=number_of_concurrent_station_predictions, 
-                    ray_cpus=cpu_count,
-                    use_gpu=True,
-                    gpu_id=selected_gpus, 
-                    gpu_memory_limit_mb=vram_per_task_mb,
-                    specific_stations=specific_stations)
-        
     
 
 def parse_time_range(time_string):
@@ -2115,7 +1443,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
               waveform_overlap=None,
               total_timechunks=None,
               number_of_concurrent_timechunk_predictions=None,
-              total_analysis_time=None): 
+              total_analysis_time=None,
+              intra_threads=None,
+              inter_threads=None): 
     
     """ 
     
@@ -2169,7 +1499,14 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # elif use_gpu is True: 
     #     ray.init(ignore_reinit_error=True, num_gpus=len(gpu_id), num_cpus=ray_cpus, logging_level=logging.FATAL, log_to_driver=False) # Ray initalization using GPUs 
     #     print(f"[{datetime.now()}] Ray Successfully Initialized with {len(gpu_id)} GPU(s) and {ray_cpus} CPU(s).")
-        
+    
+    # We set up the tf_environ again for the Raylets, who adopt their own import state and TF runtime when created. 
+    # We want to ensure that they are configured properly so that they won't die (bad)
+    if use_gpu: 
+        tf_environ(gpu_id=1, gpu_memory_limit_mb=gpu_memory_limit_mb, gpus_to_use=gpu_id, intra_threads=intra_threads, inter_threads=inter_threads)
+    else: 
+        tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads)
+
     args = {
     "input_dir": input_dir,
     "output_dir": output_dir,
@@ -2351,7 +1688,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
 @ray.remote
 def parallel_predict(predict_args, gpu=False, gpu_memory_limit_mb=None):
-    
+    from eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
     if gpu is True: 
         # Ensure TensorFlow only sees its assigned VRAM
         gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -2416,6 +1753,7 @@ def parallel_predict(predict_args, gpu=False, gpu_memory_limit_mb=None):
         for ix in range(len(predP)):
             Ppicks, Pprob =  _picker(args, predP[ix,:, 0])   
             Spicks, Sprob =  _picker(args, predS[ix,:, 0], 'S_threshold')
+
             detection_memory,prob_memory=_output_writter_prediction(meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, detection_memory,prob_memory,predict_writer, ix,len(predP),len(predS))
                                         
         end_Predicting = time.time()
@@ -2533,99 +1871,6 @@ def _mseed2nparray(args, files_list, station):
         })
                     
     return meta, data_set, freqmin, freqmax
-
-
-class PreLoadGeneratorTest(tf.keras.utils.Sequence):
-    
-    """ 
-    
-    Keras generator with preprocessing. For testing. Pre-load version.
-    
-    Parameters
-    ----------
-    list_IDsx: str
-        List of trace names.
-            
-    file_name: str
-        Path to the input hdf5 file.
-            
-    dim: tuple
-        Dimension of input traces. 
-           
-    batch_size: int, default=32.
-        Batch size.
-            
-    n_channels: int, default=3.
-        Number of channels.
-            
-    norm_mode: str, default=max
-        The mode of normalization, 'max' or 'std'                
-            
-    Returns
-    --------        
-    Batches of two dictionaries: {'input': X}: pre-processed waveform as input {'picker_P': y2, 'picker_S': y3}: outputs including two separate numpy arrays as labels for P, and S respectively.
-    
-    
-    """
-
-    def __init__(self, list_IDs, inp_data, batch_size=32, norm_mode='std', **kwargs):
-        'Initialization'
-        self.batch_size = batch_size
-        self.list_IDs = list_IDs
-        self.inp_data = inp_data        
-        self.on_epoch_end()
-        self.norm_mode = norm_mode
-        
-    def __len__(self):
-        'Denotes the number of batches per epoch'
-        try:
-            return int(np.ceil(len(self.list_IDs) / self.batch_size))
-        except ZeroDivisionError:
-            print("Your data duration in mseed file is too short! Try either longer files or reducing batch_size. ")
-
-    def __getitem__(self, index):
-        'Generate one batch of data'
-        start_idx = index * self.batch_size
-        end_idx = min((index + 1) * self.batch_size, len(self.list_IDs))
-        indexes = self.indexes[start_idx:end_idx]
-
-        list_IDs_temp = [self.list_IDs[k] for k in indexes]
-        X = self.__data_generation(list_IDs_temp)
-
-        # Handle case where the batch is not full
-        if len(list_IDs_temp) < self.batch_size:
-            X = X[:len(list_IDs_temp)]
-
-        return {'input': X}
-
-    def on_epoch_end(self):
-        'Updates indexes after each epoch'
-        self.indexes = np.arange(len(self.list_IDs))
-    
-    def _normalize(self, data, mode='max'):
-        data -= np.mean(data, axis=0, keepdims=True)
-        if mode == 'max':
-            max_data = np.max(data, axis=0, keepdims=True)
-            assert(max_data.shape[-1] == data.shape[-1])
-            max_data[max_data == 0] = 1
-            data /= max_data
-
-        elif mode == 'std':
-            std_data = np.std(data, axis=0, keepdims=True)
-            assert(std_data.shape[-1] == data.shape[-1])
-            std_data[std_data == 0] = 1
-            data /= std_data
-        return data
-                       
-    def __data_generation(self, list_IDs_temp):
-        'readint the waveforms'
-        X = np.zeros((self.batch_size, 6000, 3))
-        # Generate data
-        for i, ID in enumerate(list_IDs_temp):
-            data = self.inp_data[ID]
-            data = self._normalize(data, self.norm_mode)
-            X[i, :, :] = data
-        return X
 
 
 def _output_writter_prediction(meta, csvPr, Ppicks, Pprob, Spicks, Sprob, detection_memory,prob_memory,predict_writer, idx, cq, cqq):
