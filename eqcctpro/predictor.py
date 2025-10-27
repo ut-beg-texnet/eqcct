@@ -1,20 +1,11 @@
-import importlib
+import re
 import os
 import gc 
 import sys
-
-# # Save the original stderr (so we can restore it later if needed)
-# original_stderr = sys.stderr
-
-# # Open /dev/null to discard unwanted logs
-# devnull = open(os.devnull, 'w')
-
-# # Redirect only TensorFlow-related logs to /dev/null
-# os.dup2(devnull.fileno(), sys.stderr.fileno())
-
 import ast
 import ray
 import csv
+import json 
 import time
 import glob
 import queue
@@ -24,9 +15,11 @@ import psutil
 import random
 import logging
 import platform
+import importlib
 import numpy as np
 import pandas as pd
 from os import listdir
+from pathlib import Path
 from progress.bar import IncrementalBar
 from datetime import datetime, timedelta
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -60,50 +53,53 @@ transformer_units = [
 ]  # Size of the transformer layers
 transformer_layers = 4
 
+CANONICAL_CSV_HEADER = [
+    "Trial Number",
+    "Stations Used",
+    "Number of Stations Used",
+    "Number of CPUs Allocated for Ray to Use",
+    "Intra-parallelism Threads",
+    "Inter-parallelism Threads",
+    "GPUs Used",
+    "VRAM Used Per Task",
+    "Total Waveform Analysis Timespace (min)",
+    "Total Number of Timechunks",
+    "Concurrent Timechunks Used",
+    "Length of Timechunk (min)",
+    "Number of Concurrent Station Tasks",
+    "Total Run time for Picker (s)",
+    "Trial Success",
+    "Error Message",
+]
 
-# def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True):
-#     print("-----------------------------\nTensorflow and Ray Configuration...\n")
-#     import os, tensorflow as tft 
-#     global tf
-#     tf = tft # importlib.import_module("tensorflow")
-#     # 0) Set visibility FIRST (subset only the GPUs you want to use)
-#     if gpu_id == -1 or not gpus_to_use:
-#         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-#         print(f"[{datetime.now()}] GPU processing disabled, using CPU.")
-#     else:
-#         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus_to_use))
-#         print(f"[{datetime.now()}] GPU processing enabled. Using GPUs (by ID): {gpus_to_use}")
+_TIMECHUNK_RE = re.compile(r"^\d{8}T\d{6}Z_\d{8}T\d{6}Z$")
 
-#     # 1) Now import TF (device list will honor the ENV above)\
-#     if log_device:
-#         tf.debugging.set_log_device_placement(True)
+def looks_like_timechunk_id(name: str) -> bool:
+    return bool(_TIMECHUNK_RE.match(name or ""))
 
-#     # 2) Work only with the *visible* devices in this process
-#     vis_gpus = tf.config.list_physical_devices("GPU")
-#     if not vis_gpus:
-#         print(f"[{datetime.now()}] No GPUs visible; using CPU.")
-#     else: 
-#         try:
-#             for gpu in vis_gpus: 
-#                 if gpu_memory_limit_mb: 
-#                     # Option A: Hardcap the memory usage per raylet for the GPU
-#                     tf.config.experimental.set_virtual_device_configuration(gpu, [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)])
-#                     print(f"[{datetime.now()}] GPU and system memory configuration enabled.")
-#                 else:
-#                     print(f"[{datetime.now()}] Please specify the amount of VRAM you want each Raylet will use. Exiting....")
-#                     exit()
-#         except RuntimeError as e: 
-#             print(f"Error configuring TensorFlow: {e}")
-#             exit()
-    
+def build_station_list_from_dir(input_dir: str) -> list[str]:
+    """
+    Robustly discover stations under a timechunk directory.
+    Accepts files like *.mseed/*.sac or one-dir-per-station structures.
+    """
+    stations = set()
 
-#     if intra_threads is not None:
-#         tf.config.threading.set_intra_op_parallelism_threads(intra_threads)
-#         print(f"[{datetime.now()}] Intraparallelism thread successfully set.")
-#     if inter_threads is not None:
-#         tf.config.threading.set_inter_op_parallelism_threads(inter_threads)
-#         print(f"[{datetime.now()}] Interparallelism thread successfully set.")
-#     print(f"[{datetime.now()}] Tensorflow successfully set up for model operations.")
+    # 1) Files directly inside input_dir
+    for p in glob.glob(os.path.join(input_dir, "*")):
+        base = os.path.basename(p)
+        if os.path.isfile(p):
+            # file path — take stem without extension
+            stations.add(os.path.splitext(base)[0])
+
+    # 2) One subdir per station (e.g., input_dir/AT01/*.mseed)
+    for p in glob.glob(os.path.join(input_dir, "*")):
+        if os.path.isdir(p):
+            stations.add(os.path.basename(p))
+
+    # Filter out anything that looks like a timechunk id (safety)
+    stations = [s for s in stations if not looks_like_timechunk_id(s)]
+
+    return sorted(stations)
 
 def tf_environ(gpu_id, gpu_memory_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True,):
     """
@@ -202,36 +198,42 @@ def prepare_csv(csv_file_path, gpu:bool=False):
         return pd.read_csv(csv_file_path)
     print(f"[{datetime.now()}] CSV file not found. Creating a new CSV file at '{csv_file_path}'...")
     
-    if gpu is False: 
-        columns = [
-            "Trial Number", "Stations Used", "Number of Stations Used",
-            "Number of CPUs Allocated for Ray to Use", "Intra-parallelism Threads", "Inter-parallelism Threads", 
-            "Total Waveform Analysis Timespace (min)", "Total Number of Timechunks",
-            "Concurrent Timechunks Used", "Length of Timechunk (min)", "Number of Concurrent Station Tasks", 
-            "Total Run time for Picker (s)", "Trial Success", "Error Message"
-        ]
-    else: 
-        columns = [
-            "Trial Number", "Stations Used", "Number of Stations Used",
-            "Number of CPUs Allocated for Ray to Use", "Intra-parallelism Threads", "Inter-parallelism Threads", 
-            "GPUs Used", "VRAM Used Per Task", "Total Waveform Analysis Timespace (min)", 
-            "Total Number of Timechunks", "Concurrent Timechunks Used", "Length of Timechunk (min)", "Number of Concurrent Station Tasks",
-            "Total Run time for Picker (s)", "Trial Success", "Error Message"
-        ]
+    columns = CANONICAL_CSV_HEADER
     df = pd.DataFrame(columns=columns)
     df.to_csv(csv_file_path, index=False)
 
-def update_csv(csv_filepath, trial_number, intra, inter, success, error_message, gpu:bool=False, vram_mb=None):
-    df = pd.read_csv(csv_filepath)
-    df.at[trial_number -1, "Trial Number"] = trial_number
-    df.at[trial_number -1, "Intra-parallelism Threads"] = intra
-    df.at[trial_number -1, "Inter-parallelism Threads"] = inter
-    df.at[trial_number -1, "Trial Success"] = success
-    df.at[trial_number -1, "Error Message"] = error_message
+def append_trial_row(csv_path: str, trial_data: dict):
+    """
+    Append a complete trial row to the CSV with all fields populated.
+    """
+    csvp = Path(csv_path)
     
-    if gpu is True: 
-        df.at[trial_number -1, "VRAM Used Per Task"] = vram_mb
-        
+    # Ensure header exists with canonical order
+    if not csvp.exists():
+        pd.DataFrame(columns=CANONICAL_CSV_HEADER).to_csv(csvp, index=False)
+
+    df_existing = pd.read_csv(csvp)
+    
+    # Align row to the canonical header (use empty string for missing keys)
+    row = {col: trial_data.get(col, "") for col in CANONICAL_CSV_HEADER}
+    
+    # Auto-number trials if not provided
+    if pd.isna(row["Trial Number"]) or row["Trial Number"] == "" or row["Trial Number"] is None:
+        row["Trial Number"] = len(df_existing) + 1
+
+    df_new = pd.DataFrame([row], columns=CANONICAL_CSV_HEADER)
+    df_out = pd.concat([df_existing, df_new], ignore_index=True)
+    df_out.to_csv(csvp, index=False)
+    
+    print(f"[{datetime.now()}] Appended trial {row['Trial Number']} to {csv_path}")
+
+
+def update_csv(csv_filepath, success, error_message):
+    df = pd.read_csv(csv_filepath)
+    last_row = df.iloc[-1]
+    last_row['Trial Success'] = success
+    last_row['Error Message'] = error_message
+                
     df.to_csv(csv_filepath, index=False)
 
 def generate_station_list(starting_amount_of_stations, total_num_stations_to_use, station_list_step_size):
@@ -287,7 +289,12 @@ def remove_output_subdirs(path):
 def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold, 
                    p_model_filepath, s_model_filepath, num_concurrent_predictions, 
                    ray_cpus, use_gpu, stations2use, cpus_to_use, csv_filepath, intra_threads, inter_threads, testing_gpu, 
-                   gpu_memory_limit_mb=None, gpus_to_use=None):
+                   gpu_memory_limit_mb=None, gpus_to_use=None,
+                   timechunk_dt=None, 
+                   total_timechunks=None, 
+                   number_of_concurrent_timechunk_predictions=None, 
+                   total_analysis_time=None,
+                   waveform_overlap=None):
     """Function to run tf_environ and mseed_predictor as a separate process"""
     
     # Set CPU affinity for the child process
@@ -300,7 +307,7 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
         # Initialize TensorFlow environment with CPUs 
         tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads)
         # Run prediction
-        mseed_predictor(
+        ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
             input_dir=input_dir, 
             output_dir=output_dir, 
             log_file=log_filepath, 
@@ -315,11 +322,17 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
             testing_gpu=testing_gpu,
             test_csv_filepath=csv_filepath,
             intra_threads=intra_threads, 
-            inter_threads=inter_threads)
+            inter_threads=inter_threads,
+            timechunk_dt=timechunk_dt,
+            total_timechunks=total_timechunks,
+            number_of_concurrent_timechunk_predictions=number_of_concurrent_timechunk_predictions,
+            total_analysis_time=total_analysis_time,
+            waveform_overlap=waveform_overlap)
+        _ = ray.get(ref)
     else: 
         # Initialize TensorFlow environment with GPUs 
         tf_environ(gpu_id=1, gpu_memory_limit_mb=gpu_memory_limit_mb, gpus_to_use=gpus_to_use,intra_threads=intra_threads, inter_threads=inter_threads)
-        mseed_predictor(input_dir=input_dir, 
+        ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=input_dir, 
                 output_dir=output_dir, 
                 log_file=log_filepath, 
                 P_threshold=P_threshold, 
@@ -335,9 +348,16 @@ def run_prediction(input_dir, output_dir, log_filepath, P_threshold, S_threshold
                 test_csv_filepath=csv_filepath,
                 stations2use=stations2use,
                 intra_threads=intra_threads, 
-                inter_threads=inter_threads)
+                inter_threads=inter_threads,
+                timechunk_dt=timechunk_dt,
+                total_timechunks=total_timechunks,
+                number_of_concurrent_timechunk_predictions=number_of_concurrent_timechunk_predictions,
+                total_analysis_time=total_analysis_time,
+                waveform_overlap=waveform_overlap)
+        _ = ray.get(ref)
  
- 
+
+
 def find_optimal_configurations_cpu(df):
     """
     Find:
@@ -990,19 +1010,65 @@ class EvaluateSystem():
         print(f"\n[{datetime.now()}] Successfully set up temp files to be stored at {self.home_tmp_dir}")
         
         # We need to ensure that the vram specified does not exceed the capabilities of t  he system, if not, we need to exit safely before it happens
-        if set_vram_mb is not None: 
-            _, available_vram = get_gpu_vram() # in GB 
-            self.chunk_time()
-            available_vram_mb = available_vram * 1024
-            max_intended_workers = self.stations2use * len(self.times_list)
-            requested_vram_mb = max_intended_workers * self.set_vram_mb
-            avail_vram_mb_90 = available_vram_mb * 0.90
-            if requested_vram_mb > avail_vram_mb_90:
-                print(f"[{datetime.now()}] You are requesting to use too much VRAM ({requested_vram_mb} MB) than what your GPU is capable of using ({round((avail_vram_mb_90),2)} MB - 90% safety threshold). Please adhere to the rule mentioned in the documentation regarding setting vram_mb. Exiting...")
-                exit() 
-            else: 
-                print(f"[{datetime.now()}] Sucessfully requested up to {round(requested_vram_mb, 2)} MB of VRAM ({round(avail_vram_mb_90, 2)} MB available - 90% safety threshold). Continuing...")
-        
+        if self.set_vram_mb is not None:
+            if self.eval_mode != "gpu":
+                raise ValueError(
+                    f"set_vram_mb is only meaningful in GPU mode; got eval_mode='{self.eval_mode}'."
+                )
+            if not self.selected_gpus or len(self.selected_gpus) == 0:
+                raise ValueError(
+                    "selected_gpus must be a non-empty list when using set_vram_mb."
+                )
+            if self.set_vram_mb <= 0:
+                raise ValueError("set_vram_mb must be a positive number of MB.")
+
+            # Ensure time chunks are computed so we know how many tasks we will run
+            self.chunk_time()  # populates self.times_list
+
+            # 1) Available VRAM per GPU (GB) -> MB, then multiply by number of selected GPUs
+            _, available_vram_gb = get_gpu_vram()            # returns per-GPU free VRAM in GB
+            available_vram_mb = float(available_vram_gb) * 1024.0
+            total_available_mb = available_vram_mb * len(self.selected_gpus)
+            avail_vram_mb_90 = 0.90 * total_available_mb     # 90% safety ceiling
+
+            # 2) Concurrency / worker count
+            # Use your current worst-case: stations * timechunks for this eval run
+            intended_workers = int(self.stations2use) * int(len(self.times_list) // 2)
+
+            # 3) Model actor reservation (per GPU), plus per-worker slice and EQCCT overhead
+            model_vram_mb = 3000.0                                      # reserve 3 GB per GPU
+            num_model_actors = len(self.selected_gpus)
+            total_model_vram = model_vram_mb * num_model_actors
+
+            requested_vram_mb = float(self.set_vram_mb) * float(intended_workers)
+            eqcct_usage = 1.1 * 1024.0 * float(intended_workers)        # ~1.1 GB per worker overhead
+
+            total_vram_needed = total_model_vram + requested_vram_mb + eqcct_usage
+
+            if total_vram_needed > avail_vram_mb_90:
+                # Fail fast with a precise diagnostic
+                raise RuntimeError(
+                    (
+                        f"[{datetime.now()}] ERROR: Insufficient VRAM for requested configuration.\n"
+                        f"  Selected GPUs: {self.selected_gpus}\n"
+                        f"  Available (90% cap): {avail_vram_mb_90:.0f} MB "
+                        f"(= 0.9 * {total_available_mb:.0f} MB across {num_model_actors} GPU(s))\n"
+                        f"  Budget request breakdown:\n"
+                        f"    • Model actors: {total_model_vram:.0f} MB "
+                        f"({model_vram_mb:.0f} MB × {num_model_actors} GPU(s))\n"
+                        f"    • Workers:      {requested_vram_mb:.0f} MB "
+                        f"({self.set_vram_mb:.0f} MB × {intended_workers} workers)\n"
+                        f"    • EQCCT overhead: {eqcct_usage:.0f} MB "
+                        f"(~1.1 GB × {intended_workers} workers)\n"
+                        f"  TOTAL requested: {total_vram_needed:.0f} MB\n\n"
+                        f"Action: Reduce stations/timechunks concurrency or lower set_vram_mb."
+                    )
+                )
+            else:
+                print(
+                    f"[{datetime.now()}] VRAM budget OK. "
+                    f"Request {total_vram_needed:.0f} MB ≤ {avail_vram_mb_90:.0f} MB (90% cap) across {num_model_actors} GPU(s)."
+                )
         
     def _generate_stations_list(self):
         """Generates station list"""
@@ -1036,36 +1102,6 @@ class EvaluateSystem():
     def dt_task_generator(self): 
         tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
         self.tasks_picker = tasks
-    
-    # def _run_trial(self, trial_num, cpus_to_use, num_stations, num_concurrent_predictions, num_concurrent_tasks, mseed_timechunk_dir_name, timechunk_dir_path, use_gpu=False, gpu_memory_limit_mb=None):
-    #     """Runs a trial for evaluation script with a controlled cpu process"""
-    #     print(f"\nTrial Number: {trial_num}")
-        
-    #     # process = multiprocessing.Process(
-    #     #     target=run_prediction,
-    #     #     args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold, self.S_threshold, 
-    #     #           self.p_model_filepath, self.s_model_filepath, num_concurrent_predictions, len(cpus_to_use),
-    #     #           use_gpu, num_stations, cpus_to_use, f"{self.csv_dir}/{self.eval_mode}_test_results.csv",
-    #     #           self.intra_threads, self.inter_threads, use_gpu, gpu_memory_limit_mb, self.selected_gpus))
-    #     # process.start()
-    #     # process.join()
-        
-    #     total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
-    #     mseed_predictor.remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
-    #                                         P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-    #                                         number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=len(self.cpu_id_list), use_gpu=self.use_gpu, 
-    #                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
-    #                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
-    #                                         number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time, 
-    #                                         intra_threads=self.intra_threads, inter_threads=self.inter_threads)
-        
-    #     if self.use_gpu:
-    #         # CPU
-    #         update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 1, "", self.output_dir, use_gpu, gpu_memory_limit_mb)
-    #     else:
-    #         # GPU
-    #         update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, use_gpu, gpu_memory_limit_mb)
-        
         
     def evaluate_cpu(self): 
         """Evaluate system parallelization using CPUs"""
@@ -1164,7 +1200,7 @@ class EvaluateSystem():
                                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
                                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                                         number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
-                                                        test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads))
+                                                        test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt))
                                 
                                     break
                             
@@ -1181,7 +1217,7 @@ class EvaluateSystem():
                                     log_entry = ray.get(finished_task)
                                     log_queue.put(log_entry)  # Add log entry to the queue
 
-                                update_csv(f"{self.csv_dir}/{self.eval_mode}_test_results.csv", trial_num, self.intra_threads, self.inter_threads, 1, "", False, self.set_vram_mb)
+                                update_csv(csv_filepath, success=1, error_message="")
                                 
                                 # Write log entries from the queue to the file
                                 while not log_queue.empty():
@@ -1225,9 +1261,14 @@ class EvaluateSystem():
         # Set CPU affinity
         process = psutil.Process(os.getpid())
         process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
-        trial_num
+        trial_num = 1 
         self._prepare_environment() # Remove outputs dir 
-        
+
+        # Calculate these at the start
+        self.chunk_time()
+        self.dt_task_generator()
+        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+            
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/gpu_test_results.csv"
         prepare_csv(csv_filepath, True)
@@ -1253,16 +1294,17 @@ class EvaluateSystem():
                         args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold,
                               self.S_threshold, self.p_model_filepath, self.s_model_filepath,
                               predictions, self.cpu_count, True, stations, self.cpu_id_list, csv_filepath,
-                              self.intra_threads, self.inter_threads, True, vram_per_task_mb, self.selected_gpus)
+                              self.intra_threads, self.inter_threads, True, vram_per_task_mb, self.selected_gpus,
+                              self.timechunk_dt, len(self.tasks_picker), 1, total_analysis_time, self.waveform_overlap)
                     )
                     process.start()
                     process.join()
 
                     # Handle exit codes
                     if process.exitcode == 0:
-                        update_csv(csv_filepath, trial_num, self.intra_threads, self.inter_threads, 1, "", self.output_dir, True, vram_per_task_mb)
+                        update_csv(csv_filepath, success=1, error_message='NA')
                     else:
-                        update_csv(csv_filepath, trial_num, self.intra_threads, self.inter_threads, 0, process.exitcode, self.output_dir, True, vram_per_task_mb)
+                        update_csv(csv_filepath, success=0, error_message=process.exitcode)
                     trial_num += 1
 
         print(f"[{datetime.now()}] GPU Testing complete. Finding optimal configurations...")
@@ -1522,7 +1564,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
               number_of_concurrent_timechunk_predictions=None,
               total_analysis_time=None,
               intra_threads=None,
-              inter_threads=None): 
+              inter_threads=None, 
+              timechunk_dt=None): 
     
     """ 
     
@@ -1652,6 +1695,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
         log_messages += f"[{datetime.now()}] Using {len(station_list)} selected station(s).\n"
     
         # log.write(f"new station_list: {station_list}")
+
+        if not station_list or any(looks_like_timechunk_id(x) for x in station_list):
+            # Rebuild from the actual contents of the timechunk dir
+            station_list = build_station_list_from_dir(args['input_dir'])
+            log_messages += f"[{datetime.now()}] Station list rebuilt from directory because it contained a timechunk id or was empty.\n"
+
         tasks_predictor = [[f"({i+1}/{len(station_list)})", station_list[i], out_dir, args] for i in range(len(station_list))]
         # log.write(f"tasks_predictor:\n{tasks_predictor}")
         
@@ -1678,7 +1727,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             log_messages += f"[{datetime.now()}] Created {len(model_actors)} GPU model actor(s) with {model_vram_mb/1024:.2f}GB VRAM each\n"
         else:
             # Create CPU model actor
-            model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit=None, use_gpu=False)]
+            model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)]
             log_messages += f"[{datetime.now()}] Created 1 CPU model actor\n"
 
         # Submit tasks to ray in a queue
@@ -1687,7 +1736,17 @@ def mseed_predictor(input_dir='downloads_mseeds',
         log_messages += f"[{datetime.now()}] Starting EQCCTPro parallelized waveform processing...\n"
         start_time = time.time() 
         log_messages += f"\n-----------------------------\nAnalyzing Seismic Waveforms for P and S Picks via EQCCT...\n\n"
+
+        if timechunk_id is None:
+            # derive from the path if caller forgot to pass it
+            cand = os.path.basename(input_dir)
+            if "_" in cand and len(cand) >= 10:
+                timechunk_id = cand
+            else:
+                raise ValueError("timechunk_id is None and could not be inferred from input_dir; "
+                                "expected a dir named like YYYYMMDDThhmmssZ_YYYYMMDDThhmmssZ")
         starttime, endtime, time_delta = parse_time_range(timechunk_id)
+
         log_messages += f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)\n"
         log_messages += f"\n[{datetime.now()}] Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.\n"
         
@@ -1734,68 +1793,45 @@ def mseed_predictor(input_dir='downloads_mseeds',
         end_time = time.time()
         log_messages += f"\n[{datetime.now()}] Picks saved at {output_dir}\n[{datetime.now()}] Process Runtime: {end_time - start_time:.2f} s"
         
-        # Generate CSV for either CPU or GPU trial tests
         if testing_gpu is not None: 
-            if testing_gpu is False: 
-                # CPU CSV 
-                trial_data = {
-                    "Trial Number": None,
-                    "Stations Used": f"{station_list}",
-                    "Number of Stations Used": f"{len(station_list)}",
-                    "Number of CPUs Allocated for Ray to Use": f"{len(ray_cpus)}",
-                    "Intra-parallelism Threads": None, 
-                    "Inter-parallelism Threads": None, 
-                    "Total Waveform Analysis Timespace (min)": total_analysis_time,
-                    "Total Number of Timechunks": total_timechunks,
-                    "Concurrent Timechunks Used": number_of_concurrent_timechunk_predictions, 
-                    "Length of Timechunks (min)": time_delta,
-                    "Number of Concurrent Station Tasks": number_of_concurrent_station_predictions,
-                    "Total Run time for Picker (s)": f"{end_time - start_time:.6f}",
-                    "Trial Success": None, 
-                    "Error Message": None  
-                }
-            else: 
-                # GPU CSV
-                trial_data = {
-                    "Trial Number": None,
-                    "Stations Used": f"{station_list}",
-                    "Number of Stations Used": f"{len(station_list)}",
-                    "Number of CPUs Allocated for Ray to Use": f"{len(ray_cpus)}",
-                    "GPUs Used": f"{gpu_id}",
-                    "VRAM Used Per Task": None,  
-                    "Intra-parallelism Threads": None, 
-                    "Inter-parallelism Threads": None, 
-                    "Total Waveform Analysis Timespace (min)": total_analysis_time, 
-                    "Total Number of Timechunks": total_timechunks,
-                    "Concurrent Timechunks Used": number_of_concurrent_timechunk_predictions, 
-                    "Length of Timechunks (min)": time_delta,
-                    "Number of Concurrent Station Tasks": number_of_concurrent_station_predictions,
-                    "Total Run time for Picker (s)": f"{end_time - start_time:.6f}",
-                    "Trial Success": None, 
-                    "Error Message": None  
-                }
+            # Guard: make sure CPUs is an int, not a list
+            num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else list(ray_cpus) # if the user gives a range(), we want to see all the CPUs
 
-                
-            df_trial = pd.DataFrame([trial_data])
-            
-            # Check if the CSV file already exists
-            if os.path.exists(test_csv_filepath):
-                sys.stdout.flush() 
-                # Load the existing CSV into a DataFrame
-                df_existing = pd.read_csv(test_csv_filepath)
-                # Append the trial data to the existing DataFrame
-                df_existing = pd.concat([df_existing, df_trial], ignore_index=True)
+            # Parse the timechunk_id to get start/end times
+            if timechunk_id:
+                starttime, endtime, time_delta = parse_time_range(timechunk_id)
+                timechunk_length_min = time_delta.total_seconds() / 60.0 if time_delta else None
             else:
-                sys.stdout.flush()
-            # Append the trial data directly to the CSV file
-            df_trial.to_csv(test_csv_filepath, mode='a', index=False, header=not os.path.exists(test_csv_filepath))
-            print(f"\n[{datetime.now()}] Successfully saved trial data to CSV at {test_csv_filepath}")
+                timechunk_length_min = None
+
+            trial_data = {
+                "Trial Number": None,  # Will be auto-filled by append_trial_row
+                "Stations Used": str(station_list),
+                "Number of Stations Used": len(station_list),
+                "Number of CPUs Allocated for Ray to Use": num_ray_cpus,
+                "Intra-parallelism Threads": intra_threads if intra_threads is not None else "",
+                "Inter-parallelism Threads": inter_threads if inter_threads is not None else "",
+                "GPUs Used": str(gpu_id) if use_gpu else "",
+                "VRAM Used Per Task": float(gpu_memory_limit_mb) if (use_gpu and gpu_memory_limit_mb is not None) else "",
+                "Total Waveform Analysis Timespace (min)": float(total_analysis_time.total_seconds() / 60.0) if hasattr(total_analysis_time, "total_seconds") else (float(total_analysis_time) if total_analysis_time else ""),
+                "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
+                "Concurrent Timechunks Used": int(number_of_concurrent_timechunk_predictions) if number_of_concurrent_timechunk_predictions is not None else "",
+                "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
+                "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
+                "Total Run time for Picker (s)": round(end_time - start_time, 6),
+                "Trial Success": "",
+                "Error Message": "",
+            }
+                
+            append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
+            log_messages += f"\n[{datetime.now()}] Successfully saved trial data to CSV at {test_csv_filepath}"
+            
         log_messages += f"\n[{datetime.now()}] Successfully ran EQCCTPro, exiting..."
         return log_messages
     
 @ray.remote
 class ModelActor:
-    def __init__(self, gpus_to_use, p_model_path, s_model_path, intra_threads=1, inter_threads=1, gpu_memory_limit_mb=None, use_gpu=True):
+    def __init__(self,  p_model_path, s_model_path, gpus_to_use=False, intra_threads=1, inter_threads=1, gpu_memory_limit_mb=None, use_gpu=True):
         from eqcct_tf_models import load_eqcct_model
         
         if use_gpu and gpu_memory_limit_mb:
