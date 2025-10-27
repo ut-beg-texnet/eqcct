@@ -30,29 +30,6 @@ import warnings
 import multiprocessing
 tf = None 
 
-w1 = 6000
-w2 = 3
-drop_rate = 0.2
-stochastic_depth_rate = 0.1
-
-positional_emb = False
-conv_layers = 4
-num_classes = 1
-input_shape = (w1, w2)
-num_classes = 1
-input_shape = (6000, 3)
-image_size = 6000  # We'll resize input images to this size
-patch_size = 40  # Size of the patches to be extract from the input images
-num_patches = (image_size // patch_size)
-projection_dim = 40
-
-num_heads = 4
-transformer_units = [
-    projection_dim,
-    projection_dim,
-]  # Size of the transformer layers
-transformer_layers = 4
-
 CANONICAL_CSV_HEADER = [
     "Trial Number",
     "Stations Used",
@@ -206,13 +183,13 @@ def append_trial_row(csv_path: str, trial_data: dict):
     """
     Append a complete trial row to the CSV with all fields populated.
     """
-    csvp = Path(csv_path)
+    csvp = Path(csv_path) 
     
     # Ensure header exists with canonical order
     if not csvp.exists():
         pd.DataFrame(columns=CANONICAL_CSV_HEADER).to_csv(csvp, index=False)
 
-    df_existing = pd.read_csv(csvp)
+    df_existing = pd.read_csv(csvp, keep_default_na=False)
     
     # Align row to the canonical header (use empty string for missing keys)
     row = {col: trial_data.get(col, "") for col in CANONICAL_CSV_HEADER}
@@ -230,10 +207,10 @@ def append_trial_row(csv_path: str, trial_data: dict):
 
 def update_csv(csv_filepath, success, error_message):
     df = pd.read_csv(csv_filepath)
-    last_row = df.iloc[-1]
-    last_row['Trial Success'] = success
-    last_row['Error Message'] = error_message
-                
+    last_idx = df.index[-1] # Get last row id number
+    df.loc[last_idx, 'Trial Success'] = success # Access value at row last_idx, column 'Trial Success' 
+    df.loc[last_idx, 'Error Message'] = error_message # Access value at row last_idx, column 'Error Message'
+
     df.to_csv(csv_filepath, index=False)
 
 def generate_station_list(starting_amount_of_stations, total_num_stations_to_use, station_list_step_size):
@@ -1192,54 +1169,61 @@ class EvaluateSystem():
                             
                             # Concurrent Timechunks
                             tasks_queue = []
-                            while True: 
-                                if len(tasks_queue) < max_pending_tasks: 
-                                    tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
-                                                        P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                                        number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
-                                                        gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
-                                                        timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
-                                                        number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
-                                                        test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt))
+                            try: 
+                                while True: 
+                                    if len(tasks_queue) < max_pending_tasks: 
+                                        tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_file=self.log_filepath, 
+                                                            P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
+                                                            number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
+                                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.set_vram_mb, stations2use=num_stations, 
+                                                            timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
+                                                            number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
+                                                            test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt))
+                                    
+                                        break
                                 
-                                    break
-                            
-                                else: 
+                                    else: 
+                                        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                                        for finished_task in tasks_finished:
+                                            log_entry = ray.get(finished_task)
+                                            log_queue.put(log_entry)  # Add log entry to the queue
+                                
+                                # After adding all the tasks to queue, process what's left
+                                while tasks_queue:
                                     tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                                     for finished_task in tasks_finished:
                                         log_entry = ray.get(finished_task)
                                         log_queue.put(log_entry)  # Add log entry to the queue
-                            
-                            # After adding all the tasks to queue, process what's left
-                            while tasks_queue:
-                                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-                                for finished_task in tasks_finished:
-                                    log_entry = ray.get(finished_task)
-                                    log_queue.put(log_entry)  # Add log entry to the queue
 
-                                update_csv(csv_filepath, success=1, error_message="")
+                                    update_csv(csv_filepath, success=1, error_message="")
+                            except Exception as e:
+                                # Failure occured, need to add to log 
+                                error_msg = f"{type(e).__name__}: {str(e)}"
+                                update_csv(csv_filepath, success=0, error_message=error_msg)
+                                log.write(f"\n[{datetime.now()}] Trial {trial_num} FAILED: {error_msg}\n")
+                                print(f"[{datetime.now()}] Trial {trial_num} FAILED: {error_msg}")
                                 
-                                # Write log entries from the queue to the file
-                                while not log_queue.empty():
-                                    log_entry = log_queue.get()
-                                    log.write(log_entry + "\n")
-                                    log.flush()
-                                    
-                                remove_output_subdirs(self.output_dir)
-                                trial_num += 1  
+                            # Write log entries from the queue to the file
+                            while not log_queue.empty():
+                                log_entry = log_queue.get()
+                                log.write(log_entry + "\n")
+                                log.flush()
                                 
-                                # RAM cleanup
-                                process = psutil.Process(os.getpid())
-                                mem_before = process.memory_info().rss
-                                gc.collect()
-                                mem_after = process.memory_info().rss
-                                mem_freed = mem_before - mem_after
-                                print(f"[{datetime.now()}] Successfully cleaned up {mem_freed / 1e6:.2f} MB of RAM.")
-                                
-                                
-                                ray.shutdown() 
-                                print(f"[{datetime.now()}] Ray Successfully Shutdown.")
+                            remove_output_subdirs(self.output_dir)
+                            trial_num += 1  
+                            
+                            # RAM cleanup
+                            process = psutil.Process(os.getpid())
+                            mem_before = process.memory_info().rss
+                            gc.collect()
+                            mem_after = process.memory_info().rss
+                            mem_freed = mem_before - mem_after
+                            print(f"[{datetime.now()}] Successfully cleaned up {mem_freed / 1e6:.2f} MB of RAM.")
+                            
                         # tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
+
+                    ray.shutdown() # Shutdown Ray after processing all timechunks for this CPU count 
+                    print(f"[{datetime.now()}] Ray Successfully Shutdown.")
                                 
                          
                         
@@ -1248,8 +1232,8 @@ class EvaluateSystem():
         # Compute optimal configurations (CPU)
         df = pd.read_csv(csv_filepath)
         optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_cpu(df)
-        optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_cpu.csv")
-        best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_cpu.csv")
+        optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_cpu.csv", index=False)
+        best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_cpu.csv", index=False)
         print(f"[{datetime.now()}] Optimal Configurations Found. Findings saved to:\n" 
                 f" 1) Optimal CPU/Station/Concurrent Prediction Configurations: {self.csv_dir}/optimal_configurations_cpu.csv\n" 
                 f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_cpu.csv")
@@ -1285,16 +1269,16 @@ class EvaluateSystem():
                 vram_per_task_mb = free_vram_mb / predictions
                 step_size = vram_per_task_mb * 0.05
                 vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
-
+                print(f"[{datetime.now()}]Testing the following VRAM limitations (MB): {vram_steps}")
                 for gpu_memory_limit_mb in vram_steps:
-                    print(f"\n[{datetime.now()}] VRAM Limited to {vram_per_task_mb / 1024:.2f} GB per Task")
+                    print(f"\n[{datetime.now()}] VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Task")
                     print(f"\nTrial Number: {trial_num}")
                     process = multiprocessing.Process(
                         target=run_prediction,
                         args=(self.input_dir, self.output_dir, self.log_filepath, self.P_threshold,
                               self.S_threshold, self.p_model_filepath, self.s_model_filepath,
                               predictions, self.cpu_count, True, stations, self.cpu_id_list, csv_filepath,
-                              self.intra_threads, self.inter_threads, True, vram_per_task_mb, self.selected_gpus,
+                              self.intra_threads, self.inter_threads, True, gpu_memory_limit_mb, self.selected_gpus,
                               self.timechunk_dt, len(self.tasks_picker), 1, total_analysis_time, self.waveform_overlap)
                     )
                     process.start()
@@ -1310,8 +1294,8 @@ class EvaluateSystem():
         print(f"[{datetime.now()}] GPU Testing complete. Finding optimal configurations...")
         df = pd.read_csv(csv_filepath)
         optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_gpu(df)
-        optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_gpu.csv")
-        best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_gpu.csv")
+        optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_gpu.csv", index=False)
+        best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_gpu.csv", index=False)
 
         print(f"[{datetime.now()}] Optimal configurations found and saved.")
 
@@ -1795,7 +1779,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         
         if testing_gpu is not None: 
             # Guard: make sure CPUs is an int, not a list
-            num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else list(ray_cpus) # if the user gives a range(), we want to see all the CPUs
+            num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else int(len(list(ray_cpus)))
 
             # Parse the timechunk_id to get start/end times
             if timechunk_id:
@@ -1803,6 +1787,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 timechunk_length_min = time_delta.total_seconds() / 60.0 if time_delta else None
             else:
                 timechunk_length_min = None
+
+            with open(f"/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs/hello.txt", "w") as f: 
+                f.write("hello")
 
             trial_data = {
                 "Trial Number": None,  # Will be auto-filled by append_trial_row
@@ -1822,6 +1809,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 "Trial Success": "",
                 "Error Message": "",
             }
+
+            with open("/home/skevofilaxc/workspace/eqcct/eqcctpro/outputs/data.json", "w") as f:
+                json.dump(trial_data, f, indent=4) # indent makes it more readable
                 
             append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
             log_messages += f"\n[{datetime.now()}] Successfully saved trial data to CSV at {test_csv_filepath}"
