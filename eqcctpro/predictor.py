@@ -24,10 +24,11 @@ from os import listdir
 from pathlib import Path
 from datetime import datetime, timedelta
 
+# GLOBAL VARIABLES 
+tf = None 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '1'
 os.environ['KERAS_BACKEND'] = 'tensorflow'
-tf = None 
 
 CANONICAL_CSV_HEADER = [
     "Trial Number",
