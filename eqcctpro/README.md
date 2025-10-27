@@ -39,7 +39,7 @@ After activating your new conda environment, run the following command:
 ```sh
 pip install eqcctpro
 ```
-You will have access to EQCCTPro and its functionality. However you will not have immediate access to the provided sample waveform data to use for testing. Youcan pull the waveform data either by downloading the .zip file from the repository or by following step 3. 
+You will have access to EQCCTPro and its functionality. However you will not have immediate access to the provided sample waveform data to use for testing. You can pull the waveform data either by downloading the .zip file from the repository or by following step 3. 
 
 ### **Step 3 (Optional): Pull the EQCCTPro Folder**
 Although not required, **it is highly recommended** to pull the `EQCCTPro` folder to gain access to sample waveform data for testing.
@@ -74,18 +74,8 @@ conda env create -f environment.yml
 conda activate eqcctpro
 ```
 
-### **Step 3: Install EQCCTPro**
-After activating the environment, install the EQCCTPro package:
-```sh
-pip install eqcctpro
-```
-
-This will install any remaining dependencies needed for **EQCCTPro**.
-
----
-
 ## **More Information**
-For additional details and package updates, visit the **EQCCTPro PyPI page**:  
+For additional package updates, continue to check either this repository or visit the **EQCCTPro PyPI page**:  
 🔗 [EQCCTPro on PyPI](https://pypi.org/project/eqcctpro/)
 
 ---
