@@ -2,7 +2,8 @@
 functionality.py controls all the functionality of EQCCTPro, specifically how we access mseed_predictor() and parallel_predict. 
 It is a level of abstraction so we can make the code more concise and cleaner
 """
-import os 
+import os
+import gc
 import ray
 import sys
 import ast
@@ -14,6 +15,7 @@ import numbers
 import logging
 import threading
 from tools import *
+from pathlib import Path
 from parallelization import *
 from obspy import UTCDateTime
 from ray.util.queue import Queue
@@ -97,7 +99,15 @@ class RunEQCCTPro():
 
         # We need to ensure that the vram specified does not exceed the capabilities of the system, if not, we need to exit safely before it happens
         if self.use_gpu: 
-            check_vram(self, model_vram_mb=1500) # EQCCT takes up to 1.2 GB of RAM, round up to 1.5 GB for safety
+            check_vram_per_gpu_style(
+                selected_gpus=self.selected_gpus,
+                get_gpu_vram_fn=lambda gid: get_gpu_vram(gpu_index=gid),
+                intended_workers=self.number_of_concurrent_station_predictions * self.number_of_concurrent_timechunk_predictions,
+                vram_mb=self.vram_mb,
+                model_vram_mb=1500.0,   # your safety reserve for EQCCT
+                safety_cap=0.95,
+                eqcct_overhead_gb=0.0,
+                logger=self.logger)
     
     # To-Do: merge dt_task_generator and chunk_time into one function and concatenate the objects so we dont have so much stuff running around
     # Generates the dt tasks list 
@@ -135,17 +145,6 @@ class RunEQCCTPro():
                 except Exception:
                     # never crash on logging
                     self.logger.exception("Failed to handle worker log record")
-
-    # Calculates the amount of available VRAM within an the first GPU
-    # def calculate_vram(self):
-    #     self.logger.info(f"Utilizing available VRAM within Ray Memory Usage Threshold Limit of 0.95...")
-    #     total_vram, available_vram = get_gpu_vram()
-    #     self.logger.info(f"Total VRAM: {total_vram:.2f} GB")
-    #     self.logger.info(f"Available VRAM: {available_vram:.2f} GB")
-
-    #     free_vram = total_vram * 0.95 if available_vram / total_vram >= 0.95 else available_vram
-    #     self.logger.info(f"Using {round(free_vram, 2)} GB VRAM (within 95% VRAM threshold).")
-    #     return free_vram * 1024  # Convert to MB
 
     def configure_cpu(self): 
         # We need to configure the tf_environ for the CPU configuration that is being inputted
@@ -283,3 +282,672 @@ class RunEQCCTPro():
             
             # Running parllelization
             self.eqcctpro_parallelization()
+
+class EvaluateSystem(): 
+    """Evaluate System class for running the evaluation system functions for multiple instances of the class"""
+    def __init__(self,
+                 eval_mode: str,
+                 input_dir: str,
+                 output_dir: str,
+                 log_filepath: str,
+                 csv_dir: str, 
+                 p_model_filepath: str, 
+                 s_model_filepath: str, 
+                 P_threshold: float = 0.001, 
+                 S_threshold: float = 0.02, 
+                 intra_threads: int = 1,
+                 inter_threads: int = 1,
+                 stations2use:int = None, 
+                 cpu_id_list:list = [1],
+                 cpu_test_step_size:int = 1, 
+                 starting_amount_of_stations: int = 1, 
+                 station_list_step_size: int = 1, 
+                 min_cpu_amount: int = 1,
+                 min_conc_stations: int = 1, 
+                 conc_station_tasks_step_size: int = 1,
+                 vram_mb:float = None, 
+                 selected_gpus:list = None,
+                 start_time:str = None, 
+                 end_time:str = None, 
+                 conc_timechunk_tasks_step_size: int = 1, 
+                 timechunk_dt:int = None,
+                 waveform_overlap:int = None,
+                 tmp_dir:str = None): 
+        
+        valid_modes = {"cpu", "gpu"}
+        if eval_mode not in valid_modes: 
+            raise ValueError(f"Invalid mode '{eval_mode}'. Choose either 'cpu' or 'gpu'.")
+        
+        self.eval_mode = eval_mode.lower()
+        self.intra_threads = intra_threads
+        self.inter_threads = inter_threads
+        self.input_dir = input_dir  
+        self.output_dir = output_dir
+        self.log_filepath = log_filepath
+        self.csv_dir = csv_dir
+        self.P_threshold = P_threshold
+        self.S_threshold = S_threshold
+        self.p_model_filepath = p_model_filepath
+        self.s_model_filepath = s_model_filepath
+        self.stations2use = stations2use
+        self.cpu_id_list = cpu_id_list
+        self.vram_mb = vram_mb
+        self.selected_gpus = selected_gpus
+        self.cpu_count = len(cpu_id_list)
+        self.cpu_test_step_size = cpu_test_step_size
+        self.starting_amount_of_stations = starting_amount_of_stations
+        self.station_list_step_size = station_list_step_size
+        self.min_cpu_amount = min_cpu_amount
+        self.min_conc_stations = min_conc_stations # default is = 1 
+        self.conc_station_tasks_step_size = conc_station_tasks_step_size # default is = 1 
+        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
+        self.start_time = start_time
+        self.end_time = end_time
+        self.conc_timechunk_tasks_step_size = conc_timechunk_tasks_step_size
+        self.timechunk_dt = timechunk_dt
+        self.waveform_overlap = waveform_overlap
+        self.home_tmp_dir = tmp_dir 
+        
+        # Ensures that the output_dir exists. If it doesn't, we create it 
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
+        self.logger = logging.getLogger("eqcctpro") # We named the logger eqcctpro (can be any name)
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False # if true, events logged to this logger will be passed to the handlers of higher level (ancestor) loggers, in addition to any handlers attached to this logger
+        if not self.logger.handlers: # avoid duplicating inits 
+            fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            file_h = logging.FileHandler(self.log_filepath) # Writes logs to file 
+            stream_h = logging.StreamHandler() # Sends logs to console
+            file_h.setFormatter(fmt)
+            stream_h.setFormatter(fmt)
+            self.logger.addHandler(file_h)
+            self.logger.addHandler(stream_h)
+
+        # Set up temp dir 
+        import tempfile
+        tempfile.tempfile = self.home_tmp_dir
+
+        os.environ['TMPDIR'] = self.home_tmp_dir
+        os.environ['TEMP'] = self.home_tmp_dir
+        os.environ['TMP'] = self.home_tmp_dir
+        self.logger.info(f"Successfully set up temp files to be stored at {self.home_tmp_dir}")
+
+        # We need to ensure that the vram specified does not exceed the capabilities of t  he system, if not, we need to exit safely before it happens
+        self.chunk_time()
+        intended_workers = int(len(self.stations2use_list)) * int(len(self.times_list) // 2)
+        if self.eval_mode == 'gpu':
+            check_vram_aggregate_style(
+                eval_mode=self.eval_mode,
+                selected_gpus=self.selected_gpus,
+                get_cluster_free_gb_fn=lambda: get_gpu_vram(),  # returns (total_gb, free_gb)
+                intended_workers=intended_workers,
+                vram_mb=self.vram_mb,
+                model_vram_mb=3000.0,   # or your 1500.0 if you want tighter
+                safety_cap=0.90,
+                eqcct_overhead_gb=1.1,
+                logger=self.logger
+            )
+        
+    def _generate_stations_list(self):
+        """Generates station list"""
+        if self.station2use is None: 
+            return list(range(1, 11)) + list(range(15, 50, 5))
+        return generate_station_list(self.stations2use, self.starting_amount_of_stations, self.station_list_step_size)
+    
+    # def _prepare_environment(self):
+    #     """Removed 'output_dir' so that there is no conflicts in the save for a clean output return"""
+    #     remove_directory(self.output_dir)
+        
+    def chunk_time(self):
+        starttime = UTCDateTime(self.start_time) - (self.waveform_overlap * 60)
+        endtime = UTCDateTime(self.end_time)
+
+        times_list = []
+        start = starttime
+        end = start + (self.waveform_overlap * 60) + (self.timechunk_dt * 60)
+        while start <= endtime:
+            if end >= endtime:
+                end = endtime
+                times_list.append([start, end])
+                break
+            times_list.append([start, end])
+            start = end - (self.waveform_overlap * 60)
+            end = start + (self.waveform_overlap * 60) + (self.timechunk_dt * 60)
+
+        self.times_list = times_list
+
+    def _drain_worker_logs(self):
+            while True:
+                rec = self.log_queue.get()  # blocks until a record arrives
+                if rec is None: break       # sentinel to stop thread
+                try:
+                    self.logger.handle(rec) # routes to file+console handlers
+                except Exception:
+                    # never crash on logging
+                    self.logger.exception("Failed to handle worker log record")
+    
+    def dt_task_generator(self): 
+        tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
+        self.tasks_picker = tasks
+        
+    def evaluate_cpu(self): 
+        """Evaluate system parallelization using CPUs"""
+        statement = "Evaluating System Parallelization Capability using CPU"
+        print(f"\n{statement}\n")
+        
+        os.makedirs(self.csv_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Create logfile 
+        if not os.path.exists(self.log_filepath): 
+            self.logger.info(f"Log file not found. Creating log file...")
+            with open(self.log_filepath, "w") as f: 
+                f.write("")
+                f.write(f"{statement}\n-----------------------------\n")
+                self.logger.info(f"Log file: {self.log_filepath} created.")
+        else: 
+            self.logger.info(f"Log file '{self.log_filepath}' already exists.")
+        
+        # Create test results csv 
+        csv_filepath = f"{self.csv_dir}/cpu_test_results.csv"
+        prepare_csv(csv_file_path=csv_filepath)
+        
+        self.chunk_time()
+        self.dt_task_generator()
+        
+        trial_num = 1
+        log_queue = queue.Queue()  # Create a queue for log entries
+        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+        
+        if self.eval_mode == 'gpu': 
+            use_gpu = True 
+        else: 
+            use_gpu = False 
+
+        if self.min_cpu_amount > len(self.cpu_id_list): 
+            # Code won't execute because the minimum CPU amount of > the len(cpu id list)
+            # In which the rest of the code is dependent on the len for generating cpu_count 
+            print(f"CPU ID List provided has less CPUs than the minimum requested ({len(self.cpu_id_list)} vs. {self.min_cpu_amount}). Exiting...")
+            quit()
+        
+        with open(self.log_filepath, mode="a+", buffering=1) as log: 
+            for i in range(self.min_cpu_amount, self.cpu_count+1, self.cpu_test_step_size):
+                # Set CPU affinity and initialize Ray
+                cpus_to_use = self.cpu_id_list[:i]
+                process = psutil.Process(os.getpid())
+                process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
+                
+                ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), logging_level=logging.FATAL, log_to_driver=False)
+                self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
+                self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
+                self._log_thread.start() # Starts the thread
+                self.logger.info(f"Ray Successfully Initialized with {len(cpus_to_use)} CPU(s).")
+                
+                timechunks_list = []
+                timechunk = 1
+                step = self.conc_timechunk_tasks_step_size # Use the class attribute
+                while timechunk <= len(self.tasks_picker):
+                    timechunks_list.append(timechunk)
+                    if timechunk == 1:
+                        timechunk += 1
+                    else:
+                        timechunk += step
+
+                if len(self.tasks_picker) not in timechunks_list:
+                    timechunks_list.append(len(self.tasks_picker))
+                # sets are a set of multiple items stored in a single variable 
+                # unchangable after being set, cannot have duplicates and is unordered
+                timechunks_list = sorted(list(set(timechunks_list))) 
+                for timechunks in timechunks_list:
+                    tested_concurrency = set() # Rest for each cpu / timechunk
+                    for num_stations in self.stations2use_list: 
+                        concurrent_predictions_list = generate_station_list(self.min_conc_stations, num_stations, self.conc_station_tasks_step_size)
+                        # We do this so that we don't repeat concurrent prediction tests 
+                        # Because a number of concurrent predictions running can be equivilated to the number of total stations that need to be processed
+                        # There is no need to duplicate more tests that will be doing the same amount of concurrent testing for a different number of total stations
+                        new_concurrent_values = [x for x in concurrent_predictions_list if x not in tested_concurrency and x <= num_stations]
+                        if not new_concurrent_values:
+                            continue  # All concurrency values already tested
+                        for num_concurrent_predictions in new_concurrent_values:           
+                            mseed_timechunk_dir_name = self.tasks_picker[timechunks-1][1]
+                            timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
+                            max_pending_tasks = timechunks
+                            
+                            log.write(f"\nTrial Number: {trial_num}")
+                            self.logger.info(f"Trial Number: {trial_num}")
+                            self.logger.info(f"CPU(s): {i}")
+                            self.logger.info(f"Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
+                            self.logger.info(f"Total Amount of Stations to be Processed in Current Trial: {num_stations} / Number of Stations Being Processed Concurrently: {num_concurrent_predictions} / Total Overall Trial Station Count: {max(self.stations2use_list)}") 
+                            
+                            # Concurrent Timechunks
+                            tasks_queue = []
+                            log_queue = queue.Queue()  # Create a queue for log entries
+
+                            try: 
+                                while True: 
+                                    if len(tasks_queue) < max_pending_tasks: 
+                                        tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_queue=self.log_queue, 
+                                                            P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
+                                                            number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=use_gpu, 
+                                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, stations2use=num_stations, 
+                                                            timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
+                                                            number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
+                                                            test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt))
+                                    
+                                        break
+                                
+                                    else: 
+                                        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                                        for finished_task in tasks_finished:
+                                            log_entry = ray.get(finished_task)
+                                            log_queue.put(log_entry)  # Add log entry to the queue
+                                
+                                # After adding all the tasks to queue, process what's left
+                                while tasks_queue:
+                                    tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                                    for finished_task in tasks_finished:
+                                        log_entry = ray.get(finished_task)
+                                        log_queue.put(log_entry)  # Add log entry to the queue
+
+                                    update_csv(csv_filepath, success=1, error_message="")
+                            except Exception as e:
+                                # Failure occured, need to add to log 
+                                error_msg = f"{type(e).__name__}: {str(e)}"
+                                update_csv(csv_filepath, success=0, error_message=error_msg)
+                                self.logger.error(f"Trial {trial_num} FAILED: {error_msg}")
+                                
+                            # Write log entries from the queue to the file
+                            while not log_queue.empty():
+                                log_entry = log_queue.get()
+                                # FIX ME 
+                                
+                            remove_output_subdirs(self.output_dir)
+                            trial_num += 1  
+                            
+                            # RAM cleanup
+                            process = psutil.Process(os.getpid())
+                            mem_before = process.memory_info().rss
+                            gc.collect()
+                            mem_after = process.memory_info().rss
+                            mem_freed = mem_before - mem_after
+                            self.logger.info(f"Successfully cleaned up {mem_freed / 1e6:.2f} MB of RAM.")
+                            
+                        # tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
+
+                    # stop log forwarder
+                    self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
+                    self._log_thread.join(timeout=2)
+
+                    ray.shutdown() # Shutdown Ray after processing all timechunks for this CPU count 
+                    self.logger.info(f"Ray Successfully Shutdown.")
+                                
+     
+        self.logger.info(f"Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
+        # Compute optimal configurations (CPU)
+        df = pd.read_csv(csv_filepath)
+        optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_cpu(df)
+        optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_cpu.csv", index=False)
+        best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_cpu.csv", index=False)
+        self.logger.info(f"Optimal Configurations Found. Findings saved to:\n" 
+                f" 1) Optimal CPU/Station/Concurrent Prediction Configurations: {self.csv_dir}/optimal_configurations_cpu.csv\n" 
+                f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_cpu.csv")
+
+    def evaluate_gpu(self): 
+        """Evaluate system parallelization using GPUs"""
+        statement = "Evaluating System Parallelization Capability using GPUs"
+        self.logger.info(f"\n{statement}\n")
+        
+        # Set CPU affinity
+        process = psutil.Process(os.getpid())
+        process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
+        
+        os.makedirs(self.csv_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Create logfile 
+        if not os.path.exists(self.log_filepath): 
+            self.logger.info(f"Log file not found. Should already exist...")
+        else: 
+            self.logger.info(f"Log file '{self.log_filepath}' already exists.")
+        
+        # Calculate these at the start
+        self.chunk_time()
+        self.dt_task_generator()
+        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+            
+        # Create test results csv 
+        csv_filepath = f"{self.csv_dir}/gpu_test_results.csv"
+        prepare_csv(csv_filepath, True)
+        
+        free_vram_mb = self.vram_mb if self.vram_mb else self.calculate_vram()
+        self.selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
+        self.logger.info(f"Using GPU(s): {self.selected_gpus}")
+        
+        trial_num = 1
+        log_queue = queue.Queue()  # Create a queue for log entries
+        
+        with open(self.log_filepath, mode="a+", buffering=1) as log:
+            # Initialize Ray with GPUs
+            ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), 
+                    logging_level=logging.FATAL, log_to_driver=False)
+            self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
+            self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
+            self._log_thread.start() # Starts the thread
+            self.logger.info(f"Ray Successfully Initialized with {len(self.selected_gpus)} GPU(s) and {len(self.cpu_id_list)} CPU(s).")
+            
+            for stations in self.stations2use_list:
+                concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
+                for predictions in concurrent_predictions_list:
+                    vram_per_task_mb = free_vram_mb / predictions
+                    step_size = vram_per_task_mb * 0.05
+                    vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
+                    self.logger.info(f"Testing the following VRAM limitations (MB): {vram_steps}")
+                    
+                    for gpu_memory_limit_mb in vram_steps:
+                        self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Task")
+                        self.logger.info(f"Trial Number: {trial_num}")
+                        
+                        # Get the first timechunk for testing
+                        mseed_timechunk_dir_name = self.tasks_picker[0][1]
+                        timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+                        
+                        self.logger.info(f"Trial Number: {trial_num}\n")
+                        self.logger.info(f"Stations: {stations}")
+                        self.logger.info(f"Concurrent Station Predictions: {predictions}")
+                        self.logger.info(f"VRAM per Task: {gpu_memory_limit_mb:.2f} MB")
+                        
+                        try:
+                            # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
+                            ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                                input_dir=timechunk_dir_path, 
+                                output_dir=self.output_dir, 
+                                log_file=self.log_filepath, 
+                                P_threshold=self.P_threshold, 
+                                S_threshold=self.S_threshold, 
+                                p_model=self.p_model_filepath, 
+                                s_model=self.s_model_filepath, 
+                                number_of_concurrent_station_predictions=predictions, 
+                                ray_cpus=self.cpu_id_list, 
+                                use_gpu=True, 
+                                gpu_id=self.selected_gpus, 
+                                gpu_memory_limit_mb=gpu_memory_limit_mb, 
+                                stations2use=stations, 
+                                timechunk_id=mseed_timechunk_dir_name, 
+                                waveform_overlap=self.waveform_overlap, 
+                                total_timechunks=len(self.tasks_picker), 
+                                number_of_concurrent_timechunk_predictions=1,  # Testing one timechunk at a time
+                                total_analysis_time=total_analysis_time, 
+                                testing_gpu=True,  # Enable test mode
+                                test_csv_filepath=csv_filepath, 
+                                intra_threads=self.intra_threads, 
+                                inter_threads=self.inter_threads, 
+                                timechunk_dt=self.timechunk_dt
+                            )
+                            
+                            # Wait for result
+                            log_entry = ray.get(ref)
+                            log_queue.put(log_entry)  # Add log entry to the queue
+                            
+                            # Success - update CSV
+                            update_csv(csv_filepath, success=1, error_message="")
+                            
+                        except Exception as e:
+                            # Failure occurred, need to add to log 
+                            error_msg = f"{type(e).__name__}: {str(e)}"
+                            update_csv(csv_filepath, success=0, error_message=error_msg)
+                            self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
+                        
+                        # Write log entries from the queue to the file
+                        while not log_queue.empty():
+                            log_entry = log_queue.get()
+                            self.logger.info(f"{log_entry}") # FIX ME 
+                        
+                        remove_output_subdirs(self.output_dir)
+                        trial_num += 1
+                        
+                        # RAM cleanup
+                        mem_before = process.memory_info().rss
+                        gc.collect()
+                        mem_after = process.memory_info().rss
+                        mem_freed = mem_before - mem_after
+                        self.logger.info(f"Successfully cleaned up {mem_freed / 1e6:.2f} MB of RAM.")
+            
+            # stop log forwarder
+            self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
+            self._log_thread.join(timeout=2)
+
+            ray.shutdown()  # Shutdown Ray after all testing
+            self.logger.info(f"Ray Successfully Shutdown.")
+
+        self.logger.info(f"Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
+        # Compute optimal configurations (GPU)
+        df = pd.read_csv(csv_filepath)
+        optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_gpu(df)
+        optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_gpu.csv", index=False)
+        best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_gpu.csv", index=False)
+        self.logger.info(f"Optimal Configurations Found. Findings saved to:\n" 
+                f" 1) Optimal GPU/Station/Concurrent Prediction Configurations: {self.csv_dir}/optimal_configurations_gpu.csv\n" 
+                f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_gpu.csv")
+
+    def evaluate(self):
+        if self.eval_mode == "cpu":
+            self.evaluate_cpu()
+        elif self.eval_mode == "gpu":
+            self.evaluate_gpu()
+        else: 
+            exit()
+        
+    def calculate_vram(self):
+        """Calculate available VRAM for GPU testing."""
+        self.logger.info(f"Utilizing available VRAM...")
+        total_vram, available_vram = get_gpu_vram()
+        self.logger.info(f"Total VRAM: {total_vram:.2f} GB.")
+        self.logger.info(f"Available VRAM: {available_vram:.2f} GB.")
+
+        free_vram = total_vram * 0.9485 if available_vram / total_vram >= 0.9486 else available_vram
+        self.logger.info(f"Using up to {round(free_vram, 2)} GB of VRAM.")
+        return free_vram * 1024  # Convert to MB
+
+"""
+Finds the optimal CPU configuration based on evaluation results
+"""
+class OptimalCPUConfigurationFinder: 
+    def __init__(self, 
+                 eval_sys_results_dir: str, 
+                 log_file_path: str):
+        
+        self.eval_sys_results_dir = eval_sys_results_dir
+        if not self.eval_sys_results_dir or not os.path.isdir(self.eval_sys_results_dir): 
+            raise ValueError(f"Error: The provided directory path '{self.eval_sys_results_dir}' is invalid or does not exist.")
+        self.log_file_path = log_file_path
+
+        # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
+        self.logger = logging.getLogger("eqcctpro") # We named the logger eqcctpro (can be any name)
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False # if true, events logged to this logger will be passed to the handlers of higher level (ancestor) loggers, in addition to any handlers attached to this logger
+        if not self.logger.handlers: # avoid duplicating inits 
+            fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            # ensure parent dir
+            Path(self.log_file_path).parent.mkdir(parents=True, exist_ok=True)
+            file_h = logging.FileHandler(self.log_file_path) # Writes logs to file 
+            stream_h = logging.StreamHandler() # Sends logs to console
+            file_h.setFormatter(fmt)
+            stream_h.setFormatter(fmt)
+            self.logger.addHandler(file_h)
+            self.logger.addHandler(stream_h)
+
+
+    def find_best_overall_usecase(self):
+        """Finds the best overall CPU usecase configuation from eval results"""
+        file_path = f"{self.eval_sys_results_dir}/best_overall_usecase_cpu.csv"
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+
+        df_best_overall = pd.read_csv(file_path)
+        # best_config_dict = df_best_overall.set_index(df_best_overall.columns[0]).to_dict()[df_best_overall.columns[1]]
+        best_config_dict = df_best_overall.to_dict(orient='records')[0]
+        
+        # Extract required values
+        num_cpus = best_config_dict.get("Number of CPUs Allocated for Ray to Use")
+        waveform_timespace = best_config_dict.get("Total Waveform Analysis Timespace (min)")
+        total_num_timechunks = best_config_dict.get("Total Number of Timechunks")
+        num_concurrent_timechunks = best_config_dict.get("Concurrent Timechunks Used")
+        length_of_timechunks = best_config_dict.get("Length of Timechunk (min)")
+        num_concurrent_stations = best_config_dict.get("Number of Concurrent Station Tasks per Timechunk")
+        intra_threads = best_config_dict.get("Intra-parallelism Threads")
+        inter_threads = best_config_dict.get("Inter-parallelism Threads")
+        num_stations = best_config_dict.get("Number of Stations Used")
+        total_runtime = best_config_dict.get("Total Run time for Picker (s)")
+        
+        self.logger.info(f"Best Overall Usecase Configuration Based on Trial Data:")
+        self.logger.info(f"CPU(s): {num_cpus}")
+        self.logger.info(f"Intra-parallelism Threads: {intra_threads}")
+        self.logger.info(f"Inter-parallelism Threads: {inter_threads}")
+        self.logger.info(f"Waveform Timespace: {waveform_timespace}")
+        self.logger.info(f"Total Number of Stations Used: {num_stations}")
+        self.logger.info(f"Total Number of Timechunks: {total_num_timechunks}")
+        self.logger.info(f"Length of Timechunks (min): {length_of_timechunks}")
+        self.logger.info(f"Concurrent Timechunk Processes: {num_concurrent_timechunks}")
+        self.logger.info(f"Concurrent Station Processes Per Timechunk: {num_concurrent_stations}")
+        self.logger.info(f"Total Runtime (s): {total_runtime}")
+
+        return int(float(num_cpus)), int(float(intra_threads)), int(float(inter_threads)), int(float(num_concurrent_timechunks)), int(float(num_concurrent_stations)), int(float(num_stations))
+    
+    def find_optimal_for(self, cpu: int, station_count: int):
+        """Finds the optimal configuration for a given number of CPUs and stations."""
+        if cpu is None or station_count is None:
+            raise ValueError("Error: CPU and station_count must have valid values.")
+
+        file_path = f"{self.eval_sys_results_dir}/optimal_configurations_cpu.csv"
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+
+        df_optimal = pd.read_csv(file_path)
+
+        # Convert relevant columns to numeric
+        df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
+        df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
+        df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
+        df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
+
+        filtered_df = df_optimal[
+            (df_optimal["Number of CPUs Allocated for Ray to Use"] == cpu) &
+            (df_optimal["Number of Stations Used"] == station_count)]
+
+        if filtered_df.empty:
+            raise ValueError("No matching configuration found. Please enter a valid entry.")
+
+        # Finds for the "Total Run time for Picker (s)" the row with the smallest value and the '1' is to say I only want 
+        # only the single row where the smallest runtime is 
+        # iloc gets the selection of data from a numerical index from the df and turns that access point into a Series
+        best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
+
+        self.logger.info(f"Best Configuration for Requested Input Parameters Based on Trial Data:")
+        self.logger.info(f"CPU(s): {cpu}\n"
+              f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
+              f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
+              f"Waveform Timespace: {best_config['Total Waveform Analysis Timespace (min)']}\n"
+              f"Total Number of Stations Used: {station_count}\n"
+              f"Total Number of Timechunks: {best_config['Total Number of Timechunks']}\n"
+              f"Length of Timechunks (min): {best_config['Length of Timechunk (min)']}\n"
+              f"Concurrent Timechunk Processes: {best_config['Concurrent Timechunks Used']}\n"
+              f"Concurrent Station Processes Per Timechunk: {best_config['Number of Concurrent Station Tasks']}\n"
+              f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
+
+        return int(float(cpu)), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(best_config["Concurrent Timechunks Used"])), int(float(best_config["Number of Concurrent Station Tasks"])), int(float(station_count))
+
+
+class OptimalGPUConfigurationFinder:
+    """Finds the optimal GPU configuration based on evaluation system results."""
+
+    def __init__(self, eval_sys_results_dir: str):
+        if not eval_sys_results_dir or not os.path.isdir(eval_sys_results_dir):
+            raise ValueError(f"Error: The provided directory path '{eval_sys_results_dir}' is invalid or does not exist.")
+        self.eval_sys_results_dir = eval_sys_results_dir
+
+    def find_best_overall_usecase(self):
+        """Finds the best overall GPU configuration from evaluation results."""
+        file_path = f"{self.eval_sys_results_dir}/best_overall_usecase_gpu.csv"
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+
+        df_best_overall = pd.read_csv(file_path, header=None, index_col=0)
+        best_config_dict = df_best_overall.to_dict()[1]
+
+        num_cpus = best_config_dict.get("Number of CPUs Allocated for Ray to Use")
+        num_concurrent_predictions = best_config_dict.get("Number of Concurrent Station Tasks")
+        intra_threads = best_config_dict.get("Intra-parallelism Threads")
+        inter_threads = best_config_dict.get("Inter-parallelism Threads")
+        num_stations = best_config_dict.get("Number of Stations Used")
+        total_runtime = best_config_dict.get("Total Run time for Picker (s)")
+        vram_used = best_config_dict.get("VRAM Used Per Task")
+        num_gpus = ast.literal_eval(best_config_dict.get("GPUs Used"))
+
+        self.logger.info(f"Best Overall Usecase Configuration Based on Trial Data:")
+        self.logger.info(f"CPU: {num_cpus}\n"
+              f"GPU ID(s): {num_gpus}\n"
+              f"Concurrent Predictions: {num_concurrent_predictions}\n"
+              f"Intra-parallelism Threads: {intra_threads}\n"
+              f"Inter-parallelism Threads: {inter_threads}\n"
+              f"Stations: {num_stations}\n"
+              f"VRAM Used per Task: {vram_used}\n"
+              f"Total Runtime (s): {total_runtime}")
+
+        return int(float(num_cpus)), int(float(num_concurrent_predictions)), int(float(intra_threads)), int(float(inter_threads)), num_gpus, int(float(vram_used)), int(float(num_stations))
+
+    def find_optimal_for(self, num_cpus: int, gpu_list: list, station_count: int):
+        """Finds the optimal configuration for a given number of CPUs, GPUs, and stations."""
+        if num_cpus is None or station_count is None or gpu_list is None:
+            raise ValueError("Error: num_cpus, station_count, and gpu_list must have valid values.")
+
+        file_path = f"{self.eval_sys_results_dir}/optimal_configurations_gpu.csv"
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+
+        df_optimal = pd.read_csv(file_path)
+
+        # Convert relevant columns to numeric, handling NaNs
+        df_optimal["Number of Stations Used"] = pd.to_numeric(df_optimal["Number of Stations Used"], errors="coerce")
+        df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
+        df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
+        df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
+        df_optimal["VRAM Used Per Task"] = pd.to_numeric(df_optimal["VRAM Used Per Task"], errors="coerce")
+
+        # Convert "GPUs Used" from string representation to list
+        df_optimal["GPUs Used"] = df_optimal["GPUs Used"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+
+        # Convert GPU lists to tuples for comparison
+        df_optimal["GPUs Used"] = df_optimal["GPUs Used"].apply(lambda x: tuple(x) if isinstance(x, list) else (x,))
+
+        # Ensure gpu_list is in tuple format for comparison
+        gpu_list_tuple = tuple(gpu_list) if isinstance(gpu_list, list) else (gpu_list,)
+
+        filtered_df = df_optimal[
+            (df_optimal["Number of CPUs Allocated for Ray to Use"] == num_cpus) &
+            (df_optimal["GPUs Used"] == gpu_list_tuple) &
+            (df_optimal["Number of Stations Used"] == station_count)
+        ]
+
+        if filtered_df.empty:
+            raise ValueError("No matching configuration found. Please enter a valid entry.")
+
+        best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
+
+        self.logger.info(f"Best Configuration for Requested Application Usecase Based on Trial Data:")
+        self.logger.info(f"CPU: {num_cpus}\n"
+              f"GPU: {gpu_list}\n"
+              f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
+              f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
+              f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
+              f"Stations: {station_count}\n"
+              f"VRAM Used per Task: {best_config['VRAM Used Per Task']}\n"
+              f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
+
+        return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
+               int(float(best_config["Number of Concurrent Station Tasks"])), \
+               int(float(best_config["Intra-parallelism Threads"])), \
+               int(float(best_config["Inter-parallelism Threads"])), \
+               gpu_list, \
+               int(float(best_config["VRAM Used Per Task"])), \
+               int(float(station_count))
