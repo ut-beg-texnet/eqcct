@@ -19,7 +19,7 @@ import logging
 import platform
 import traceback
 import numpy as np
-from tools import *
+from .tools import *
 from os import listdir
 from obspy import UTCDateTime
 from datetime import datetime, timedelta 

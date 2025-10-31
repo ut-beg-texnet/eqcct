@@ -15,13 +15,13 @@ import numbers
 import logging
 import resource
 import threading
-from tools import *
+from .tools import *
 from pathlib import Path
-from parallelization import *
+from .parallelization import *
 from obspy import UTCDateTime
 from ray.util.queue import Queue
 from datetime import datetime, timedelta
-from tools import _parse_gpus_field
+from .tools import _parse_gpus_field
 from logging.handlers import QueueHandler, QueueListener
 
 
