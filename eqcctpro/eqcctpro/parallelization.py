@@ -815,7 +815,7 @@ class ModelActor:
                 logger.error(f"[ModelActor] Error setting memory limit: {e}")
         
         # Load the model once
-        from eqcct_tf_models import load_eqcct_model
+        from .eqcct_tf_models import load_eqcct_model
         self.model = load_eqcct_model(p_model_path, s_model_path)
         logger.info(f"[ModelActor] Model loaded successfully")
     
@@ -850,7 +850,7 @@ def parallel_predict(predict_args, model_actor, gpu=False, gpu_memory_limit_mb=N
         # If eqcct_tf_models imports TF later, env vars above will still suppress C++ logs.
         pass
 
-    from eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
+    from .eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
     pos, station, out_dir, args = predict_args
     
     # NOTE: We removed the model loading code that was causing OOM errors
