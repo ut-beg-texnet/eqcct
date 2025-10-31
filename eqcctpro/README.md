@@ -1,6 +1,6 @@
 # **EQCCTPro: powerful seismic event detection toolkit**
 
-EQCCTPro is a high-performace seismic event detection and processing framework that leverages DL-pickers, like EQCCT, to process seismic data efficiently. It enables users to fully leverage the computational ability of their computing resources for maximum performance for simultaneous seismic waveform processing, achieving real-time performance by identifying and utilizing the optimal computational configurations for their hardware. More information about the development, capabilities, and real-world applications about EQCCTPro can be read about in our research publication here.  
+EQCCTPro is a high-performace seismic event detection and processing framework that leverages DL-pickers, like EQCCT, to process seismic data efficiently. It enables users to fully leverage the computational ability of their computing resources for maximum performance for simultaneous seismic waveform processing, achieving real-time performance by identifying and utilizing the optimal computational configurations for their hardware. More information about the development, capabilities, and real-world applications about EQCCTPro can be read about in our upcoming research publication [here](https://github.com/ut-beg-texnet/eqcct/blob/main/eqcctpro/OptimizedEQCCT_Paper.pdf) (currently in review).  
 
 ## **Features**
 - Supports both CPU and GPU execution
