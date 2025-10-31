@@ -311,14 +311,14 @@ def check_vram_aggregate_style(
 """
 prepare_csv either loads or initializes the CSV file for storing test results.
 """      
-def prepare_csv(csv_file_path):
+def prepare_csv(csv_file_path, logger):
     """
     Loads or initializes the CSV file for storing test results.
     """
     if os.path.exists(csv_file_path):
-        print(f"\nLoading existing CSV file from '{csv_file_path}'...")
+        logger.info(f"Loading existing CSV file from '{csv_file_path}'...")
         return pd.read_csv(csv_file_path)
-    print(f"CSV file not found. Creating a new CSV file at '{csv_file_path}'...")
+    logger.info(f"CSV file not found. Creating a new CSV file at '{csv_file_path}'...")
     
     columns = CANONICAL_CSV_HEADER
     df = pd.DataFrame(columns=columns)
@@ -488,6 +488,7 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
     vis_gpus = tf.config.list_physical_devices("GPU")
     if not vis_gpus:
         logger.info(f"No GPUs visible; proceeding on CPU.")
+        logger.info("")
         return {"logical_gpus": [], "physical_gpus": []}
 
     if vram_limit_mb is None or vram_limit_mb <= 0:

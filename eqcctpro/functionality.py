@@ -13,6 +13,7 @@ import psutil
 import random
 import numbers
 import logging
+import resource
 import threading
 from tools import *
 from pathlib import Path
@@ -90,6 +91,7 @@ class RunEQCCTPro():
             self.logger.addHandler(file_h)
             self.logger.addHandler(stream_h)
 
+        self.logger.info("")
         self.logger.info(f"------- Welcome to EQCCTPro -------")
         self.logger.info("")
 
@@ -149,7 +151,6 @@ class RunEQCCTPro():
 
     def configure_cpu(self): 
         # We need to configure the tf_environ for the CPU configuration that is being inputted
-        self.logger.info("")
         self.logger.info(f"Running EQCCT over Requested MSeed Files using CPU(s)...")
         if self.best_usecase_config:
             # We use the best usecase configuration that was found using EvaluateSystem
@@ -246,7 +247,6 @@ class RunEQCCTPro():
         ray.shutdown()
         self.logger.info(f"Ray Successfully Shutdown.")
         self.logger.info("------- Successfully Picked All Waveform(s) from all Timechunk(s) -------")
-        self.logger.info("")
         # self.logger.info("------- END OF FILE -------")
         
     def run_eqcctpro(self):
@@ -366,6 +366,7 @@ class EvaluateSystem():
             self.logger.addHandler(file_h)
             self.logger.addHandler(stream_h)
         
+        self.logger.info("")
         self.logger.info(f"------- Welcome to EQCCTPro's EvaluateSystem Functionality -------")
         self.logger.info("")
         # Set up temp dir 
@@ -452,24 +453,14 @@ class EvaluateSystem():
     def evaluate_cpu(self): 
         """Evaluate system parallelization using CPUs"""
         statement = "Evaluating System Parallelization Capability using CPU"
-        print(f"\n{statement}\n")
+        self.logger.info(f"{statement}")
         
         os.makedirs(self.csv_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Create logfile 
-        if not os.path.exists(self.log_filepath): 
-            self.logger.info(f"Log file not found. Creating log file...")
-            with open(self.log_filepath, "w") as f: 
-                f.write("")
-                f.write(f"{statement}\n-----------------------------\n")
-                self.logger.info(f"Log file: {self.log_filepath} created.")
-        else: 
-            self.logger.info(f"Log file '{self.log_filepath}' already exists.")
-        
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/cpu_test_results.csv"
-        prepare_csv(csv_file_path=csv_filepath)
+        prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
         
         self.chunk_time()
         self.dt_task_generator()
@@ -532,7 +523,8 @@ class EvaluateSystem():
                             timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
                             max_pending_tasks = timechunks
                             
-                            self.logger.info(f"Trial Number: {trial_num}")
+                            self.logger.info("")
+                            self.logger.info(f"------- Trial Number: {trial_num} -------")
                             self.logger.info(f"CPU(s): {i}")
                             self.logger.info(f"Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
                             self.logger.info(f"Total Amount of Stations to be Processed in Current Trial: {num_stations} / Number of Stations Being Processed Concurrently: {num_concurrent_predictions} / Total Overall Trial Station Count: {max(self.stations2use_list)}") 
@@ -540,6 +532,31 @@ class EvaluateSystem():
                             # Concurrent Timechunks
                             tasks_queue = []
                             log_queue = queue.Queue()  # Create a queue for log entries
+
+
+                            # ===== RAM Baseline (before launching worker) =====
+                            _rss = process.memory_info().rss
+                            for _ch in process.children(recursive=True):
+                                try:
+                                    _rss += _ch.memory_info().rss
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    pass
+                            mem_before_total_mb = _rss / 1e6
+
+                            # peak before (platform-aware)
+                            if resource is not None:  # Linux/macOS
+                                _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                                if sys.platform.startswith("linux"):
+                                    peak_before_mb = _ru / 1024.0            # ru_maxrss in KB on Linux
+                                elif sys.platform == "darwin":
+                                    peak_before_mb = _ru / (1024.0 * 1024.0) # ru_maxrss in bytes on macOS
+                                else:
+                                    peak_before_mb = mem_before_total_mb     # safe fallback
+                            else:  # Windows: no 'resource'
+                                try:
+                                    peak_before_mb = process.memory_full_info().peak_wset / 1e6
+                                except Exception:
+                                    peak_before_mb = mem_before_total_mb
 
                             try: 
                                 while True: 
@@ -577,18 +594,71 @@ class EvaluateSystem():
                             # Write log entries from the queue to the file
                             while not log_queue.empty():
                                 log_entry = log_queue.get()
-                                # FIX ME 
                                 
                             remove_output_subdirs(self.output_dir, logger=self.logger)
                             trial_num += 1  
                             
                             # RAM cleanup
-                            process = psutil.Process(os.getpid())
-                            mem_before = process.memory_info().rss
+                            # ===== AFTER RUN (before cleanup) =====
+                            _rss = process.memory_info().rss
+                            for _ch in process.children(recursive=True):
+                                try:
+                                    _rss += _ch.memory_info().rss
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    pass
+                            mem_after_run_total_mb = _rss / 1e6
+                            delta_run_mb = mem_after_run_total_mb - mem_before_total_mb
+
+                            # updated peak (platform-aware)
+                            if resource is not None:
+                                _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                                if sys.platform.startswith("linux"):
+                                    peak_after_mb = _ru / 1024.0
+                                elif sys.platform == "darwin":
+                                    peak_after_mb = _ru / (1024.0 * 1024.0)
+                                else:
+                                    peak_after_mb = mem_after_run_total_mb
+                            else:
+                                try:
+                                    peak_after_mb = process.memory_full_info().peak_wset / 1e6
+                                except Exception:
+                                    peak_after_mb = mem_after_run_total_mb
+
+                            self.logger.info("")
+                            self.logger.info(
+                                f"[MEM] Baseline: {mem_before_total_mb:.2f} MB | After run: {mem_after_run_total_mb:.2f} MB "
+                                f"| Δrun: {delta_run_mb:.2f} MB | Peak≈{max(peak_before_mb, peak_after_mb):.2f} MB"
+                            )
+
+                            # ===== CLEANUP =====
+                            # drop strong refs so GC matters
+                            try: del ref
+                            except NameError: pass
+                            try: del log_entry
+                            except NameError: pass
+
+                            _rss = process.memory_info().rss
+                            for _ch in process.children(recursive=True):
+                                try:
+                                    _rss += _ch.memory_info().rss
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    pass
+                            mem_before_clean_mb = _rss / 1e6
+
                             gc.collect()
-                            mem_after = process.memory_info().rss
-                            mem_freed = mem_before - mem_after
-                            self.logger.info(f"Successfully cleaned up {mem_freed / 1e6:.2f} MB of RAM.")
+                            time.sleep(0.1)
+
+                            _rss = process.memory_info().rss
+                            for _ch in process.children(recursive=True):
+                                try:
+                                    _rss += _ch.memory_info().rss
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    pass
+                            mem_after_clean_mb = _rss / 1e6
+
+                            freed_mb = mem_before_clean_mb - mem_after_clean_mb
+                            self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean_mb:.2f} MB") # To-Do: Fix the Freed so its beeter (for cpu and gpu)
+                            self.logger.info("")
                             
                         # tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
 
@@ -600,15 +670,17 @@ class EvaluateSystem():
                     self.logger.info(f"Ray Successfully Shutdown.")
                                 
      
-        self.logger.info(f"Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
+        self.logger.info(f"Testing complete.")
+        self.logger.info(f"")
+        self.logger.info(f"Finding Optimal Configurations...")
         # Compute optimal configurations (CPU)
         df = pd.read_csv(csv_filepath)
         optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_cpu(df)
         optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_cpu.csv", index=False)
         best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_cpu.csv", index=False)
-        self.logger.info(f"Optimal Configurations Found. Findings saved to:\n" 
-                f" 1) Optimal CPU/Station/Concurrent Prediction Configurations: {self.csv_dir}/optimal_configurations_cpu.csv\n" 
-                f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_cpu.csv")
+        self.logger.info(f"Optimal Configurations Found. Findings saved to:") 
+        self.logger.info(f" 1) Optimal CPU/Station/Concurrent Prediction Configurations: {self.csv_dir}/optimal_configurations_cpu.csv") 
+        self.logger.info(f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_cpu.csv")
 
     def evaluate_gpu(self): 
         """Evaluate system parallelization using GPUs"""
@@ -622,12 +694,6 @@ class EvaluateSystem():
         os.makedirs(self.csv_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Create logfile 
-        if not os.path.exists(self.log_filepath): 
-            self.logger.info(f"Log file not found. Should already exist...")
-        else: 
-            self.logger.info(f"Log file '{self.log_filepath}' already exists.")
-        
         # Calculate these at the start
         self.chunk_time()
         self.dt_task_generator()
@@ -635,7 +701,7 @@ class EvaluateSystem():
             
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/gpu_test_results.csv"
-        prepare_csv(csv_file_path=csv_filepath)
+        prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
         
         free_vram_mb = self.vram_mb if self.vram_mb else self.calculate_vram()
         self.selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
@@ -644,108 +710,190 @@ class EvaluateSystem():
         trial_num = 1
         log_queue = queue.Queue()  # Create a queue for log entries
         
-        with open(self.log_filepath, mode="a+", buffering=1) as log:
-            # Initialize Ray with GPUs
-            ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), 
-                    logging_level=logging.FATAL, log_to_driver=False)
-            self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
-            self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
-            self._log_thread.start() # Starts the thread
-            self.logger.info(f"Ray Successfully Initialized with {len(self.selected_gpus)} GPU(s) and {len(self.cpu_id_list)} CPU(s).")
-            
-            for stations in self.stations2use_list:
-                concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
-                for predictions in concurrent_predictions_list:
-                    vram_per_task_mb = free_vram_mb / predictions
-                    step_size = vram_per_task_mb * 0.05
-                    vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
-                    self.logger.info(f"Testing the following VRAM limitations (MB): {vram_steps}")
+        # Initialize Ray with GPUs
+        ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), 
+                logging_level=logging.FATAL, log_to_driver=False)
+        self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
+        self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
+        self._log_thread.start() # Starts the thread
+        self.logger.info(f"Ray Successfully Initialized with {len(self.selected_gpus)} GPU(s) and {len(self.cpu_id_list)} CPU(s).")
+        
+        for stations in self.stations2use_list:
+            concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
+            for predictions in concurrent_predictions_list:
+                vram_per_task_mb = free_vram_mb / predictions
+                step_size = vram_per_task_mb * 0.05
+                vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
+                self.logger.info(f"Testing the following VRAM limitations (MB): {vram_steps}")
+                
+                for gpu_memory_limit_mb in vram_steps:
                     
-                    for gpu_memory_limit_mb in vram_steps:
-                        self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Task")
-                        self.logger.info(f"Trial Number: {trial_num}")
-                        
-                        # Get the first timechunk for testing
-                        mseed_timechunk_dir_name = self.tasks_picker[0][1]
-                        timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
-                        
-                        self.logger.info(f"Trial Number: {trial_num}\n")
-                        self.logger.info(f"Stations: {stations}")
-                        self.logger.info(f"Concurrent Station Predictions: {predictions}")
-                        self.logger.info(f"VRAM per Task: {gpu_memory_limit_mb:.2f} MB")
-                        
+                    self.logger.info("")
+                    self.logger.info(f"------- Trial Number: {trial_num} -------")
+                    self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Task")
+                    
+                    # Get the first timechunk for testing
+                    mseed_timechunk_dir_name = self.tasks_picker[0][1]
+                    timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+                    
+                    self.logger.info(f"Stations: {stations}")
+                    self.logger.info(f"Concurrent Station Predictions: {predictions}")
+                    self.logger.info(f"VRAM per Task: {gpu_memory_limit_mb:.2f} MB")
+                    self.logger.info("")
+
+
+                    # ===== Baseline RAM consumption (before launching worker) =====
+                    _rss = process.memory_info().rss
+                    for _ch in process.children(recursive=True):
                         try:
-                            # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
-                            ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
-                                input_dir=timechunk_dir_path, 
-                                output_dir=self.output_dir, 
-                                log_queue=self.log_queue, 
-                                P_threshold=self.P_threshold, 
-                                S_threshold=self.S_threshold, 
-                                p_model=self.p_model_filepath, 
-                                s_model=self.s_model_filepath, 
-                                number_of_concurrent_station_predictions=predictions, 
-                                ray_cpus=self.cpu_id_list, 
-                                use_gpu=True, 
-                                gpu_id=self.selected_gpus, 
-                                gpu_memory_limit_mb=gpu_memory_limit_mb, 
-                                stations2use=stations, 
-                                timechunk_id=mseed_timechunk_dir_name, 
-                                waveform_overlap=self.waveform_overlap, 
-                                total_timechunks=len(self.tasks_picker), 
-                                number_of_concurrent_timechunk_predictions=1,  # Testing one timechunk at a time
-                                total_analysis_time=total_analysis_time, 
-                                testing_gpu=True,  # Enable test mode
-                                test_csv_filepath=csv_filepath, 
-                                intra_threads=self.intra_threads, 
-                                inter_threads=self.inter_threads, 
-                                timechunk_dt=self.timechunk_dt
-                            )
-                            
-                            # Wait for result
-                            log_entry = ray.get(ref)
-                            log_queue.put(log_entry)  # Add log entry to the queue
-                            
-                            # Success - update CSV
-                            update_csv(csv_filepath, success=1, error_message="")
-                            
-                        except Exception as e:
-                            # Failure occurred, need to add to log 
-                            error_msg = f"{type(e).__name__}: {str(e)}"
-                            update_csv(csv_filepath, success=0, error_message=error_msg)
-                            self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
-                        
-                        # Write log entries from the queue to the file
-                        while not log_queue.empty():
-                            log_entry = log_queue.get()
-                            self.logger.info(f"{log_entry}") # FIX ME 
-                        
-                        remove_output_subdirs(self.output_dir, logger=self.logger) 
-                        trial_num += 1
-                        
-                        # RAM cleanup
-                        mem_before = process.memory_info().rss
-                        gc.collect()
-                        mem_after = process.memory_info().rss
-                        mem_freed = mem_before - mem_after
-                        self.logger.info(f"Successfully cleaned up {mem_freed / 1e6:.2f} MB of RAM.")
-            
-            # stop log forwarder
-            self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
-            self._log_thread.join(timeout=2)
+                            _rss += _ch.memory_info().rss
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    mem_before_total_mb = _rss / 1e6
 
-            ray.shutdown()  # Shutdown Ray after all testing
-            self.logger.info(f"Ray Successfully Shutdown.")
+                    # peak before (platform-aware)
+                    if resource is not None:  # Linux/macOS
+                        _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                        if sys.platform.startswith("linux"):
+                            peak_before_mb = _ru / 1024.0            # ru_maxrss in KB on Linux
+                        elif sys.platform == "darwin":
+                            peak_before_mb = _ru / (1024.0 * 1024.0) # ru_maxrss in bytes on macOS
+                        else:
+                            peak_before_mb = mem_before_total_mb     # safe fallback
+                    else:  # Windows: no 'resource'
+                        try:
+                            peak_before_mb = process.memory_full_info().peak_wset / 1e6
+                        except Exception:
+                            peak_before_mb = mem_before_total_mb
+                    
+                    try:
+                        # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
+                        ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                            input_dir=timechunk_dir_path, 
+                            output_dir=self.output_dir, 
+                            log_queue=self.log_queue, 
+                            P_threshold=self.P_threshold, 
+                            S_threshold=self.S_threshold, 
+                            p_model=self.p_model_filepath, 
+                            s_model=self.s_model_filepath, 
+                            number_of_concurrent_station_predictions=predictions, 
+                            ray_cpus=self.cpu_id_list, 
+                            use_gpu=True, 
+                            gpu_id=self.selected_gpus, 
+                            gpu_memory_limit_mb=gpu_memory_limit_mb, 
+                            stations2use=stations, 
+                            timechunk_id=mseed_timechunk_dir_name, 
+                            waveform_overlap=self.waveform_overlap, 
+                            total_timechunks=len(self.tasks_picker), 
+                            number_of_concurrent_timechunk_predictions=1,  # Testing one timechunk at a time
+                            total_analysis_time=total_analysis_time, 
+                            testing_gpu=True,  # Enable test mode
+                            test_csv_filepath=csv_filepath, 
+                            intra_threads=self.intra_threads, 
+                            inter_threads=self.inter_threads, 
+                            timechunk_dt=self.timechunk_dt
+                        )
+                        
+                        # Wait for result
+                        log_entry = ray.get(ref)
+                        log_queue.put(log_entry)  # Add log entry to the queue
+                        
+                        # Success - update CSV
+                        update_csv(csv_filepath, success=1, error_message="")
+                        
+                    except Exception as e:
+                        # Failure occurred, need to add to log 
+                        error_msg = f"{type(e).__name__}: {str(e)}"
+                        update_csv(csv_filepath, success=0, error_message=error_msg)
+                        self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
+                    
+                    # Write log entries from the queue to the file
+                    while not log_queue.empty():
+                        log_entry = log_queue.get()
+                        self.logger.info(f"{log_entry}") # FIX ME 
+                    
+                    remove_output_subdirs(self.output_dir, logger=self.logger) 
+                    trial_num += 1
+                    
+                    # RAM cleanup
+                    # ===== AFTER RUN (before cleanup) =====
+                    _rss = process.memory_info().rss
+                    for _ch in process.children(recursive=True):
+                        try:
+                            _rss += _ch.memory_info().rss
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    mem_after_run_total_mb = _rss / 1e6
+                    delta_run_mb = mem_after_run_total_mb - mem_before_total_mb
 
-        self.logger.info(f"Testing complete.\n[{datetime.now()}] Finding Optimal Configurations...")
+                    # updated peak (platform-aware)
+                    if resource is not None:
+                        _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                        if sys.platform.startswith("linux"):
+                            peak_after_mb = _ru / 1024.0
+                        elif sys.platform == "darwin":
+                            peak_after_mb = _ru / (1024.0 * 1024.0)
+                        else:
+                            peak_after_mb = mem_after_run_total_mb
+                    else:
+                        try:
+                            peak_after_mb = process.memory_full_info().peak_wset / 1e6
+                        except Exception:
+                            peak_after_mb = mem_after_run_total_mb
+
+                    self.logger.info(
+                        f"[MEM] Baseline: {mem_before_total_mb:.2f} MB | After run: {mem_after_run_total_mb:.2f} MB "
+                        f"| Δrun: {delta_run_mb:.2f} MB | Peak≈{max(peak_before_mb, peak_after_mb):.2f} MB"
+                    )
+
+                    # ===== CLEANUP =====
+                    # drop strong refs so GC matters
+                    try: del ref
+                    except NameError: pass
+                    try: del log_entry
+                    except NameError: pass
+
+                    _rss = process.memory_info().rss
+                    for _ch in process.children(recursive=True):
+                        try:
+                            _rss += _ch.memory_info().rss
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    mem_before_clean_mb = _rss / 1e6
+
+                    gc.collect()
+                    time.sleep(0.1)
+
+                    _rss = process.memory_info().rss
+                    for _ch in process.children(recursive=True):
+                        try:
+                            _rss += _ch.memory_info().rss
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    mem_after_clean_mb = _rss / 1e6
+
+                    freed_mb = mem_before_clean_mb - mem_after_clean_mb
+                    self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean_mb:.2f} MB\n")
+                    self.logger.info("")
+        
+        # stop log forwarder
+        self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
+        self._log_thread.join(timeout=2)
+
+        ray.shutdown()  # Shutdown Ray after all testing
+        self.logger.info(f"Ray Successfully Shutdown.")
+
+        self.logger.info(f"Testing complete.")
+        self.logger.info(f"")
+        self.logger.info(f"Finding Optimal Configurations...")
         # Compute optimal configurations (GPU)
         df = pd.read_csv(csv_filepath)
         optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_gpu(df)
         optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_gpu.csv", index=False)
         best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_gpu.csv", index=False)
-        self.logger.info(f"Optimal Configurations Found. Findings saved to:\n" 
-                f" 1) Optimal GPU/Station/Concurrent Prediction Configurations: {self.csv_dir}/optimal_configurations_gpu.csv\n" 
-                f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_gpu.csv")
+        self.logger.info(f"Optimal Configurations Found. Findings saved to:") 
+        self.logger.info(f" 1) Optimal GPU/Station/Concurrent Prediction Configurations: {self.csv_dir}/optimal_configurations_gpu.csv") 
+        self.logger.info(f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_gpu.csv")
 
     def evaluate(self):
         if self.eval_mode == "cpu":
@@ -817,6 +965,7 @@ class OptimalCPUConfigurationFinder:
         num_stations = best_config_dict.get("Number of Stations Used")
         total_runtime = best_config_dict.get("Total Run time for Picker (s)")
         
+        self.logger.info("")
         self.logger.info(f"------- Finding the Best Overall CPU Usecase Configuration Based on Available Trial Data in {self.eval_sys_results_dir} -------")
         self.logger.info(f"CPU(s): {num_cpus}")
         self.logger.info(f"Intra-parallelism Threads: {intra_threads}")
@@ -861,7 +1010,7 @@ class OptimalCPUConfigurationFinder:
         # iloc gets the selection of data from a numerical index from the df and turns that access point into a Series
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
 
-        self.logger.info(f"------- Best CPU-EQCCTPro Configuration for Requested Input Parameters Based on the available Trial Data -------")
+        self.logger.info(f"------- Best CPU-EQCCTPro Configuration for Requested Input Parameters Based on the available Trial Data in {self.eval_sys_results_dir} -------")
         self.logger.info(f"CPU(s): {cpu}")
         self.logger.info(f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}")
         self.logger.info(f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}")
@@ -935,9 +1084,10 @@ class OptimalGPUConfigurationFinder:
         total_runtime = row.get("Total Run time for Picker (s)")
         vram_used = row.get("VRAM Used Per Task")
 
+        self.logger.info("")
         self.logger.info(f"------- Finding the Best Overall GPU Usecase Configuration Based on Available Trial Data in {self.eval_sys_results_dir} -------")
         self.logger.info("")
-        self.logger.info(f"CPU: {num_cpus}")
+        self.logger.info(f"CPU(s): {num_cpus}")
         self.logger.info(f"GPU ID(s): {num_gpus_list}")
         self.logger.info(f"Concurrent Predictions: {num_concurrent}")
         self.logger.info(f"Intra-parallelism Threads: {intra_threads}")
@@ -986,7 +1136,7 @@ class OptimalGPUConfigurationFinder:
 
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
 
-        self.logger.info(f"------- Best GPU-EQCCTPro Configuration for Requested Input Parameters Based on the Available Trial Data -------")
+        self.logger.info(f"------- Best GPU-EQCCTPro Configuration for Requested Input Parameters Based on the Available Trial Data in {self.eval_sys_results_dir} -------")
         self.logger.info(f"CPU(s): {num_cpus}")
         self.logger.info(f"GPU(s): {gpu_list}")
         self.logger.info(f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}")

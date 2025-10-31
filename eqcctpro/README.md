@@ -123,7 +123,7 @@ There are three main capabilities of EQCCTPro:
 
 These capabilities are achieved using the following core functions:
 
-- **EQCCTMSeedRunner** (for processing mSEED data)
+- **RunEQCCTPro** (for processing mSEED data)
 
 - **EvaluateSystem** (for system evaluation)
 
@@ -132,9 +132,9 @@ These capabilities are achieved using the following core functions:
 - **OptimalGPUConfigurationFinder** (for GPU configuration optimization)
 
 ---
-### **Processing mSEED data using EQCCTPro (EQCCTMSeedRunner)** 
-To process mSEED from various seismic stations, use the **EQCCTMSeedRunner** class. 
-**EQCCTMSeedRunner** enables users to process multiple mSEED from a given input directory, which consists of station directories formatted as follows:
+### **Processing mSEED data using EQCCTPro (RunEQCCTPro)** 
+To process mSEED from various seismic stations, use the **RunEQCCTPro** class. 
+**RunEQCCTPro** enables users to process multiple mSEED from a given input directory, which consists of station directories formatted as follows:
 
 ```sh
 [skevofilaxc 230_stations_1_min_dt]$ ls
@@ -167,12 +167,12 @@ TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
 EQCCT only needs one pose for the detection to occur, however more poses allow for better detection of the direction of the P and S waves.
 
-After setting up or utilizing the provided sample waveform directory, and install eqcctpro, import **EQCCTMseedRunner** as show below: 
+After setting up or utilizing the provided sample waveform directory, and install eqcctpro, import **RunEQCCTPro** as show below: 
 
 ```python
-from eqcctpro import EQCCTMSeedRunner
+from eqcctpro import RunEQCCTPro
 
-eqcct_runner = EQCCTMSeedRunner(
+eqcct_runner = RunEQCCTPro(
     use_gpu=False,
     intra_threads=1,
     inter_threads=1,
@@ -189,7 +189,7 @@ eqcct_runner = EQCCTMSeedRunner(
     best_usecase_config=True,
     csv_dir='/path/to/csv',
     selected_gpus=[0],
-    set_vram_mb=24750,
+    vram_mb=24750,
     specific_stations='AT01, BP01, DG05',
     start_time='2024-12-14 12:00:00',
     end_time='2024-12-15 12:00:00',
@@ -199,7 +199,7 @@ eqcct_runner = EQCCTMSeedRunner(
 eqcct_runner.run_eqcctpro()
 ```
 
-**EQCCTMseedRunner** has multiple input parameters that need to be configured and are defined below: 
+**RunEQCCTPro** has multiple input parameters that need to be configured and are defined below: 
 
 - **`use_gpu (bool)`: True or False** 
   - Tells Ray to use either the GPU(s) (True) or CPUs (False) on your computer to process the waveforms in the entire workflow
@@ -248,7 +248,7 @@ eqcct_runner.run_eqcctpro()
 - **`selected_gpus (list)`: default = None**
   - List of GPU IDs on your computer you want to use if `use_gpu = True`
   - None existing GPU IDs will cause the code to exit 
-- **`set_vram_mb (float)`**
+- **`vram_mb (float)`**
   - Value of the maximum amount of VRAM EQCCTPro can use 
   - Must be a real value that is based on your hardware's physical memory space, if it exceeds the space the code will break due to **OutOfMemoryError**
 - **`specific_stations (str)`: default = None**
@@ -281,28 +281,6 @@ eqcct_runner.run_eqcctpro()
 ### **Evaluating Your Systems Runtime Performance Capabilites**
 To evaluate your system’s runtime performance capabilites for both your CPU(s) and GPU(s), the **EvaluateSystem** class allows you to autonomously evaluate your system:
 
-```python
-from eqcctpro import EvaluateSystem
-
-eval_gpu = EvaluateSystem(
-                mode='gpu',
-                intra_threads=1,
-                inter_threads=1,
-                input_dir='/path/to/mseed',
-                output_dir='/path/to/outputs',
-                log_filepath='/path/to/outputs/eqcctpro.log',
-                csv_dir='/path/to/csv',
-                P_threshold=0.001,
-                S_threshold=0.02,
-                p_model_filepath='/path/to/model_p.h5',
-                s_model_filepath='/path/to/model_s.h5',
-                cpu_id_list=[0,1],
-                set_vram_mb=24750,
-                selected_gpus=[0],
-                stations2use=2
-)
-eval_gpu.evaluate()
-```
 
 ```python
 from eqcctpro import EvaluateSystem
@@ -336,9 +314,32 @@ eval_cpu = EvaluateSystem(
 eval_cpu.evaluate()
 ```
 
+```python
+from eqcctpro import EvaluateSystem
+
+eval_gpu = EvaluateSystem(
+                mode='gpu',
+                intra_threads=1,
+                inter_threads=1,
+                input_dir='/path/to/mseed',
+                output_dir='/path/to/outputs',
+                log_filepath='/path/to/outputs/eqcctpro.log',
+                csv_dir='/path/to/csv',
+                P_threshold=0.001,
+                S_threshold=0.02,
+                p_model_filepath='/path/to/model_p.h5',
+                s_model_filepath='/path/to/model_s.h5',
+                cpu_id_list=[0,1],
+                vram_mb=24750,
+                selected_gpus=[0],
+                stations2use=2
+)
+eval_gpu.evaluate()
+```
+
 **EvaluateSystem** will iterate through different combinations of CPU(s), Concurrent Timechunk and Station Tasks, as well as GPU(s), and the amount of VRAM (MB) each Concurrent Prediction can use. 
 **EvaluateSystem** will take time, depending on the number of CPU/GPUs, the amount of VRAM available, and the total workload that needs to be tested. However, after doing the testing once for most if not all usecases, 
-the trial data will be available and can be used to identify the optimal input parallelization configurations for **EQCCTMSeedRunner** to use to get the maximum amount of processing out of your system in the shortest amonut of time. 
+the trial data will be available and can be used to identify the optimal input parallelization configurations for **RunEQCCTPro** to use to get the maximum amount of processing out of your system in the shortest amonut of time. 
 
 The following input parameters need to be configurated for **EvaluateSystem** to evaluate your system based on your desired utilization of EQCCTPro: 
 
@@ -422,10 +423,10 @@ The following input parameters need to be configurated for **EvaluateSystem** to
 - **`tmp_dir (str)`: default = 1** 
   - A temporary directory to store all temp files produced by EQCCTPro
   - Used to help ease system cleanup and to not write to system's default temporary directory 
-- **`set_vram_mb (float)`**
+- **`vram_mb (float)`**
   - Maximum amount of VRAM each Raylet can use (float).  
   - Must be a real value that is based on your GPU's physical VRAM space, if it exceeds the space the code will break due to OutOfMemoryError 
-  - Good rule of thumb for calculating `set_vram_mb` = (GPU VRAM * .90 (to be safe)) / number_of_concurrent_station_predictions * number_of_concurrent_timechunk_predictions
+  - Good rule of thumb for calculating `vram_mb` = (GPU VRAM * .90 (to be safe)) / number_of_concurrent_station_predictions * number_of_concurrent_timechunk_predictions
 - **`selected_gpus (list)`: default = None**
   - List of GPU IDs on your computer you want to use if `mode = 'gpu'`
   - Non-existing GPU IDs will cause the code to exit 

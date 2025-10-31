@@ -641,11 +641,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
     try:
         process = psutil.Process(os.getpid())
         process.cpu_affinity(ray_cpus)  # ray_cpus should be a list of core IDs like [0, 1, 2]
-        logger.info(f"CPU affinity set to cores: {ray_cpus}")
+        logger.info(f"CPU affinity set to cores: {list(ray_cpus)}")
         logger.info("")
     except Exception as e:
         logger.error(f"Failed to set CPU affinity. Reason: {e}")
-        logger.info("")
+        logger.error("")
+        sys.exit(1)
     
     out_dir = os.path.join(os.getcwd(), str(args['output_dir']))    
     try:
@@ -694,7 +695,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     else:
         # Create CPU model actor
         model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False, logger=logger)]
-        logger.info(f"Created 1 CPU model actor") 
+        logger.info(f"Created a 1 CPU-sized ModelActor") 
 
     # Submit tasks to ray in a queue
     tasks_queue = []
@@ -793,8 +794,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
         logger.info(f"Successfully saved trial data to CSV at {test_csv_filepath}")
         
-    logger.info(f"Successfully ran EQCCTPro, exiting...")
-    return ""
+    return "Successfully ran EQCCTPro, exiting..."
 
 
 @ray.remote
