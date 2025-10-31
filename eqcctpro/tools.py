@@ -581,74 +581,6 @@ def find_optimal_configurations_cpu(df):
     return optimal_concurrent_preds, best_overall_df
 
 
-# def find_optimal_configurations_gpu(df):
-#     """
-#     Find:
-#     1. The best number of concurrent predictions for each (stations, GPUs, VRAM, CPUs) pair that results in the fastest runtime.
-#     2. The overall best configuration balancing stations, GPUs, CPUs, VRAM, and runtime.
-#     """
-#     # Convert relevant columns to numeric, handling NaNs gracefully
-#     numeric_cols = [
-#         "Number of Stations Used", "Number of CPUs Allocated for Ray to Use",
-#         "Number of Concurrent Station Tasks", "Total Run time for Picker (s)",
-#         "VRAM Used Per Task"
-#     ]
-#     for col in numeric_cols:
-#         df[col] = pd.to_numeric(df[col], errors="coerce")
-
-#     # Normalize GPUs Used to list[int]
-#     df["GPUs Used"] = df["GPUs Used"].apply(_parse_gpus_field)
-
-#     # Drop rows where essential columns are missing
-#     df_cleaned = df.dropna(subset=numeric_cols + ["GPUs Used"])
-
-#     # Find the best number of concurrent predictions for each (Stations, CPUs, GPUs, VRAM) combination
-#     optimal_concurrent_preds = df_cleaned.loc[
-#         df_cleaned.groupby(["Number of Stations Used", "Number of CPUs Allocated for Ray to Use", 
-#                             "GPUs Used", "VRAM Used Per Task"])
-#         ["Total Run time for Picker (s)"].idxmin()
-#     ]
-
-#     optimal_concurrent_preds["GPUs Used"] = optimal_concurrent_preds["GPUs Used"].apply(lambda x: list(x) if isinstance(x, tuple) else x)
-
-#     # Define what "moderate" means in terms of VRAM usage (e.g., middle 50% of available VRAM)
-#     vram_min = df_cleaned["VRAM Used Per Task"].quantile(0.25)
-#     vram_max = df_cleaned["VRAM Used Per Task"].quantile(0.75)
-
-#     # Filter for rows within the moderate VRAM range
-#     df_moderate_vram = df_cleaned[
-#         (df_cleaned["VRAM Used Per Task"] >= vram_min) & 
-#         (df_cleaned["VRAM Used Per Task"] <= vram_max)
-#     ]
-
-#     # Sort by the highest number of stations first, then by the fastest runtime
-#     best_overall_config = df_moderate_vram.sort_values(
-#         by=["Number of Stations Used", "Total Run time for Picker (s)"], 
-#         ascending=[False, True]  # Maximize stations, minimize runtime
-#     ).iloc[0]
-
-#     formatted_output = {
-#         "Trial Number": best_overall_config["Trial Number"],
-#         "Number of Stations Used": best_overall_config["Number of Stations Used"],
-#         "Total Number of Timechunks": best_overall_config["Total Number of Timechunks"],
-#         "Concurrent Timechunks Used": best_overall_config["Concurrent Timechunks Used"],
-#         "Length of Timechunk (min)": str(best_overall_config["Length of Timechunk (min)"]),
-#         "Total Waveform Analysis Timespace (min)": str(best_overall_config["Total Waveform Analysis Timespace (min)"]),
-#         "Number of Concurrent Station Tasks per Timechunk": best_overall_config["Number of Concurrent Station Tasks"],
-#         "Number of CPUs Allocated for Ray to Use": best_overall_config["Number of CPUs Allocated for Ray to Use"],
-#         "GPUs Used": best_overall_config["GPUs Used"],
-#         "VRAM Used Per Task": best_overall_config["VRAM Used Per Task"],
-#         "Intra-parallelism Threads": best_overall_config["Intra-parallelism Threads"],
-#         "Inter-parallelism Threads": best_overall_config["Inter-parallelism Threads"],
-#         "Total Run time for Picker (s)": best_overall_config["Total Run time for Picker (s)"],
-#         "Trial Success": best_overall_config["Trial Success"],
-#         "Error Message": best_overall_config["Error Message"],
-#     }
-
-#     best_overall_df = pd.DataFrame([formatted_output])
-
-#     return optimal_concurrent_preds, best_overall_df
-
 def find_optimal_configurations_gpu(df):
     """
     Find:
@@ -733,7 +665,7 @@ def find_optimal_configurations_gpu(df):
     best_overall_df = pd.DataFrame([formatted_output])
 
     return optimal_concurrent_preds, best_overall_df
-    
+
 """
 find_optimal_configuration_cpu/gpu returns back the best overall usecase results configuration, and takes those values to be used as the 
 current operation's runtime configuration."""
