@@ -4,6 +4,8 @@ tools.py contains the sub-tool functions that EQCCTPro uses, such as getting the
 from __future__ import annotations
 import os 
 import re
+import ast
+import math
 import glob
 import shutil 
 import pynvml 
@@ -118,7 +120,33 @@ def get_gpu_vram(gpu_index): # Need to fix to pass in a GPU instead of hard inde
     return total_vram, free_vram        
 
 """
-check_vram checks to see that for the RunEQCCTPro functionality, when the user calls to use a certain amount of VRAM per Raylet,
+_parse_gpu_fields normalize the 'GPUs Used' field from CSV into a list[int]
+"""
+def _parse_gpus_field(x):
+    if x is None:
+        return []
+    if isinstance(x, (list, tuple)):
+        return [int(v) for v in x]
+    if isinstance(x, (int, float)) and not (isinstance(x, float) and math.isnan(x)):
+        return [int(x)]
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return []
+        s = s.replace("(", "[").replace(")", "]").replace("{", "[").replace("}", "]")
+        try:
+            val = ast.literal_eval(s)
+            if isinstance(val, (list, tuple)):
+                return [int(v) for v in val]
+            if isinstance(val, (int, float)):
+                return [int(val)]
+        except Exception:
+            nums = re.findall(r"-?\d+", s)
+            return [int(n) for n in nums]
+    return []
+
+"""
+VramPlan checks to see that for the RunEQCCTPro functionality, when the user calls to use a certain amount of VRAM per Raylet,
 we check to see that the amount requested does not exceed what is capable for the system. 
 """
 # To-Do: Understand how this works
@@ -331,6 +359,12 @@ If the trial either was a success or had errors, we update the last row with the
 """
 def update_csv(csv_filepath, success, error_message):
     df = pd.read_csv(csv_filepath)
+    if "Error Message" not in df.columns:
+        df["Error Message"] = ""
+
+    # Ensure string dtype
+    df["Error Message"] = df["Error Message"].astype("string")
+
     last_idx = df.index[-1] # Get last row id number
     df.loc[last_idx, 'Trial Success'] = success # Access value at row last_idx, column 'Trial Success' 
     df.loc[last_idx, 'Error Message'] = error_message # Access value at row last_idx, column 'Error Message'
@@ -356,23 +390,21 @@ once a trial has completed, because if we do not, then the code will recognize t
 when in reality it was in the previous configuration iteration. Does not remove trial contents or log, just station subdirs created by mseed_predictor
 and parallel_predict.
 """
-def remove_output_subdirs(path): 
+def remove_output_subdirs(output_dir: str, logger: logging.Logger | None = None) -> None:
     """
-    Removes all subdirectories within the specified directory, but not the directory itself.
+    Delete any *_outputs subdirectories in `output_dir`. 
+    Logs via `logger` if provided; otherwise falls back to print.
     """
-    if os.path.exists(path) and os.path.isdir(path):
-        for item in os.listdir(path):
-            item_path = os.path.join(path, item)
-            if os.path.isdir(item_path):
-                try:
-                    shutil.rmtree(item_path)
-                    print(f"Removed subdirectory: {item_path}")
-                except Exception as e:
-                    print(f"Failed to remove subdirectory: {item_path}. Error: {e}")
-    elif not os.path.exists(path):
-        print(f"Directory '{path}' does not exist.")
-    elif not os.path.isdir(path):
-        print(f"'{path}' is not a directory.")
+    try:
+        for name in os.listdir(output_dir):
+            path = os.path.join(output_dir, name)
+            if os.path.isdir(path) and name.endswith("_outputs"):
+                shutil.rmtree(path, ignore_errors=True)
+                msg = f"Removed subdirectory: {path}"
+                (logger.info if logger else print)(msg)
+    except Exception as e:
+        msg = f"Failed to remove output subdirs in {output_dir}: {e}"
+        (logger.error if logger else print)(msg)
 
 """
 We need to check to make sure that the input dir's contents (IE. the station subdirs in each timechunk dir) 
@@ -549,50 +581,136 @@ def find_optimal_configurations_cpu(df):
     return optimal_concurrent_preds, best_overall_df
 
 
+# def find_optimal_configurations_gpu(df):
+#     """
+#     Find:
+#     1. The best number of concurrent predictions for each (stations, GPUs, VRAM, CPUs) pair that results in the fastest runtime.
+#     2. The overall best configuration balancing stations, GPUs, CPUs, VRAM, and runtime.
+#     """
+#     # Convert relevant columns to numeric, handling NaNs gracefully
+#     numeric_cols = [
+#         "Number of Stations Used", "Number of CPUs Allocated for Ray to Use",
+#         "Number of Concurrent Station Tasks", "Total Run time for Picker (s)",
+#         "VRAM Used Per Task"
+#     ]
+#     for col in numeric_cols:
+#         df[col] = pd.to_numeric(df[col], errors="coerce")
+
+#     # Normalize GPUs Used to list[int]
+#     df["GPUs Used"] = df["GPUs Used"].apply(_parse_gpus_field)
+
+#     # Drop rows where essential columns are missing
+#     df_cleaned = df.dropna(subset=numeric_cols + ["GPUs Used"])
+
+#     # Find the best number of concurrent predictions for each (Stations, CPUs, GPUs, VRAM) combination
+#     optimal_concurrent_preds = df_cleaned.loc[
+#         df_cleaned.groupby(["Number of Stations Used", "Number of CPUs Allocated for Ray to Use", 
+#                             "GPUs Used", "VRAM Used Per Task"])
+#         ["Total Run time for Picker (s)"].idxmin()
+#     ]
+
+#     optimal_concurrent_preds["GPUs Used"] = optimal_concurrent_preds["GPUs Used"].apply(lambda x: list(x) if isinstance(x, tuple) else x)
+
+#     # Define what "moderate" means in terms of VRAM usage (e.g., middle 50% of available VRAM)
+#     vram_min = df_cleaned["VRAM Used Per Task"].quantile(0.25)
+#     vram_max = df_cleaned["VRAM Used Per Task"].quantile(0.75)
+
+#     # Filter for rows within the moderate VRAM range
+#     df_moderate_vram = df_cleaned[
+#         (df_cleaned["VRAM Used Per Task"] >= vram_min) & 
+#         (df_cleaned["VRAM Used Per Task"] <= vram_max)
+#     ]
+
+#     # Sort by the highest number of stations first, then by the fastest runtime
+#     best_overall_config = df_moderate_vram.sort_values(
+#         by=["Number of Stations Used", "Total Run time for Picker (s)"], 
+#         ascending=[False, True]  # Maximize stations, minimize runtime
+#     ).iloc[0]
+
+#     formatted_output = {
+#         "Trial Number": best_overall_config["Trial Number"],
+#         "Number of Stations Used": best_overall_config["Number of Stations Used"],
+#         "Total Number of Timechunks": best_overall_config["Total Number of Timechunks"],
+#         "Concurrent Timechunks Used": best_overall_config["Concurrent Timechunks Used"],
+#         "Length of Timechunk (min)": str(best_overall_config["Length of Timechunk (min)"]),
+#         "Total Waveform Analysis Timespace (min)": str(best_overall_config["Total Waveform Analysis Timespace (min)"]),
+#         "Number of Concurrent Station Tasks per Timechunk": best_overall_config["Number of Concurrent Station Tasks"],
+#         "Number of CPUs Allocated for Ray to Use": best_overall_config["Number of CPUs Allocated for Ray to Use"],
+#         "GPUs Used": best_overall_config["GPUs Used"],
+#         "VRAM Used Per Task": best_overall_config["VRAM Used Per Task"],
+#         "Intra-parallelism Threads": best_overall_config["Intra-parallelism Threads"],
+#         "Inter-parallelism Threads": best_overall_config["Inter-parallelism Threads"],
+#         "Total Run time for Picker (s)": best_overall_config["Total Run time for Picker (s)"],
+#         "Trial Success": best_overall_config["Trial Success"],
+#         "Error Message": best_overall_config["Error Message"],
+#     }
+
+#     best_overall_df = pd.DataFrame([formatted_output])
+
+#     return optimal_concurrent_preds, best_overall_df
+
 def find_optimal_configurations_gpu(df):
     """
     Find:
-    1. The best number of concurrent predictions for each (stations, GPUs, VRAM, CPUs) pair that results in the fastest runtime.
-    2. The overall best configuration balancing stations, GPUs, CPUs, VRAM, and runtime.
+      1) Best concurrency for each (stations, CPUs, GPUs, VRAM) combo (fastest runtime).
+      2) Best overall balanced configuration.
     """
-    # Convert relevant columns to numeric, handling NaNs gracefully
+    # 1) Numeric normalization
     numeric_cols = [
-        "Number of Stations Used", "Number of CPUs Allocated for Ray to Use",
-        "Number of Concurrent Station Tasks", "Total Run time for Picker (s)",
-        "VRAM Used Per Task"
+        "Number of Stations Used",
+        "Number of CPUs Allocated for Ray to Use",
+        "Number of Concurrent Station Tasks",
+        "Total Run time for Picker (s)",
+        "VRAM Used Per Task",
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["GPUs Used"] = df["GPUs Used"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
-    df["GPUs Used"] = df["GPUs Used"].apply(lambda x: tuple(x) if isinstance(x, list) else (x,))
+    # 2) Normalize GPUs Used -> list[int], then create a *hashable* key
+    df["GPUs Used"] = df["GPUs Used"].apply(_parse_gpus_field)
+    df["GPUs Used (key)"] = df["GPUs Used"].apply(lambda x: tuple(x) if isinstance(x, list) else tuple())
 
-    # Drop rows where essential columns are missing
-    df_cleaned = df.dropna(subset=numeric_cols + ["GPUs Used"])
+    # 3) Drop rows missing essentials
+    essentials = numeric_cols + ["GPUs Used (key)"]
+    df_cleaned = df.dropna(subset=essentials).copy()
 
-    # Find the best number of concurrent predictions for each (Stations, CPUs, GPUs, VRAM) combination
-    optimal_concurrent_preds = df_cleaned.loc[
-        df_cleaned.groupby(["Number of Stations Used", "Number of CPUs Allocated for Ray to Use", 
-                            "GPUs Used", "VRAM Used Per Task"])
-        ["Total Run time for Picker (s)"].idxmin()
+    if df_cleaned.empty:
+        # Nothing to optimize; return empty frames shaped like callers expect
+        return df_cleaned, df_cleaned
+
+    # 4) Fastest runtime per (Stations, CPUs, GPUs, VRAM) bucket
+    grp_cols = [
+        "Number of Stations Used",
+        "Number of CPUs Allocated for Ray to Use",
+        "GPUs Used (key)",
+        "VRAM Used Per Task",
     ]
+    idx = (
+        df_cleaned
+        .groupby(grp_cols)["Total Run time for Picker (s)"]
+        .idxmin()
+    )
+    optimal_concurrent_preds = df_cleaned.loc[idx].copy()
 
-    optimal_concurrent_preds["GPUs Used"] = optimal_concurrent_preds["GPUs Used"].apply(lambda x: list(x) if isinstance(x, tuple) else x)
+    # For readability in outputs, show GPUs as list again
+    optimal_concurrent_preds["GPUs Used"] = optimal_concurrent_preds["GPUs Used (key)"].apply(list)
+    # (Optional) drop helper key in the returned table
+    optimal_concurrent_preds.drop(columns=["GPUs Used (key)"], inplace=True, errors="ignore")
 
-    # Define what "moderate" means in terms of VRAM usage (e.g., middle 50% of available VRAM)
+    # 5) “Moderate VRAM” window; if empty, fall back safely
     vram_min = df_cleaned["VRAM Used Per Task"].quantile(0.25)
     vram_max = df_cleaned["VRAM Used Per Task"].quantile(0.75)
-
-    # Filter for rows within the moderate VRAM range
     df_moderate_vram = df_cleaned[
-        (df_cleaned["VRAM Used Per Task"] >= vram_min) & 
-        (df_cleaned["VRAM Used Per Task"] <= vram_max)
-    ]
+        (df_cleaned["VRAM Used Per Task"] >= vram_min)
+        & (df_cleaned["VRAM Used Per Task"] <= vram_max)
+    ].copy()
+    if df_moderate_vram.empty:
+        df_moderate_vram = df_cleaned.copy()
 
-    # Sort by the highest number of stations first, then by the fastest runtime
+    # Highest stations first, then fastest runtime
     best_overall_config = df_moderate_vram.sort_values(
-        by=["Number of Stations Used", "Total Run time for Picker (s)"], 
-        ascending=[False, True]  # Maximize stations, minimize runtime
+        by=["Number of Stations Used", "Total Run time for Picker (s)"],
+        ascending=[False, True],
     ).iloc[0]
 
     formatted_output = {
@@ -604,7 +722,7 @@ def find_optimal_configurations_gpu(df):
         "Total Waveform Analysis Timespace (min)": str(best_overall_config["Total Waveform Analysis Timespace (min)"]),
         "Number of Concurrent Station Tasks per Timechunk": best_overall_config["Number of Concurrent Station Tasks"],
         "Number of CPUs Allocated for Ray to Use": best_overall_config["Number of CPUs Allocated for Ray to Use"],
-        "GPUs Used": best_overall_config["GPUs Used"],
+        "GPUs Used": list(best_overall_config.get("GPUs Used (key)", ())) or best_overall_config.get("GPUs Used", []),
         "VRAM Used Per Task": best_overall_config["VRAM Used Per Task"],
         "Intra-parallelism Threads": best_overall_config["Intra-parallelism Threads"],
         "Inter-parallelism Threads": best_overall_config["Inter-parallelism Threads"],
@@ -612,11 +730,10 @@ def find_optimal_configurations_gpu(df):
         "Trial Success": best_overall_config["Trial Success"],
         "Error Message": best_overall_config["Error Message"],
     }
-
     best_overall_df = pd.DataFrame([formatted_output])
 
     return optimal_concurrent_preds, best_overall_df
-
+    
 """
 find_optimal_configuration_cpu/gpu returns back the best overall usecase results configuration, and takes those values to be used as the 
 current operation's runtime configuration."""

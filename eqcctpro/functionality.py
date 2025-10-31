@@ -20,6 +20,7 @@ from parallelization import *
 from obspy import UTCDateTime
 from ray.util.queue import Queue
 from datetime import datetime, timedelta
+from tools import _parse_gpus_field
 from logging.handlers import QueueHandler, QueueListener
 
 
@@ -245,7 +246,8 @@ class RunEQCCTPro():
         ray.shutdown()
         self.logger.info(f"Ray Successfully Shutdown.")
         self.logger.info("------- Successfully Picked All Waveform(s) from all Timechunk(s) -------")
-        self.logger.info("------- END OF FILE -------")
+        self.logger.info("")
+        # self.logger.info("------- END OF FILE -------")
         
     def run_eqcctpro(self):
         # Set CPU affinity
@@ -363,7 +365,9 @@ class EvaluateSystem():
             stream_h.setFormatter(fmt)
             self.logger.addHandler(file_h)
             self.logger.addHandler(stream_h)
-
+        
+        self.logger.info(f"------- Welcome to EQCCTPro's EvaluateSystem Functionality -------")
+        self.logger.info("")
         # Set up temp dir 
         import tempfile
         tempfile.tempfile = self.home_tmp_dir
@@ -377,16 +381,30 @@ class EvaluateSystem():
         self.chunk_time()
         intended_workers = int(len(self.stations2use_list)) * int(len(self.times_list) // 2)
         if self.eval_mode == 'gpu':
-            check_vram_aggregate_style(
-                eval_mode=self.eval_mode,
-                selected_gpus=self.selected_gpus,
-                get_cluster_free_gb_fn=lambda: get_gpu_vram(),  # returns (total_gb, free_gb)
+            if not self.selected_gpus:
+                raise ValueError("selected_gpus must be set in GPU mode.")
+            self.chunk_time()
+            intended_workers = int(len(self.stations2use_list)) * int(len(self.times_list) // 2)
+
+            per_gpu_free_mb = [get_gpu_vram(gpu_index=g)[1] * 1024.0 for g in self.selected_gpus]  # free_gb -> MB
+            plan = evaluate_vram_capacity(
                 intended_workers=intended_workers,
-                vram_mb=self.vram_mb,
-                model_vram_mb=3000.0,   # or your 1500.0 if you want tighter
+                vram_per_worker_mb=float(self.vram_mb),
+                per_gpu_free_mb=per_gpu_free_mb,
+                model_vram_mb=3000.0,
                 safety_cap=0.90,
                 eqcct_overhead_gb=1.1,
-                logger=self.logger
+            )
+            if not plan.ok_aggregate:
+                unit = plan.per_worker_mb + plan.overhead_mb
+                raise RuntimeError(
+                    f"Insufficient aggregate VRAM. Cap={plan.aggregate_cap_mb:.0f} MB, "
+                    f"Need={plan.aggregate_need_mb:.0f} MB (= {plan.model_vram_mb:.0f}×{len(self.selected_gpus)} + "
+                    f"{plan.intended_workers}×{unit:.0f})."
+                )
+            self.logger.info(
+                f"VRAM budget OK. Need {plan.aggregate_need_mb:.0f} MB ≤ Cap {plan.aggregate_cap_mb:.0f} MB "
+                f"across {len(self.selected_gpus)} GPU(s)."
             )
         
     def _generate_stations_list(self):
@@ -514,7 +532,6 @@ class EvaluateSystem():
                             timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
                             max_pending_tasks = timechunks
                             
-                            log.write(f"\nTrial Number: {trial_num}")
                             self.logger.info(f"Trial Number: {trial_num}")
                             self.logger.info(f"CPU(s): {i}")
                             self.logger.info(f"Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
@@ -562,7 +579,7 @@ class EvaluateSystem():
                                 log_entry = log_queue.get()
                                 # FIX ME 
                                 
-                            remove_output_subdirs(self.output_dir)
+                            remove_output_subdirs(self.output_dir, logger=self.logger)
                             trial_num += 1  
                             
                             # RAM cleanup
@@ -596,7 +613,7 @@ class EvaluateSystem():
     def evaluate_gpu(self): 
         """Evaluate system parallelization using GPUs"""
         statement = "Evaluating System Parallelization Capability using GPUs"
-        self.logger.info(f"\n{statement}\n")
+        self.logger.info(f"{statement}")
         
         # Set CPU affinity
         process = psutil.Process(os.getpid())
@@ -618,7 +635,7 @@ class EvaluateSystem():
             
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/gpu_test_results.csv"
-        prepare_csv(csv_filepath, True)
+        prepare_csv(csv_file_path=csv_filepath)
         
         free_vram_mb = self.vram_mb if self.vram_mb else self.calculate_vram()
         self.selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
@@ -662,7 +679,7 @@ class EvaluateSystem():
                             ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
                                 input_dir=timechunk_dir_path, 
                                 output_dir=self.output_dir, 
-                                log_file=self.log_filepath, 
+                                log_queue=self.log_queue, 
                                 P_threshold=self.P_threshold, 
                                 S_threshold=self.S_threshold, 
                                 p_model=self.p_model_filepath, 
@@ -703,7 +720,7 @@ class EvaluateSystem():
                             log_entry = log_queue.get()
                             self.logger.info(f"{log_entry}") # FIX ME 
                         
-                        remove_output_subdirs(self.output_dir)
+                        remove_output_subdirs(self.output_dir, logger=self.logger) 
                         trial_num += 1
                         
                         # RAM cleanup
@@ -800,7 +817,7 @@ class OptimalCPUConfigurationFinder:
         num_stations = best_config_dict.get("Number of Stations Used")
         total_runtime = best_config_dict.get("Total Run time for Picker (s)")
         
-        self.logger.info(f"Best Overall Usecase Configuration Based on Trial Data:")
+        self.logger.info(f"------- Finding the Best Overall CPU Usecase Configuration Based on Available Trial Data in {self.eval_sys_results_dir} -------")
         self.logger.info(f"CPU(s): {num_cpus}")
         self.logger.info(f"Intra-parallelism Threads: {intra_threads}")
         self.logger.info(f"Inter-parallelism Threads: {inter_threads}")
@@ -811,8 +828,9 @@ class OptimalCPUConfigurationFinder:
         self.logger.info(f"Concurrent Timechunk Processes: {num_concurrent_timechunks}")
         self.logger.info(f"Concurrent Station Processes Per Timechunk: {num_concurrent_stations}")
         self.logger.info(f"Total Runtime (s): {total_runtime}")
+        self.logger.info("")
 
-        return int(float(num_cpus)), int(float(intra_threads)), int(float(inter_threads)), int(float(num_concurrent_timechunks)), int(float(num_concurrent_stations)), int(float(num_stations))
+        # return int(float(num_cpus)), int(float(intra_threads)), int(float(inter_threads)), int(float(num_concurrent_timechunks)), int(float(num_concurrent_stations)), int(float(num_stations))
     
     def find_optimal_for(self, cpu: int, station_count: int):
         """Finds the optimal configuration for a given number of CPUs and stations."""
@@ -843,28 +861,48 @@ class OptimalCPUConfigurationFinder:
         # iloc gets the selection of data from a numerical index from the df and turns that access point into a Series
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
 
-        self.logger.info(f"Best Configuration for Requested Input Parameters Based on Trial Data:")
-        self.logger.info(f"CPU(s): {cpu}\n"
-              f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
-              f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
-              f"Waveform Timespace: {best_config['Total Waveform Analysis Timespace (min)']}\n"
-              f"Total Number of Stations Used: {station_count}\n"
-              f"Total Number of Timechunks: {best_config['Total Number of Timechunks']}\n"
-              f"Length of Timechunks (min): {best_config['Length of Timechunk (min)']}\n"
-              f"Concurrent Timechunk Processes: {best_config['Concurrent Timechunks Used']}\n"
-              f"Concurrent Station Processes Per Timechunk: {best_config['Number of Concurrent Station Tasks']}\n"
-              f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
+        self.logger.info(f"------- Best CPU-EQCCTPro Configuration for Requested Input Parameters Based on the available Trial Data -------")
+        self.logger.info(f"CPU(s): {cpu}")
+        self.logger.info(f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}")
+        self.logger.info(f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}")
+        self.logger.info(f"Waveform Timespace: {best_config['Total Waveform Analysis Timespace (min)']}")
+        self.logger.info(f"Total Number of Stations Used: {station_count}")
+        self.logger.info(f"Total Number of Timechunks: {best_config['Total Number of Timechunks']}")
+        self.logger.info(f"Length of Timechunks (min): {best_config['Length of Timechunk (min)']}")
+        self.logger.info(f"Concurrent Timechunk Processes: {best_config['Concurrent Timechunks Used']}")
+        self.logger.info(f"Concurrent Station Processes Per Timechunk: {best_config['Number of Concurrent Station Tasks']}")
+        self.logger.info(f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
+        self.logger.info("")
 
-        return int(float(cpu)), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(best_config["Concurrent Timechunks Used"])), int(float(best_config["Number of Concurrent Station Tasks"])), int(float(station_count))
+        # return int(float(cpu)), int(float(best_config["Intra-parallelism Threads"])), int(float(best_config["Inter-parallelism Threads"])), int(float(best_config["Concurrent Timechunks Used"])), int(float(best_config["Number of Concurrent Station Tasks"])), int(float(station_count))
 
 
 class OptimalGPUConfigurationFinder:
     """Finds the optimal GPU configuration based on evaluation system results."""
 
-    def __init__(self, eval_sys_results_dir: str):
-        if not eval_sys_results_dir or not os.path.isdir(eval_sys_results_dir):
-            raise ValueError(f"Error: The provided directory path '{eval_sys_results_dir}' is invalid or does not exist.")
+    def __init__(self, 
+                 eval_sys_results_dir: str, 
+                 log_file_path: str):
+        
         self.eval_sys_results_dir = eval_sys_results_dir
+        if not self.eval_sys_results_dir or not os.path.isdir(self.eval_sys_results_dir): 
+            raise ValueError(f"Error: The provided directory path '{self.eval_sys_results_dir}' is invalid or does not exist.")
+        self.log_file_path = log_file_path
+
+        # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
+        self.logger = logging.getLogger("eqcctpro") # We named the logger eqcctpro (can be any name)
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False # if true, events logged to this logger will be passed to the handlers of higher level (ancestor) loggers, in addition to any handlers attached to this logger
+        if not self.logger.handlers: # avoid duplicating inits 
+            fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            # ensure parent dir
+            Path(self.log_file_path).parent.mkdir(parents=True, exist_ok=True)
+            file_h = logging.FileHandler(self.log_file_path) # Writes logs to file 
+            stream_h = logging.StreamHandler() # Sends logs to console
+            file_h.setFormatter(fmt)
+            stream_h.setFormatter(fmt)
+            self.logger.addHandler(file_h)
+            self.logger.addHandler(stream_h)
 
     def find_best_overall_usecase(self):
         """Finds the best overall GPU configuration from evaluation results."""
@@ -872,29 +910,43 @@ class OptimalGPUConfigurationFinder:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
 
-        df_best_overall = pd.read_csv(file_path, header=None, index_col=0)
-        best_config_dict = df_best_overall.to_dict()[1]
+        df = pd.read_csv(file_path)
+        if df.empty:
+            raise ValueError(f"[{datetime.now()}] Error: '{file_path}' is empty.")
 
-        num_cpus = best_config_dict.get("Number of CPUs Allocated for Ray to Use")
-        num_concurrent_predictions = best_config_dict.get("Number of Concurrent Station Tasks")
-        intra_threads = best_config_dict.get("Intra-parallelism Threads")
-        inter_threads = best_config_dict.get("Inter-parallelism Threads")
-        num_stations = best_config_dict.get("Number of Stations Used")
-        total_runtime = best_config_dict.get("Total Run time for Picker (s)")
-        vram_used = best_config_dict.get("VRAM Used Per Task")
-        num_gpus = ast.literal_eval(best_config_dict.get("GPUs Used"))
+        row = df.iloc[0]  # the best row you wrote out
 
-        self.logger.info(f"Best Overall Usecase Configuration Based on Trial Data:")
-        self.logger.info(f"CPU: {num_cpus}\n"
-              f"GPU ID(s): {num_gpus}\n"
-              f"Concurrent Predictions: {num_concurrent_predictions}\n"
-              f"Intra-parallelism Threads: {intra_threads}\n"
-              f"Inter-parallelism Threads: {inter_threads}\n"
-              f"Stations: {num_stations}\n"
-              f"VRAM Used per Task: {vram_used}\n"
-              f"Total Runtime (s): {total_runtime}")
+        # Some codepaths use two different column names for concurrency; support both
+        conc_col = "Number of Concurrent Station Tasks per Timechunk" \
+            if "Number of Concurrent Station Tasks per Timechunk" in df.columns \
+            else "Number of Concurrent Station Tasks"
 
-        return int(float(num_cpus)), int(float(num_concurrent_predictions)), int(float(intra_threads)), int(float(inter_threads)), num_gpus, int(float(vram_used)), int(float(num_stations))
+        # Robust GPU parse: accepts [0], (0,), "0", 0, "", None
+        num_gpus_list = _parse_gpus_field(row.get("GPUs Used"))
+        # Keep as tuple for display/consistency
+        num_gpus = tuple(num_gpus_list)
+
+        # Pull/normalize scalars
+        num_cpus = row.get("Number of CPUs Allocated for Ray to Use")
+        num_concurrent = row.get(conc_col)
+        intra_threads = row.get("Intra-parallelism Threads")
+        inter_threads = row.get("Inter-parallelism Threads")
+        num_stations = row.get("Number of Stations Used")
+        total_runtime = row.get("Total Run time for Picker (s)")
+        vram_used = row.get("VRAM Used Per Task")
+
+        self.logger.info(f"------- Finding the Best Overall GPU Usecase Configuration Based on Available Trial Data in {self.eval_sys_results_dir} -------")
+        self.logger.info("")
+        self.logger.info(f"CPU: {num_cpus}")
+        self.logger.info(f"GPU ID(s): {num_gpus_list}")
+        self.logger.info(f"Concurrent Predictions: {num_concurrent}")
+        self.logger.info(f"Intra-parallelism Threads: {intra_threads}")
+        self.logger.info(f"Inter-parallelism Threads: {inter_threads}")
+        self.logger.info(f"Stations: {num_stations}")
+        self.logger.info(f"VRAM Used per Task: {vram_used}")
+        self.logger.info(f"Total Runtime (s): {total_runtime}")
+        self.logger.info("")
+        # return int(float(num_cpus)), int(float(num_concurrent_predictions)), int(float(intra_threads)), int(float(inter_threads)), num_gpus, int(float(vram_used)), int(float(num_stations))
 
     def find_optimal_for(self, num_cpus: int, gpu_list: list, station_count: int):
         """Finds the optimal configuration for a given number of CPUs, GPUs, and stations."""
@@ -934,20 +986,20 @@ class OptimalGPUConfigurationFinder:
 
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
 
-        self.logger.info(f"Best Configuration for Requested Application Usecase Based on Trial Data:")
-        self.logger.info(f"CPU: {num_cpus}\n"
-              f"GPU: {gpu_list}\n"
-              f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
-              f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
-              f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
-              f"Stations: {station_count}\n"
-              f"VRAM Used per Task: {best_config['VRAM Used Per Task']}\n"
-              f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
+        self.logger.info(f"------- Best GPU-EQCCTPro Configuration for Requested Input Parameters Based on the Available Trial Data -------")
+        self.logger.info(f"CPU(s): {num_cpus}")
+        self.logger.info(f"GPU(s): {gpu_list}")
+        self.logger.info(f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}")
+        self.logger.info(f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}")
+        self.logger.info(f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}")
+        self.logger.info(f"Stations: {station_count}")
+        self.logger.info(f"VRAM Used per Task: {best_config['VRAM Used Per Task']}")
+        self.logger.info(f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
-        return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
-               int(float(best_config["Number of Concurrent Station Tasks"])), \
-               int(float(best_config["Intra-parallelism Threads"])), \
-               int(float(best_config["Inter-parallelism Threads"])), \
-               gpu_list, \
-               int(float(best_config["VRAM Used Per Task"])), \
-               int(float(station_count))
+        # return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
+        #        int(float(best_config["Number of Concurrent Station Tasks"])), \
+        #        int(float(best_config["Intra-parallelism Threads"])), \
+        #        int(float(best_config["Inter-parallelism Threads"])), \
+        #        gpu_list, \
+        #        int(float(best_config["VRAM Used Per Task"])), \
+        #        int(float(station_count))

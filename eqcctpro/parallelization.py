@@ -8,7 +8,8 @@ import csv
 import sys
 import ast
 import math
-import time 
+import time
+import json
 import queue 
 import obspy
 import psutil
@@ -769,6 +770,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         else:
             timechunk_length_min = None
 
+        # To-Do: Add column for CPU IDs 
         trial_data = {
             "Trial Number": None,  # Will be auto-filled by append_trial_row
             "Stations Used": str(station_list),
@@ -776,7 +778,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Number of CPUs Allocated for Ray to Use": num_ray_cpus,
             "Intra-parallelism Threads": intra_threads if intra_threads is not None else "",
             "Inter-parallelism Threads": inter_threads if inter_threads is not None else "",
-            "GPUs Used": str(gpu_id) if use_gpu else "",
+            "GPUs Used": json.dumps(list(gpu_id)) if (use_gpu and gpu_id is not None) else "[]",
             "VRAM Used Per Task": float(gpu_memory_limit_mb) if (use_gpu and gpu_memory_limit_mb is not None) else "",
             "Total Waveform Analysis Timespace (min)": float(total_analysis_time.total_seconds() / 60.0) if hasattr(total_analysis_time, "total_seconds") else (float(total_analysis_time) if total_analysis_time else ""),
             "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
@@ -785,7 +787,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
             "Total Run time for Picker (s)": round(end_time - start_time, 6),
             "Trial Success": "",
-            "Error Message": "",
+            "Error Message": str(""),
         }
             
         append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
