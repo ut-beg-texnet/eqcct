@@ -237,7 +237,7 @@ eqcct_runner.run_eqcctpro()
   - To use the optimal parameter value for this param, use the **EvaluateSystem** class (can be found below)
 - **`number_of_concurrent_timechunk_predictions (int)`: default = None** 
   - The number of timechunks running in parallel 
-  - Avoids the sequential processing of timechunks by processing multiple timechunks in parallel, exponetially reducing runtime  
+  - Avoids the sequential processing of timechunks by processing multiple timechunks in parallel, exponentially reducing runtime  
 - **`best_usecase_config (bool)`: default = False**
   - If True, will override inputted cpu_id_list, number_of_concurrent_predictions, intra_threads, inter_threads values for the best overall use-case configurations 
   - Best overall use-case configurations are defined as the best overall input configurations that minimize runtime while doing the most amount of processing with your available hardware 
@@ -491,6 +491,49 @@ For **OptimalGPUConfigurationFinder.find_optimal_for()**, the function requires 
 
 ## **Configuration**
 The `environment.yml` file specifies the dependencies required to run EQCCTPro. Ensure you have the correct versions installed by using the provided conda environment setup.
+
+##Dataset creation
+It is now possible to create the necesary dataset structure with your own data using the provided script 'create_dataset.py'.
+The script:
+1. Retrieves waveform data from a user defined FDSNWS webservice.
+2. Selects data according to network, station, channel and location codes.
+3. Has the option for defining time chunks according to the users requirements.
+4. Automatically downloads and creates the required folder structure for eqcctpro.
+5. Optionally denoises the data using seisbench as backend.
+An example is provided below
+```sh
+python create_dataset.py -h
+```
+output:
+````
+usage: create_dataset.py [-h] [--start START] [--end END] [--networks NETWORKS] [--stations STATIONS] [--locations LOCATIONS]
+                         [--channels CHANNELS] [--host HOST] [--output OUTPUT] [--chunk CHUNK] [--denoise]
+
+Download FDSN waveforms in equal-time chunks.
+
+options:
+  -h, --help            show this help message and exit
+  --start START         Start time, e.g. 2024-12-03T00:00:00Z
+  --end END             End time, e.g. 2024-12-03T02:00:00Z
+  --networks NETWORKS   Comma-separated network codes or *
+  --stations STATIONS   Comma-separated station codes or *
+  --locations LOCATIONS
+                        Comma-separated location codes or *
+  --channels CHANNELS   Comma-separated channel codes or *
+  --host HOST           FDSNWS base URL
+  --output OUTPUT       Base output directory
+  --chunk CHUNK         Chunk size in minutes. Splits start■end into N windows.
+  --denoise             If set, apply seisbench.DeepDenoiser to each chunk.
+```
+An example to download waveforms from a local fdsnws server is given below:
+```sh
+python create_dataset.py --start 2025-10-31T00:00 --end 2025-10-31T04:00 --networks TX --stations "*" --locations "*" --channels HH?,HN? --host http://localhost:8080 --output waveforms_directory --chunk 60
+```
+The resulting output folder contains the data to be processed by Eqcctpro.
+Note: Please make sure that you set a consistant chunk size in the download script, as well as in eqcctpro itself to avoid issues.
+E.G.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling eqcctpro.
+This is so that data won't be processed eroniusly.
+
 
 ## **License**
 EQCCTPro is provided under an open-source license. See LICENSE for details.
