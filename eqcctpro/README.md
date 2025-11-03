@@ -8,6 +8,7 @@ EQCCTPro is a high-performace seismic event detection and processing framework t
 - Includes tools for evaluating system performance for optimal usecase configurations
 - Automatic selection of best-usecase configurations
 - Efficient handling of large-scale seismic data
+- Dataset creation with necessary data structure using custom FDSNWS connection
 
 # **Installation Guide**
 There are **two installation methods** for EQCCTPro:
@@ -17,7 +18,6 @@ There are **two installation methods** for EQCCTPro:
 
 It is **highly recommended** that first-time users pull the `EQCCTPro` folder, which includes sample waveform data and code to help get acquainted with **EQCCTPro**.
 
----
 
 ## **Method 1: Install EQCCTPro (No Sample Data)**
 This method installs only the EQCCTPro package **without** the sample waveform data.
@@ -78,13 +78,14 @@ conda activate eqcctpro
 For additional package updates, continue to check either this repository or visit the **EQCCTPro PyPI page**:  
 🔗 [EQCCTPro on PyPI](https://pypi.org/project/eqcctpro/)
 
----
 
-### **Using Sample Waveform Data**
+
+# **Using Sample Waveform Data**
 To understand how **EQCCTPro** works, it is **highly recommended** to use provided sample seismic waveform data as the data source when testing the package. 
 
 1-minute long sample seismic waveforms from 229 TexNet stations have been provided in the repository under the `230_stations_1_min_dt.zip` file. 
 
+## **Downloading and Understanding the Provided Waveform Data**
 ### **Step 1: Unzip the Sample Wavefrom Data**
 After downloading the `.zip` file through the GitHub methods above, run:
 ```sh
@@ -111,10 +112,54 @@ TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
 EQCCT (i.e., the ML model) requires at least one pose per station for detection, but using multiple poses enhances P and S wave directionality.
 
-You have successfully installed EQCCTPro and set up the required sample waveform dataset for testing.
+## **Dataset creation using a FDSNWS connection**
+It is now possible to create the necesary dataset structure with your own data using the provided script: 'create_dataset.py'.
+The script:
+1. Retrieves waveform data from a user defined FDSNWS webservice.
+2. Selects data according to network, station, channel and location codes.
+3. Has the option for defining time chunks according to the users requirements.
+4. Automatically downloads and creates the required folder structure for eqcctpro.
+5. Optionally denoises the data using seisbench as backend.
 
----
-### **Using EQCCTPro**
+An example is provided below:
+```sh
+python create_dataset.py -h
+```
+
+output:
+```sh
+usage: create_dataset.py [-h] [--start START] [--end END] [--networks NETWORKS] [--stations STATIONS] [--locations LOCATIONS]
+                         [--channels CHANNELS] [--host HOST] [--output OUTPUT] [--chunk CHUNK] [--denoise]
+
+Download FDSN waveforms in equal-time chunks.
+
+options:
+  -h, --help            show this help message and exit
+  --start START         Start time, e.g. 2024-12-03T00:00:00Z
+  --end END             End time, e.g. 2024-12-03T02:00:00Z
+  --networks NETWORKS   Comma-separated network codes or *
+  --stations STATIONS   Comma-separated station codes or *
+  --locations LOCATIONS
+                        Comma-separated location codes or *
+  --channels CHANNELS   Comma-separated channel codes or *
+  --host HOST           FDSNWS base URL
+  --output OUTPUT       Base output directory
+  --chunk CHUNK         Chunk size in minutes. Splits start■end into N windows.
+  --denoise             If set, apply seisbench.DeepDenoiser to each chunk.
+```
+
+An example to download waveforms from a local fdsnws server is given below:
+```sh
+python create_dataset.py --start 2025-10-31T00:00 --end 2025-10-31T04:00 --networks TX --stations "*" --locations "*" --channels HH?,HN? --host http://localhost:8080 --output waveforms_directory --chunk 60
+```
+
+The resulting output folder contains the data to be processed by EQCCTPro.
+Note: Please make sure that you set a consistant chunk size in the download script, as well as in EQCCTPro itself to avoid issues.
+E.G.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling EQCCTPro.
+This is so that data won't be processed eroniusly.
+
+
+# **Using EQCCTPro**
 There are three main capabilities of EQCCTPro: 
 1. **Process mSEED data from singular or multiple seismic stations using either CPUs or GPUs** 
 2. **Evaluate your system to identify the optimal parallelization configurations needed to get the minimum runtime performance out of your system**
@@ -278,7 +323,7 @@ eqcct_runner.run_eqcctpro()
 
 ---
 
-### **Evaluating Your Systems Runtime Performance Capabilites**
+### **Evaluating Your System's Runtime Performance Capabilites**
 To evaluate your system’s runtime performance capabilites for both your CPU(s) and GPU(s), the **EvaluateSystem** class allows you to autonomously evaluate your system:
 
 
@@ -491,48 +536,6 @@ For **OptimalGPUConfigurationFinder.find_optimal_for()**, the function requires 
 
 ## **Configuration**
 The `environment.yml` file specifies the dependencies required to run EQCCTPro. Ensure you have the correct versions installed by using the provided conda environment setup.
-
-##Dataset creation
-It is now possible to create the necesary dataset structure with your own data using the provided script 'create_dataset.py'.
-The script:
-1. Retrieves waveform data from a user defined FDSNWS webservice.
-2. Selects data according to network, station, channel and location codes.
-3. Has the option for defining time chunks according to the users requirements.
-4. Automatically downloads and creates the required folder structure for eqcctpro.
-5. Optionally denoises the data using seisbench as backend.
-An example is provided below
-```sh
-python create_dataset.py -h
-```
-output:
-````
-usage: create_dataset.py [-h] [--start START] [--end END] [--networks NETWORKS] [--stations STATIONS] [--locations LOCATIONS]
-                         [--channels CHANNELS] [--host HOST] [--output OUTPUT] [--chunk CHUNK] [--denoise]
-
-Download FDSN waveforms in equal-time chunks.
-
-options:
-  -h, --help            show this help message and exit
-  --start START         Start time, e.g. 2024-12-03T00:00:00Z
-  --end END             End time, e.g. 2024-12-03T02:00:00Z
-  --networks NETWORKS   Comma-separated network codes or *
-  --stations STATIONS   Comma-separated station codes or *
-  --locations LOCATIONS
-                        Comma-separated location codes or *
-  --channels CHANNELS   Comma-separated channel codes or *
-  --host HOST           FDSNWS base URL
-  --output OUTPUT       Base output directory
-  --chunk CHUNK         Chunk size in minutes. Splits start■end into N windows.
-  --denoise             If set, apply seisbench.DeepDenoiser to each chunk.
-```
-An example to download waveforms from a local fdsnws server is given below:
-```sh
-python create_dataset.py --start 2025-10-31T00:00 --end 2025-10-31T04:00 --networks TX --stations "*" --locations "*" --channels HH?,HN? --host http://localhost:8080 --output waveforms_directory --chunk 60
-```
-The resulting output folder contains the data to be processed by Eqcctpro.
-Note: Please make sure that you set a consistant chunk size in the download script, as well as in eqcctpro itself to avoid issues.
-E.G.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling eqcctpro.
-This is so that data won't be processed eroniusly.
 
 
 ## **License**
