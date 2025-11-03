@@ -52,8 +52,6 @@ cd eqcct
 git sparse-checkout set eqcctpro
 ```
 
----
-
 ## **Method 2: Install EQCCTPro with Sample Data (Recommended for First-Time Users)**
 This method sets up EQCCTPro **with a pre-created conda environment and sample waveform data**.
 
@@ -534,13 +532,8 @@ For **OptimalGPUConfigurationFinder.find_optimal_for()**, the function requires 
 - **`station_count (int)`**
   - The number of station(s) you want to use in your application
 
-## **Configuration**
-The `environment.yml` file specifies the dependencies required to run EQCCTPro. Ensure you have the correct versions installed by using the provided conda environment setup.
-
-
-## **License**
+# **License**
 EQCCTPro is provided under an open-source license. See LICENSE for details.
 
-## **Contact**
+# **Contact**
 For inquiries or issues, please contact constantinos.skevofilax@austin.utexas.edu or victor.salles@beg.utexas.edu.
-
