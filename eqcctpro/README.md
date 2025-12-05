@@ -532,6 +532,45 @@ For **OptimalGPUConfigurationFinder.find_optimal_for()**, the function requires 
 - **`station_count (int)`**
   - The number of station(s) you want to use in your application
 
+## **Configuration**
+The `environment.yml` file specifies the dependencies required to run EQCCTPro. Ensure you have the correct versions installed by using the provided conda environment setup.
+
+##Dataset creation
+It is now possible to create the necesary dataset structure with your own data using the provided script 'create_dataset.py'.
+The script:
+1. Retrieves waveform data from a user defined FDSNWS webservice.
+2. Selects data according to network, station, channel and location codes.
+3. Has the option for defining time chunks according to the users requirements.
+4. Automatically downloads and creates the required folder structure for eqcctpro.
+5. Optionally denoises the data using seisbench as backend.
+An example is provided below
+```sh
+python create_dataset.py -h
+usage: create_dataset.py [-h] [--start START] [--end END] --streams STREAMS [--host HOST] [--output OUTPUT] [--chunk CHUNK] [--denoise]
+
+Download FDSN waveforms in equal-time chunks.
+
+options:
+  -h, --help         show this help message and exit
+  --start START      Start time, e.g. 2024-12-03T00:00:00Z
+  --end END          End time, e.g. 2024-12-03T02:00:00Z
+  --streams STREAMS  Comma-separated stream selectors, e.g., 'TX.*.*.HH?,IU.ANMO.*.HH?'
+  --host HOST        FDSNWS base URL
+  --output OUTPUT    Base output directory
+  --chunk CHUNK      Chunk size in minutes. Splits start–end into N windows.
+  --denoise          If set, apply seisbench.DeepDenoiser to each chunk.
+```
+An example to download waveforms from a local fdsnws server is given below:
+```sh
+python create_dataset.py --start 2025-10-31T00:00 --end 2025-10-31T04:00 --streams TX.*.*.HH?,TX.*.*.HN? --host http://localhost:8080 --output waveforms_directory --chunk 60
+```
+The resulting output folder contains the data to be processed by Eqcctpro.
+Note: Please make sure that you set a consistant chunk size in the download script, as well as in eqcctpro itself to avoid issues.
+E.G.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling eqcctpro.
+This is so that data won't be processed eroniusly.
+
+
+## **License**
 # **License**
 EQCCTPro is provided under an open-source license. See LICENSE for details.
 
