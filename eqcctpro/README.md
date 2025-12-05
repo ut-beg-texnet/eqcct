@@ -503,31 +503,23 @@ The script:
 An example is provided below
 ```sh
 python create_dataset.py -h
-```
-output:
-````
-usage: create_dataset.py [-h] [--start START] [--end END] [--networks NETWORKS] [--stations STATIONS] [--locations LOCATIONS]
-                         [--channels CHANNELS] [--host HOST] [--output OUTPUT] [--chunk CHUNK] [--denoise]
+usage: create_dataset.py [-h] [--start START] [--end END] --streams STREAMS [--host HOST] [--output OUTPUT] [--chunk CHUNK] [--denoise]
 
 Download FDSN waveforms in equal-time chunks.
 
 options:
-  -h, --help            show this help message and exit
-  --start START         Start time, e.g. 2024-12-03T00:00:00Z
-  --end END             End time, e.g. 2024-12-03T02:00:00Z
-  --networks NETWORKS   Comma-separated network codes or *
-  --stations STATIONS   Comma-separated station codes or *
-  --locations LOCATIONS
-                        Comma-separated location codes or *
-  --channels CHANNELS   Comma-separated channel codes or *
-  --host HOST           FDSNWS base URL
-  --output OUTPUT       Base output directory
-  --chunk CHUNK         Chunk size in minutes. Splits start■end into N windows.
-  --denoise             If set, apply seisbench.DeepDenoiser to each chunk.
+  -h, --help         show this help message and exit
+  --start START      Start time, e.g. 2024-12-03T00:00:00Z
+  --end END          End time, e.g. 2024-12-03T02:00:00Z
+  --streams STREAMS  Comma-separated stream selectors, e.g., 'TX.*.*.HH?,IU.ANMO.*.HH?'
+  --host HOST        FDSNWS base URL
+  --output OUTPUT    Base output directory
+  --chunk CHUNK      Chunk size in minutes. Splits start–end into N windows.
+  --denoise          If set, apply seisbench.DeepDenoiser to each chunk.
 ```
 An example to download waveforms from a local fdsnws server is given below:
 ```sh
-python create_dataset.py --start 2025-10-31T00:00 --end 2025-10-31T04:00 --networks TX --stations "*" --locations "*" --channels HH?,HN? --host http://localhost:8080 --output waveforms_directory --chunk 60
+python create_dataset.py --start 2025-10-31T00:00 --end 2025-10-31T04:00 --streams TX.*.*.HH?,TX.*.*.HN? --host http://localhost:8080 --output waveforms_directory --chunk 60
 ```
 The resulting output folder contains the data to be processed by Eqcctpro.
 Note: Please make sure that you set a consistant chunk size in the download script, as well as in eqcctpro itself to avoid issues.
