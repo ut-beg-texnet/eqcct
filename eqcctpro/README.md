@@ -110,7 +110,7 @@ TX.PB35.00.HH2__20241215T115800Z__20241215T120100Z.mseed
 ```
 EQCCT (i.e., the ML model) requires at least one pose per station for detection, but using multiple poses enhances P and S wave directionality.
 
-## **Dataset creation using a FDSNWS connection**
+## ** Dataset creation using a FDSNWS connection**
 It is now possible to create the necesary dataset structure with your own data using the provided script: 'create_dataset.py'.
 The script:
 1. Retrieves waveform data from a user defined FDSNWS webservice.
