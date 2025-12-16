@@ -264,7 +264,7 @@ class RunEQCCTPro():
             self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
             self._log_thread.start() # Starts the thread
             # Log some import info to user 
-            statement = f"Ray Successfully Initialized with {self.selected_gpus} GPU(s) and {len(self.cpu_id_list)} CPU(s)."
+            statement = f"Ray Successfully Initialized with {self.selected_gpus} GPU(s) and {len(self.cpu_id_list)} CPU(s) ({list(self.cpu_id_list)} CPU Affinity Binding)."
             self.logger.info(f"{statement}")
             self.logger.info(f"Analyzing {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
             
@@ -278,7 +278,7 @@ class RunEQCCTPro():
             self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
             self._log_thread.start() # Starts the thread
             # Log some import info to user
-            statement = f"Ray Successfully Initialized with {len(self.cpu_id_list)} CPU(s)."
+            statement = f"Ray Successfully Initialized with {len(self.cpu_id_list)} CPU(s) ({list(self.cpu_id_list)} CPU Affinity Binding)."
             self.logger.info(f"{statement}")
             self.logger.info(f"Analyzing {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
             
@@ -469,10 +469,8 @@ class EvaluateSystem():
         log_queue = queue.Queue()  # Create a queue for log entries
         total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
         
-        if self.eval_mode == 'gpu': 
-            use_gpu = True 
-        else: 
-            use_gpu = False 
+        if self.eval_mode == 'gpu': use_gpu = True 
+        else: use_gpu = False 
 
         if self.min_cpu_amount > len(self.cpu_id_list): 
             # Code won't execute because the minimum CPU amount of > the len(cpu id list)
@@ -491,7 +489,7 @@ class EvaluateSystem():
                 self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
                 self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
                 self._log_thread.start() # Starts the thread
-                self.logger.info(f"Ray Successfully Initialized with {len(cpus_to_use)} CPU(s).")
+                self.logger.info(f"Ray Successfully Initialized with {len(cpus_to_use)} CPU(s) ({list(cpus_to_use)} CPU Affinity Binding).")
                 
                 timechunks_list = []
                 timechunk = 1
@@ -525,7 +523,7 @@ class EvaluateSystem():
                             
                             self.logger.info("")
                             self.logger.info(f"------- Trial Number: {trial_num} -------")
-                            self.logger.info(f"CPU(s): {i}")
+                            self.logger.info(f"CPU(s): {len(cpus_to_use)}")
                             self.logger.info(f"Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
                             self.logger.info(f"Total Amount of Stations to be Processed in Current Trial: {num_stations} / Number of Stations Being Processed Concurrently: {num_concurrent_predictions} / Total Overall Trial Station Count: {max(self.stations2use_list)}") 
                             
@@ -687,201 +685,213 @@ class EvaluateSystem():
         statement = "Evaluating System Parallelization Capability using GPUs"
         self.logger.info(f"{statement}")
         
-        # Set CPU affinity
-        process = psutil.Process(os.getpid())
-        process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
-        
         os.makedirs(self.csv_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Calculate these at the start
-        self.chunk_time()
-        self.dt_task_generator()
-        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
-            
+
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/gpu_test_results.csv"
         prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
-        
-        free_vram_mb = self.vram_mb if self.vram_mb else self.calculate_vram()
-        self.selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
-        self.logger.info(f"Using GPU(s): {self.selected_gpus}")
-        
+
+        # Calculate these at the start
+        self.chunk_time()
+        self.dt_task_generator()
+
         trial_num = 1
         log_queue = queue.Queue()  # Create a queue for log entries
+        total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
         
-        # Initialize Ray with GPUs
-        ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), 
-                logging_level=logging.FATAL, log_to_driver=False)
-        self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
-        self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
-        self._log_thread.start() # Starts the thread
-        self.logger.info(f"Ray Successfully Initialized with {len(self.selected_gpus)} GPU(s) and {len(self.cpu_id_list)} CPU(s).")
-        
-        for stations in self.stations2use_list:
-            concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
-            for predictions in concurrent_predictions_list:
-                vram_per_task_mb = free_vram_mb / predictions
-                step_size = vram_per_task_mb * 0.05
-                vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
-                self.logger.info(f"Testing the following VRAM limitations (MB): {vram_steps}")
-                
-                for gpu_memory_limit_mb in vram_steps:
+        if self.min_cpu_amount > len(self.cpu_id_list): 
+            # Code won't execute because the minimum CPU amount of > the len(cpu id list)
+            # In which the rest of the code is dependent on the len for generating cpu_count 
+            print(f"CPU ID List provided has less CPUs than the minimum requested ({len(self.cpu_id_list)} vs. {self.min_cpu_amount}). Exiting...")
+            quit()
+
+        for cpu in range(self.min_cpu_amount, len(self.cpu_id_list)+1, self.cpu_test_step_size):
+            # Set CPU affinity and initialize Ray
+            cpus_to_use = self.cpu_id_list[:cpu]
+            # Set CPU affinity
+            process = psutil.Process(os.getpid())
+            process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
+            
+            
+            free_vram_mb = self.vram_mb if self.vram_mb else self.calculate_vram()
+            self.selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
+            self.logger.info(f"Using GPU(s): {self.selected_gpus}")
+            
+            
+            # Initialize Ray with GPUs
+            ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(cpus_to_use), 
+                    logging_level=logging.FATAL, log_to_driver=False)
+            self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
+            self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
+            self._log_thread.start() # Starts the thread
+            self.logger.info(f"Ray Successfully Initialized with {len(self.selected_gpus)} GPU(s) and {len(cpus_to_use)} CPU(s) ({list(cpus_to_use)} CPU Affinity Binding).")
+            
+            for stations in self.stations2use_list:
+                concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
+                self.logger.info(f"Evaluating GPU with {stations} stations and concurrent predictions iterations: {concurrent_predictions_list}")
+                for predictions in concurrent_predictions_list:
+                    vram_per_task_mb = free_vram_mb / predictions
+                    step_size = vram_per_task_mb * 0.05
+                    vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
+                    self.logger.info(f"Testing the following VRAM limitations (MB): {vram_steps}")
                     
-                    self.logger.info("")
-                    self.logger.info(f"------- Trial Number: {trial_num} -------")
-                    self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Task")
-                    
-                    # Get the first timechunk for testing
-                    mseed_timechunk_dir_name = self.tasks_picker[0][1]
-                    timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
-                    
-                    self.logger.info(f"Stations: {stations}")
-                    self.logger.info(f"Concurrent Station Predictions: {predictions}")
-                    self.logger.info(f"VRAM per Task: {gpu_memory_limit_mb:.2f} MB")
-                    self.logger.info("")
+                    for gpu_memory_limit_mb in vram_steps:
+                        
+                        self.logger.info("")
+                        self.logger.info(f"------- Trial Number: {trial_num} -------")
+                        self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Task")
+                        
+                        # Get the first timechunk for testing
+                        mseed_timechunk_dir_name = self.tasks_picker[0][1]
+                        timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+                        
+                        self.logger.info(f"Stations: {stations}")
+                        self.logger.info(f"Concurrent Station Predictions: {predictions}")
+                        self.logger.info(f"VRAM per Task: {gpu_memory_limit_mb:.2f} MB")
+                        self.logger.info("")
 
 
-                    # ===== Baseline RAM consumption (before launching worker) =====
-                    _rss = process.memory_info().rss
-                    for _ch in process.children(recursive=True):
+                        # ===== Baseline RAM consumption (before launching worker) =====
+                        _rss = process.memory_info().rss
+                        for _ch in process.children(recursive=True):
+                            try:
+                                _rss += _ch.memory_info().rss
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        mem_before_total_mb = _rss / 1e6
+
+                        # peak before (platform-aware)
+                        if resource is not None:  # Linux/macOS
+                            _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                            if sys.platform.startswith("linux"):
+                                peak_before_mb = _ru / 1024.0            # ru_maxrss in KB on Linux
+                            elif sys.platform == "darwin":
+                                peak_before_mb = _ru / (1024.0 * 1024.0) # ru_maxrss in bytes on macOS
+                            else:
+                                peak_before_mb = mem_before_total_mb     # safe fallback
+                        else:  # Windows: no 'resource'
+                            try:
+                                peak_before_mb = process.memory_full_info().peak_wset / 1e6
+                            except Exception:
+                                peak_before_mb = mem_before_total_mb
+                        
                         try:
-                            _rss += _ch.memory_info().rss
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    mem_before_total_mb = _rss / 1e6
+                            # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
+                            ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                                input_dir=timechunk_dir_path, 
+                                output_dir=self.output_dir, 
+                                log_queue=self.log_queue, 
+                                P_threshold=self.P_threshold, 
+                                S_threshold=self.S_threshold, 
+                                p_model=self.p_model_filepath, 
+                                s_model=self.s_model_filepath, 
+                                number_of_concurrent_station_predictions=predictions, 
+                                ray_cpus=cpus_to_use, 
+                                use_gpu=True, 
+                                gpu_id=self.selected_gpus, 
+                                gpu_memory_limit_mb=gpu_memory_limit_mb, 
+                                stations2use=stations, 
+                                timechunk_id=mseed_timechunk_dir_name, 
+                                waveform_overlap=self.waveform_overlap, 
+                                total_timechunks=len(self.tasks_picker), 
+                                number_of_concurrent_timechunk_predictions=1,  # Testing one timechunk at a time
+                                total_analysis_time=total_analysis_time, 
+                                testing_gpu=True,  # Enable test mode
+                                test_csv_filepath=csv_filepath, 
+                                intra_threads=self.intra_threads, 
+                                inter_threads=self.inter_threads, 
+                                timechunk_dt=self.timechunk_dt
+                            )
+                            
+                            # Wait for result
+                            log_entry = ray.get(ref)
+                            log_queue.put(log_entry)  # Add log entry to the queue
+                            
+                            # Success - update CSV
+                            update_csv(csv_filepath, success=1, error_message="")
+                            
+                        except Exception as e:
+                            # Failure occurred, need to add to log 
+                            error_msg = f"{type(e).__name__}: {str(e)}"
+                            update_csv(csv_filepath, success=0, error_message=error_msg)
+                            self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
+                        
+                        # Write log entries from the queue to the file
+                        while not log_queue.empty():
+                            log_entry = log_queue.get()
+                            self.logger.info(f"{log_entry}") # FIX ME 
+                        
+                        remove_output_subdirs(self.output_dir, logger=self.logger) 
+                        trial_num += 1
+                        
+                        # RAM cleanup
+                        # ===== AFTER RUN (before cleanup) =====
+                        _rss = process.memory_info().rss
+                        for _ch in process.children(recursive=True):
+                            try:
+                                _rss += _ch.memory_info().rss
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        mem_after_run_total_mb = _rss / 1e6
+                        delta_run_mb = mem_after_run_total_mb - mem_before_total_mb
 
-                    # peak before (platform-aware)
-                    if resource is not None:  # Linux/macOS
-                        _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                        if sys.platform.startswith("linux"):
-                            peak_before_mb = _ru / 1024.0            # ru_maxrss in KB on Linux
-                        elif sys.platform == "darwin":
-                            peak_before_mb = _ru / (1024.0 * 1024.0) # ru_maxrss in bytes on macOS
+                        # updated peak (platform-aware)
+                        if resource is not None:
+                            _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                            if sys.platform.startswith("linux"):
+                                peak_after_mb = _ru / 1024.0
+                            elif sys.platform == "darwin":
+                                peak_after_mb = _ru / (1024.0 * 1024.0)
+                            else:
+                                peak_after_mb = mem_after_run_total_mb
                         else:
-                            peak_before_mb = mem_before_total_mb     # safe fallback
-                    else:  # Windows: no 'resource'
-                        try:
-                            peak_before_mb = process.memory_full_info().peak_wset / 1e6
-                        except Exception:
-                            peak_before_mb = mem_before_total_mb
-                    
-                    try:
-                        # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
-                        ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
-                            input_dir=timechunk_dir_path, 
-                            output_dir=self.output_dir, 
-                            log_queue=self.log_queue, 
-                            P_threshold=self.P_threshold, 
-                            S_threshold=self.S_threshold, 
-                            p_model=self.p_model_filepath, 
-                            s_model=self.s_model_filepath, 
-                            number_of_concurrent_station_predictions=predictions, 
-                            ray_cpus=self.cpu_id_list, 
-                            use_gpu=True, 
-                            gpu_id=self.selected_gpus, 
-                            gpu_memory_limit_mb=gpu_memory_limit_mb, 
-                            stations2use=stations, 
-                            timechunk_id=mseed_timechunk_dir_name, 
-                            waveform_overlap=self.waveform_overlap, 
-                            total_timechunks=len(self.tasks_picker), 
-                            number_of_concurrent_timechunk_predictions=1,  # Testing one timechunk at a time
-                            total_analysis_time=total_analysis_time, 
-                            testing_gpu=True,  # Enable test mode
-                            test_csv_filepath=csv_filepath, 
-                            intra_threads=self.intra_threads, 
-                            inter_threads=self.inter_threads, 
-                            timechunk_dt=self.timechunk_dt
+                            try:
+                                peak_after_mb = process.memory_full_info().peak_wset / 1e6
+                            except Exception:
+                                peak_after_mb = mem_after_run_total_mb
+
+                        self.logger.info(
+                            f"[MEM] Baseline: {mem_before_total_mb:.2f} MB | After run: {mem_after_run_total_mb:.2f} MB "
+                            f"| Δrun: {delta_run_mb:.2f} MB | Peak≈{max(peak_before_mb, peak_after_mb):.2f} MB"
                         )
-                        
-                        # Wait for result
-                        log_entry = ray.get(ref)
-                        log_queue.put(log_entry)  # Add log entry to the queue
-                        
-                        # Success - update CSV
-                        update_csv(csv_filepath, success=1, error_message="")
-                        
-                    except Exception as e:
-                        # Failure occurred, need to add to log 
-                        error_msg = f"{type(e).__name__}: {str(e)}"
-                        update_csv(csv_filepath, success=0, error_message=error_msg)
-                        self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
-                    
-                    # Write log entries from the queue to the file
-                    while not log_queue.empty():
-                        log_entry = log_queue.get()
-                        self.logger.info(f"{log_entry}") # FIX ME 
-                    
-                    remove_output_subdirs(self.output_dir, logger=self.logger) 
-                    trial_num += 1
-                    
-                    # RAM cleanup
-                    # ===== AFTER RUN (before cleanup) =====
-                    _rss = process.memory_info().rss
-                    for _ch in process.children(recursive=True):
-                        try:
-                            _rss += _ch.memory_info().rss
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    mem_after_run_total_mb = _rss / 1e6
-                    delta_run_mb = mem_after_run_total_mb - mem_before_total_mb
 
-                    # updated peak (platform-aware)
-                    if resource is not None:
-                        _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                        if sys.platform.startswith("linux"):
-                            peak_after_mb = _ru / 1024.0
-                        elif sys.platform == "darwin":
-                            peak_after_mb = _ru / (1024.0 * 1024.0)
-                        else:
-                            peak_after_mb = mem_after_run_total_mb
-                    else:
-                        try:
-                            peak_after_mb = process.memory_full_info().peak_wset / 1e6
-                        except Exception:
-                            peak_after_mb = mem_after_run_total_mb
+                        # ===== CLEANUP =====
+                        # drop strong refs so GC matters
+                        try: del ref
+                        except NameError: pass
+                        try: del log_entry
+                        except NameError: pass
 
-                    self.logger.info(
-                        f"[MEM] Baseline: {mem_before_total_mb:.2f} MB | After run: {mem_after_run_total_mb:.2f} MB "
-                        f"| Δrun: {delta_run_mb:.2f} MB | Peak≈{max(peak_before_mb, peak_after_mb):.2f} MB"
-                    )
+                        _rss = process.memory_info().rss
+                        for _ch in process.children(recursive=True):
+                            try:
+                                _rss += _ch.memory_info().rss
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        mem_before_clean_mb = _rss / 1e6
 
-                    # ===== CLEANUP =====
-                    # drop strong refs so GC matters
-                    try: del ref
-                    except NameError: pass
-                    try: del log_entry
-                    except NameError: pass
+                        gc.collect()
+                        time.sleep(0.1)
 
-                    _rss = process.memory_info().rss
-                    for _ch in process.children(recursive=True):
-                        try:
-                            _rss += _ch.memory_info().rss
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    mem_before_clean_mb = _rss / 1e6
+                        _rss = process.memory_info().rss
+                        for _ch in process.children(recursive=True):
+                            try:
+                                _rss += _ch.memory_info().rss
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        mem_after_clean_mb = _rss / 1e6
 
-                    gc.collect()
-                    time.sleep(0.1)
+                        freed_mb = mem_before_clean_mb - mem_after_clean_mb
+                        self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean_mb:.2f} MB\n")
+                        self.logger.info("")
+            
+            # stop log forwarder
+            self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
+            self._log_thread.join(timeout=2)
 
-                    _rss = process.memory_info().rss
-                    for _ch in process.children(recursive=True):
-                        try:
-                            _rss += _ch.memory_info().rss
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    mem_after_clean_mb = _rss / 1e6
-
-                    freed_mb = mem_before_clean_mb - mem_after_clean_mb
-                    self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean_mb:.2f} MB\n")
-                    self.logger.info("")
-        
-        # stop log forwarder
-        self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
-        self._log_thread.join(timeout=2)
-
-        ray.shutdown()  # Shutdown Ray after all testing
-        self.logger.info(f"Ray Successfully Shutdown.")
+            ray.shutdown()  # Shutdown Ray after all testing
+            self.logger.info(f"Ray Successfully Shutdown.")
 
         self.logger.info(f"Testing complete.")
         self.logger.info(f"")
