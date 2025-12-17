@@ -307,7 +307,8 @@ class EvaluateSystem():
                  min_cpu_amount: int = 1,
                  min_conc_stations: int = 1, 
                  conc_station_tasks_step_size: int = 1,
-                 vram_mb:float = None, 
+                 vram_mb:float = None,
+                 gpu_vram_safety_cap:float = 0.90, 
                  selected_gpus:list = None,
                  start_time:str = None, 
                  end_time:str = None, 
@@ -334,6 +335,7 @@ class EvaluateSystem():
         self.stations2use = stations2use
         self.cpu_id_list = cpu_id_list
         self.vram_mb = vram_mb
+        self.gpu_vram_safety_cap = gpu_vram_safety_cap
         self.selected_gpus = selected_gpus
         self.cpu_count = len(cpu_id_list)
         self.cpu_test_step_size = cpu_test_step_size
@@ -393,7 +395,7 @@ class EvaluateSystem():
                 vram_per_worker_mb=float(self.vram_mb),
                 per_gpu_free_mb=per_gpu_free_mb,
                 model_vram_mb=3000.0,
-                safety_cap=0.90,
+                safety_cap=self.gpu_vram_safety_cap,
                 eqcct_overhead_gb=1.1,
             )
             if not plan.ok_aggregate:
@@ -449,7 +451,37 @@ class EvaluateSystem():
     def dt_task_generator(self): 
         tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
         self.tasks_picker = tasks
+
+    def _trial_key(self, *, num_cpus: int, stations: int, predictions: int, gpu_memory_limit_mb, timechunks: int) -> str:
+        gpus = self.selected_gpus if self.selected_gpus is not None else []
+        gpus_norm = tuple(sorted(int(x) for x in gpus))
+        vram_norm = int(round(float(gpu_memory_limit_mb))) if gpu_memory_limit_mb not in ("", None) else ""
+        return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|vram={vram_norm}"
         
+    def _load_existing_trial_keys(self, csv_path: str) -> set[str]:
+        if not os.path.exists(csv_path):
+            return set()
+        try:
+            df = pd.read_csv(csv_path, keep_default_na=False)
+        except Exception:
+            return set()
+
+        keys = set()
+        for _, row in df.iterrows():
+            try:
+                num_cpus = int(float(row.get("Number of CPUs Allocated for Ray to Use", 0) or 0))
+                stations = int(float(row.get("Number of Stations Used", 0) or 0))
+                predictions = int(float(row.get("Number of Concurrent Station Tasks", 0) or 0))
+                timechunks = int(float(row.get("Concurrent Timechunks Used", 0) or 0))
+                vram = row.get("VRAM Used Per Task", "")
+                vram_mb = float(vram) if vram not in ("", None) else ""
+                # normalize GPU list stored as JSON-like string
+                self.selected_gpus = _parse_gpus_field(row.get("GPUs Used")) or self.selected_gpus
+                keys.add(self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, gpu_memory_limit_mb=vram_mb, timechunks=timechunks))
+            except Exception:
+                continue
+        return keys
+
     def evaluate_cpu(self): 
         """Evaluate system parallelization using CPUs"""
         statement = "Evaluating System Parallelization Capability using CPU"
@@ -461,6 +493,7 @@ class EvaluateSystem():
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/cpu_test_results.csv"
         prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
+        planned_keys = self._load_existing_trial_keys(csv_filepath)
         
         self.chunk_time()
         self.dt_task_generator()
@@ -516,7 +549,19 @@ class EvaluateSystem():
                         new_concurrent_values = [x for x in concurrent_predictions_list if x not in tested_concurrency and x <= num_stations]
                         if not new_concurrent_values:
                             continue  # All concurrency values already tested
-                        for num_concurrent_predictions in new_concurrent_values:           
+                        for num_concurrent_predictions in new_concurrent_values:
+                            key = self._trial_key(
+                                num_cpus=len(cpus_to_use),
+                                stations=num_stations,
+                                predictions=num_concurrent_predictions,
+                                gpu_memory_limit_mb="",   # CPU eval has no per-task VRAM cap
+                                timechunks=timechunks,
+                            )
+                            if key in planned_keys:
+                                self.logger.info(f"[SKIP] Already tested: {key}")
+                                continue
+                            planned_keys.add(key)
+                                    
                             mseed_timechunk_dir_name = self.tasks_picker[timechunks-1][1]
                             timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
                             max_pending_tasks = timechunks
@@ -659,6 +704,7 @@ class EvaluateSystem():
                             self.logger.info("")
                             
                         # tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
+                        tested_concurrency.update(new_concurrent_values)
 
                     # stop log forwarder
                     self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
@@ -691,6 +737,7 @@ class EvaluateSystem():
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/gpu_test_results.csv"
         prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
+        planned_keys = self._load_existing_trial_keys(csv_filepath)
 
         # Calculate these at the start
         self.chunk_time()
@@ -713,8 +760,8 @@ class EvaluateSystem():
             process = psutil.Process(os.getpid())
             process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
             
-            
-            free_vram_mb = self.vram_mb if self.vram_mb else self.calculate_vram()
+            # VRAM budget per GPU (MB). If vram_mb is provided, treat it as an explicit per-GPU budget override.
+            free_vram_mb = float(self.vram_mb) if self.vram_mb else self.calculate_vram()
             self.selected_gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
             self.logger.info(f"Using GPU(s): {self.selected_gpus}")
             
@@ -726,21 +773,34 @@ class EvaluateSystem():
             self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
             self._log_thread.start() # Starts the thread
             self.logger.info(f"Ray Successfully Initialized with {len(self.selected_gpus)} GPU(s) and {len(cpus_to_use)} CPU(s) ({list(cpus_to_use)} CPU Affinity Binding).")
-            
+            self.logger.info(f"Trials will evalute GPU(s) performance against Iterative Total Station Tasks ({self.stations2use_list}) with Varying Concurrent Predictions.")
+            self.logger.info("")
             for stations in self.stations2use_list:
                 concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
-                self.logger.info(f"Evaluating GPU with {stations} stations and concurrent predictions iterations: {concurrent_predictions_list}")
+                self.logger.info(f"Evaluating GPU(s) against {stations} TOTAL STATION(s) with ITERATIVE CONCURRENT STATION PREDICTIONS: {concurrent_predictions_list}")
                 for predictions in concurrent_predictions_list:
                     vram_per_task_mb = free_vram_mb / predictions
-                    step_size = vram_per_task_mb * 0.05
+                    step_size = vram_per_task_mb * 0.2
                     vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
-                    self.logger.info(f"Testing the following VRAM limitations (MB): {vram_steps}")
+                    self.logger.info(f"Testing the above TOTAL STATIONS and PARALLELIZATION CONDITIONS using the following iterative VRAM limitations (MB): {vram_steps.tolist()}")
                     
                     for gpu_memory_limit_mb in vram_steps:
-                        
+                        gpu_memory_limit_mb = int(round(float(gpu_memory_limit_mb)))
+
+                        key = self._trial_key(
+                            num_cpus=len(cpus_to_use),
+                            stations=stations,
+                            predictions=predictions,
+                            gpu_memory_limit_mb=gpu_memory_limit_mb,
+                            timechunks=1,  # your GPU eval is explicitly “one timechunk at a time”
+                        )
+                        if key in planned_keys:
+                            self.logger.info(f"[SKIP] Already tested: {key}")
+                            continue
+                        planned_keys.add(key)
                         self.logger.info("")
                         self.logger.info(f"------- Trial Number: {trial_num} -------")
-                        self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Task")
+                        # self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Parallel Task")
                         
                         # Get the first timechunk for testing
                         mseed_timechunk_dir_name = self.tasks_picker[0][1]
@@ -748,7 +808,7 @@ class EvaluateSystem():
                         
                         self.logger.info(f"Stations: {stations}")
                         self.logger.info(f"Concurrent Station Predictions: {predictions}")
-                        self.logger.info(f"VRAM per Task: {gpu_memory_limit_mb:.2f} MB")
+                        self.logger.info(f"VRAM per Parallel Task: {gpu_memory_limit_mb:.2f} MB")
                         self.logger.info("")
 
 
@@ -914,15 +974,33 @@ class EvaluateSystem():
             exit()
         
     def calculate_vram(self):
-        """Calculate available VRAM for GPU testing."""
-        self.logger.info(f"Utilizing available VRAM...")
-        total_vram, available_vram = get_gpu_vram()
-        self.logger.info(f"Total VRAM: {total_vram:.2f} GB.")
-        self.logger.info(f"Available VRAM: {available_vram:.2f} GB.")
+        cap = float(self.gpu_vram_safety_cap)
+        if not (0.0 < cap <= 0.99):
+            raise ValueError(f"gpu_vram_safety_cap must be in (0, 0.99], got {cap}.")
 
-        free_vram = total_vram * 0.9485 if available_vram / total_vram >= 0.9486 else available_vram
-        self.logger.info(f"Using up to {round(free_vram, 2)} GB of VRAM.")
-        return free_vram * 1024  # Convert to MB
+        gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
+        if not gpus:
+            raise RuntimeError("No GPUs detected for VRAM calculation.")
+
+        per_gpu_budget_mb = []
+        for gid in gpus:
+            total_gb, free_gb = get_gpu_vram(gpu_index=gid)
+            total_mb = float(total_gb) * 1024.0
+            free_mb  = float(free_gb)  * 1024.0
+
+            # hard cap vs physical total, plus never exceed currently free memory
+            budget_mb = min(total_mb * cap, free_mb)
+            per_gpu_budget_mb.append(budget_mb)
+
+            self.logger.info(
+                f"GPU {gid}: total={total_gb:.2f} GB, free={free_gb:.2f} GB, "
+                f"budget={budget_mb/1024.0:.2f} GB (cap={cap:.2f})"
+            )
+
+        budget_mb_min = float(min(per_gpu_budget_mb))
+        self.logger.info(f"Using per-GPU VRAM budget = {budget_mb_min:.0f} MB (min across selected GPUs).")
+        return budget_mb_min
+
 
 """
 Finds the optimal CPU configuration based on evaluation results
