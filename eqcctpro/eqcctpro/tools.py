@@ -79,20 +79,27 @@ to a final amount of stations with either an specified or a pre-determined step 
 def generate_station_list(starting_amount_of_stations, total_num_stations_to_use, station_list_step_size):
     if total_num_stations_to_use == 1:
         return [1]
-    elif total_num_stations_to_use <= 10:
+    elif total_num_stations_to_use < 10:
         return list(range(1, total_num_stations_to_use + 1))
-    elif starting_amount_of_stations == 1 and station_list_step_size == 1:
-        # Numbers 1-10
-        station_list = list(range(1, 11))
+    elif total_num_stations_to_use >= 10 and starting_amount_of_stations == 1 and station_list_step_size == 1:
+        # We want to reduce as much extra testing as needed by applying an iterative approach for marching approach via smart step sizes
         
-        # Multiples of 5 up to total_num_stations_to_use
-        multiples_of_5 = list(range(15, total_num_stations_to_use + 1, 5))
+        # We check if we can apply multiples of 5 up to total_num_stations_to_use
+        target = total_num_stations_to_use
+        start = 10 # We start from 10 because we already covered 1-9 in the previous condition
+        step = 5 # Step size of 5 for multiples of 5 (User can change this if desired - To Do add var for this in the future)
         
-        # Any additional numbers between 21 and total_num_stations_to_use
-        additional_numbers = list(range(21, total_num_stations_to_use + 1))
-        
-        # Combine lists while ensuring uniqueness
-        return sorted(set(station_list + multiples_of_5 + additional_numbers))
+        stp_of_one = list(range(1, start + 1)) # We generate a list of 1-10 with step size of 1 and afterwards we will add multiples of 5
+
+        remainder = target % step # We calculate the remainder to see if target is a multiple of 5 or not
+        max_multiple = target - remainder # We calculate what is the maximum multiple of 5 that is less than or equal to the target
+        if remainder != 0:  # We found a number that is not immediately a multiple of 5, so we need to add the remaining numbers after the last multiple of 5 up to the target with step size of 1 
+            marching_scheme = stp_of_one + list(range(start + step, max_multiple + 1, step)) + list(range(max_multiple + 1, target + 1, 1))
+
+        elif remainder == 0: # We hit that the target is not a multiple of 5, so we start from 20, ..., +5, ..., up to target
+            marching_scheme = stp_of_one + list(range(start + step, target + 1, step))
+
+        return sorted(set(marching_scheme))
     else: 
         return list(range(starting_amount_of_stations, total_num_stations_to_use + 1, station_list_step_size))
 
@@ -232,6 +239,11 @@ def check_vram_per_gpu_style(
     eqcct_overhead_gb: float = 0.0, # original per-GPU check ignored runtime overhead
     logger: Optional[logging.Logger] = None
 ) -> None:
+    
+    safety_cap = float(safety_cap)
+    if not (0.0 < safety_cap <= 0.99):
+        raise ValueError(f"safety_cap must be in (0, 0.99], got {safety_cap}.")
+    
     per_gpu_free_mb = [(get_gpu_vram_fn(gid)[1] * 1024.0) for gid in selected_gpus]
 
     plan = evaluate_vram_capacity(
