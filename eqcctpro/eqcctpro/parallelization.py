@@ -610,8 +610,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
     logger.setLevel(logging.INFO)
     logger.handlers[:] = []
     logger.propagate = False
+    log_handler = QueueHandler(log_queue)
     if log_queue is not None:
-        logger.addHandler(QueueHandler(log_queue))  # Ray queue supports put()
+        logger.addHandler(log_handler)  # Ray queue supports put()
 
     # We set up the tf_environ again for the Raylets, who adopt their own import state and TF runtime when created. 
     # We want to ensure that they are configured properly so that they won't die (bad)
@@ -683,18 +684,29 @@ def mseed_predictor(input_dir='downloads_mseeds',
     if use_gpu:
         # Allocate more VRAM to model actors (they need to hold the full model)
         # Reserve ~2-3GB per model actor, adjust based on your model size
-        model_vram_mb = min(gpu_memory_limit_mb * 2, 3000)  # At least 2x task VRAM or 3GB
+        model_vram_mb = max(gpu_memory_limit_mb * 2, 3000)  # At least 2x task VRAM or 3GB
         
         # Create one model actor per GPU
         model_actors = []
-        for gpu_idx in gpu_id:
-            actor = ModelActor.options(num_gpus=1, num_cpus=0).remote(gpus_to_use=gpu_id, p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True, logger=logger)
+        logger.info(f"Using GPUs: {gpu_id}")
+        for gpu_idx in gpu_id: # gpu_id is a list of GPU IDs and gpu_idx is the current GPU ID in the loop 
+            logger.info(f"Creating ModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
+            actor = ModelActor.options(num_gpus=1, num_cpus=1).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
+            # Wait for __init__ to complete and raise if error
+            try:
+                ray.get(actor.ready.remote())
+            except Exception as e:
+                logger.error(f"Failed to create ModelActor on GPU {gpu_idx}: {e}")
+                raise
+            logger.info(f"ModelActor created on GPU {gpu_idx}.")
             model_actors.append(actor)
-        
-        logger.info(f"Created {len(model_actors)} GPU model actor(s) with {model_vram_mb/1024:.2f}GB VRAM each") 
+            
+        logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s).") 
+        # Using CUDA_VISIBLE_DEVICES is not a reliable way to report which physical GPU is being used bc Ray can overwrite, clear, or remap the assigned GPU so that each worker sees them as local indices (often starting from 0)
+        logger.info(f"[ModelActor] Model successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
     else:
         # Create CPU model actor
-        model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False, logger=logger)]
+        model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)]
         logger.info(f"Created a 1 CPU-sized ModelActor") 
 
     # Submit tasks to ray in a queue
@@ -727,12 +739,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 if len(tasks_queue) < max_pending_tasks:
                     # SELECT WHICH MODEL ACTOR TO USE (round-robin across GPUs)
                     model_actor = model_actors[i % len(model_actors)]
-                    
+
                     if use_gpu is False:
                         tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False, None))
                     elif use_gpu is True:
                         # Don't allocate GPUs to workers, only to model actors
-                        tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor[i], model_actor, True, gpu_memory_limit_mb))
+                        tasks_queue.append(parallel_predict.options(num_cpus=1, num_gpus=0).remote(tasks_predictor[i], model_actor, True, gpu_memory_limit_mb))
                     break
                 # If there are more tasks than maximum, just process them
                 else:
@@ -799,29 +811,55 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
 @ray.remote
 class ModelActor:
-    def __init__(self,  p_model_path, s_model_path, gpus_to_use=False, intra_threads=1, inter_threads=1, gpu_memory_limit_mb=None, use_gpu=True, logger=None):
-        if use_gpu and gpu_memory_limit_mb:
+    def __init__(self,  p_model_path, s_model_path, gpus_to_use=False, intra_threads=1, inter_threads=1, gpu_memory_limit_mb=None, use_gpu=True):
+        self.logger = logging.getLogger("eqcctpro.model_actor")
+        self.logger.setLevel(logging.INFO)
+        self.logger.handlers[:] = []
+        self.logger.propagate = False
+        self.logger.addHandler(logging.StreamHandler())
+
+        self.logger.info("=== ModelActor __init__ STARTED ===")
+        self.logger.info(f"p_model_path = {p_model_path}")
+        self.logger.info(f"s_model_path = {s_model_path}")
+        self.logger.info(f"Exists? P: {os.path.exists(p_model_path)}, S: {os.path.exists(s_model_path)}")
+
+        if use_gpu:
             # Configure GPU memory for this actor
-            try: 
+            # We want one GPU per actor 
+            try:
+                self.logger.info("Calling tf_environ...")
                 tf_environ(
-                    gpu_id=-1, 
-                    gpus_to_use=gpus_to_use,
+                    gpu_id=gpus_to_use[0] if gpus_to_use else 0, 
+                    gpus_to_use=None, # First visible GPU only
                     vram_limit_mb=gpu_memory_limit_mb,
                     intra_threads=intra_threads,
                     inter_threads=inter_threads,
-                    log_device=False,
-                    logger=None)
+                    log_device=True,
+                    logger=self.logger)
+                self.logger.info("tf_environ finished.")
             except RuntimeError as e:
-                logger.error(f"[ModelActor] Error setting memory limit: {e}")
+                self.logger.error(f"[ModelActor] Error setting memory limit: {e}")
         
         # Load the model once
+        self.logger.info("Importing/load_eqcct_model...")
         from .eqcct_tf_models import load_eqcct_model
         self.model = load_eqcct_model(p_model_path, s_model_path)
-        logger.info(f"[ModelActor] Model loaded successfully")
+        self.logger.info("Model loaded.")
+    
+    def ready(self):
+        """Simple method to check if the actor is ready"""
+        return True
     
     def predict(self, data_generator):
         """Perform prediction using the loaded model"""
         return self.model.predict(data_generator, verbose=0)
+    
+    def predict_from_arrays(self, trace_start_time, data_set, batch_size, norm_mode):
+        from .eqcct_tf_models import PreLoadGeneratorTest
+        pred_generator = PreLoadGeneratorTest(trace_start_time, data_set,
+                                            batch_size=batch_size, norm_mode=norm_mode)
+        return self.model.predict(pred_generator, verbose=0)
+
 
 
 @ray.remote
@@ -894,7 +932,9 @@ def parallel_predict(predict_args, model_actor, gpu=False, gpu_memory_limit_mb=N
         pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
         
         # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
-        predP, predS = ray.get(model_actor.predict.remote(pred_generator))
+        # predP, predS = ray.get(model_actor.predict.remote(pred_generator))\
+        predP, predS = ray.get(model_actor.predict_from_arrays.remote(
+                            meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
         
         detection_memory = []
         prob_memory = []

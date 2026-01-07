@@ -462,6 +462,7 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
         logger = logging.getLogger("eqcctpro.null")
         logger.propagate = False
         if not logger.handlers:
+            # logger.addHandler(logging.StreamHandler())
             logger.addHandler(logging.NullHandler())
 
     # C++ backend verbosity (must be set before importing TF)
@@ -469,13 +470,15 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0") # avoid oneDNN “custom ops” info line
 
     # 0) Visibility must be set BEFORE importing tensorflow
-    if gpu_id == -1 or not gpus_to_use:
+    if gpu_id == -1:
         os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
         logger.info(f"GPU disabled (CPU-only).")
-    else:
+    elif gpus_to_use is not None:
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus_to_use))
         logger.info(f"GPU enabled. Visible GPU IDs: {gpus_to_use}")
+    else:
+        logger.info(f"GPU visibility left to environment (Ray). CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
     # 1) Now import TF (it will honor visibility)
     import tensorflow as tf
