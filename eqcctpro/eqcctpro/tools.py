@@ -7,6 +7,7 @@ import re
 import ast
 import math
 import glob
+import csv
 import shutil 
 import pynvml 
 import logging
@@ -26,7 +27,7 @@ CANONICAL_CSV_HEADER = [
     "Intra-parallelism Threads",
     "Inter-parallelism Threads",
     "GPUs Used",
-    "VRAM Used Per Task",
+    "Inference Actor Memory Limit (MB)",
     "Total Waveform Analysis Timespace (min)",
     "Total Number of Timechunks",
     "Concurrent Timechunks Used",
@@ -343,6 +344,7 @@ EvaluateSystem process for either CPU or GPU. Does not provide information for t
 def append_trial_row(csv_path: str, trial_data: dict):
     """
     Append a complete trial row to the CSV with all fields populated.
+    Ensures "GPUs Used" column is consistently formatted and quoted.
     """
     csvp = Path(csv_path) 
     
@@ -355,15 +357,81 @@ def append_trial_row(csv_path: str, trial_data: dict):
     # Align row to the canonical header (use empty string for missing keys)
     row = {col: trial_data.get(col, "") for col in CANONICAL_CSV_HEADER}
     
+    # Normalize "GPUs Used" format to ensure consistent quoting
+    if "GPUs Used" in row and row["GPUs Used"]:
+        gpus_value = row["GPUs Used"]
+        # If it's already a JSON string, parse and reformat consistently
+        if isinstance(gpus_value, str):
+            try:
+                # Try to parse as JSON/list
+                gpus_list = ast.literal_eval(gpus_value.replace("(", "[").replace(")", "]"))
+                if isinstance(gpus_list, (list, tuple)):
+                    # Format consistently: [0] or [0, 1] with space after comma
+                    row["GPUs Used"] = "[" + ", ".join(map(str, gpus_list)) + "]"
+                else:
+                    row["GPUs Used"] = str(gpus_value)
+            except:
+                row["GPUs Used"] = str(gpus_value)
+        elif isinstance(gpus_value, (list, tuple)):
+            row["GPUs Used"] = "[" + ", ".join(map(str, gpus_value)) + "]"
+        else:
+            row["GPUs Used"] = str(gpus_value) if gpus_value else "[]"
+    
     # Auto-number trials if not provided
     if pd.isna(row["Trial Number"]) or row["Trial Number"] == "" or row["Trial Number"] is None:
         row["Trial Number"] = len(df_existing) + 1
 
     df_new = pd.DataFrame([row], columns=CANONICAL_CSV_HEADER)
     df_out = pd.concat([df_existing, df_new], ignore_index=True)
-    df_out.to_csv(csvp, index=False)
+    
+    # Write CSV with quoting to ensure "GPUs Used" is always quoted
+    # Use QUOTE_NONNUMERIC to quote all non-numeric fields, ensuring consistency
+    df_out.to_csv(csvp, index=False, quoting=csv.QUOTE_NONNUMERIC)
     
     print(f"Appended trial {row['Trial Number']} to {csv_path}")
+
+"""
+normalize_gpu_csv_quoting ensures all "GPUs Used" entries in a CSV are consistently formatted and quoted.
+This function can be used to update existing CSV files to have consistent formatting.
+"""
+def normalize_gpu_csv_quoting(csv_filepath: str):
+    """
+    Normalize the "GPUs Used" column in an existing CSV file to ensure consistent formatting and quoting.
+    """
+    if not os.path.exists(csv_filepath):
+        return
+    
+    df = pd.read_csv(csv_filepath, keep_default_na=False)
+    
+    if "GPUs Used" not in df.columns:
+        return
+    
+    # Normalize each "GPUs Used" entry
+    for idx in df.index:
+        gpus_value = df.at[idx, "GPUs Used"]
+        if pd.isna(gpus_value) or gpus_value == "":
+            df.at[idx, "GPUs Used"] = "[]"
+        else:
+            try:
+                # Parse the GPU value (handles various formats)
+                gpus_str = str(gpus_value).strip()
+                # Remove existing quotes if present
+                if gpus_str.startswith('"') and gpus_str.endswith('"'):
+                    gpus_str = gpus_str[1:-1]
+                
+                # Parse as list
+                gpus_list = ast.literal_eval(gpus_str.replace("(", "[").replace(")", "]"))
+                if isinstance(gpus_list, (list, tuple)):
+                    # Format consistently: [0] or [0, 1] with space after comma
+                    df.at[idx, "GPUs Used"] = "[" + ", ".join(map(str, gpus_list)) + "]"
+                else:
+                    df.at[idx, "GPUs Used"] = str(gpus_value)
+            except:
+                # If parsing fails, keep original but ensure it's a string
+                df.at[idx, "GPUs Used"] = str(gpus_value)
+    
+    # Write back with consistent quoting
+    df.to_csv(csv_filepath, index=False, quoting=csv.QUOTE_NONNUMERIC)
 
 """
 update_csv updates a completed trial after the code has exited the mseed_predictor loop and into the last steps of completing the trial. 
@@ -609,7 +677,7 @@ def find_optimal_configurations_gpu(df):
         "Number of CPUs Allocated for Ray to Use",
         "Number of Concurrent Station Tasks",
         "Total Run time for Picker (s)",
-        "VRAM Used Per Task",
+        "Inference Actor Memory Limit (MB)",
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -631,7 +699,7 @@ def find_optimal_configurations_gpu(df):
         "Number of Stations Used",
         "Number of CPUs Allocated for Ray to Use",
         "GPUs Used (key)",
-        "VRAM Used Per Task",
+        "Inference Actor Memory Limit (MB)",
     ]
     idx = (
         df_cleaned
@@ -646,11 +714,11 @@ def find_optimal_configurations_gpu(df):
     optimal_concurrent_preds.drop(columns=["GPUs Used (key)"], inplace=True, errors="ignore")
 
     # 5) “Moderate VRAM” window; if empty, fall back safely
-    vram_min = df_cleaned["VRAM Used Per Task"].quantile(0.25)
-    vram_max = df_cleaned["VRAM Used Per Task"].quantile(0.75)
+    vram_min = df_cleaned["Inference Actor Memory Limit (MB)"].quantile(0.25)
+    vram_max = df_cleaned["Inference Actor Memory Limit (MB)"].quantile(0.75)
     df_moderate_vram = df_cleaned[
-        (df_cleaned["VRAM Used Per Task"] >= vram_min)
-        & (df_cleaned["VRAM Used Per Task"] <= vram_max)
+        (df_cleaned["Inference Actor Memory Limit (MB)"] >= vram_min)
+        & (df_cleaned["Inference Actor Memory Limit (MB)"] <= vram_max)
     ].copy()
     if df_moderate_vram.empty:
         df_moderate_vram = df_cleaned.copy()
@@ -671,7 +739,7 @@ def find_optimal_configurations_gpu(df):
         "Number of Concurrent Station Tasks per Timechunk": best_overall_config["Number of Concurrent Station Tasks"],
         "Number of CPUs Allocated for Ray to Use": best_overall_config["Number of CPUs Allocated for Ray to Use"],
         "GPUs Used": list(best_overall_config.get("GPUs Used (key)", ())) or best_overall_config.get("GPUs Used", []),
-        "VRAM Used Per Task": best_overall_config["VRAM Used Per Task"],
+        "Inference Actor Memory Limit (MB)": best_overall_config["Inference Actor Memory Limit (MB)"],
         "Intra-parallelism Threads": best_overall_config["Intra-parallelism Threads"],
         "Inter-parallelism Threads": best_overall_config["Inter-parallelism Threads"],
         "Total Run time for Picker (s)": best_overall_config["Total Run time for Picker (s)"],
@@ -806,7 +874,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
         inter_threads = best_config_dict.get("Inter-parallelism Threads")
         num_stations = best_config_dict.get("Number of Stations Used")
         total_runtime = best_config_dict.get("Total Run time for Picker (s)")
-        vram_used = best_config_dict.get("VRAM Used Per Task")
+        vram_used = best_config_dict.get("Inference Actor Memory Limit (MB)")
         num_gpus_st = best_config_dict.get("GPUs Used")
         num_gpus = ast.literal_eval(num_gpus_st)
         
@@ -817,7 +885,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
               f"Intra-parallelism Threads: {intra_threads}\n"
               f"Inter-parallelism Threads: {inter_threads}\n"
               f"Stations: {num_stations}\n"
-              f"VRAM Used per Task: {vram_used}\n"
+              f"Inference Actor Memory Limit (MB): {vram_used}\n"
               f"Total Runtime (s): {total_runtime}")
 
         return int(float(num_cpus)), int(float(num_concurrent_stations)), int(float(intra_threads)), int(float(inter_threads)), num_gpus, int(float(vram_used)), int(float(num_stations))
@@ -842,7 +910,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
         df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
-        df_optimal["VRAM Used Per Task"] = pd.to_numeric(df_optimal["VRAM Used Per Task"], errors="coerce")
+        df_optimal["Inference Actor Memory Limit (MB)"] = pd.to_numeric(df_optimal["Inference Actor Memory Limit (MB)"], errors="coerce")
 
         # Convert "GPUs Used" from string representation to list
         df_optimal["GPUs Used"] = df_optimal["GPUs Used"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
@@ -873,7 +941,7 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
               f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
               f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
               f"Stations: {station_count}\n"
-              f"VRAM Used per Task: {best_config['VRAM Used Per Task']}\n"
+              f"Inference Actor Memory Limit (MB): {best_config['Inference Actor Memory Limit (MB)']}\n"
               f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
         return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
@@ -881,6 +949,6 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
                int(float(best_config["Intra-parallelism Threads"])), \
                int(float(best_config["Inter-parallelism Threads"])), \
                num_gpus, \
-               int(float(best_config["VRAM Used Per Task"])), \
+               int(float(best_config["Inference Actor Memory Limit (MB)"])), \
                int(float(station_count))
     

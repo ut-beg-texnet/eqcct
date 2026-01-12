@@ -684,7 +684,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     if use_gpu:
         # Allocate more VRAM to model actors (they need to hold the full model)
         # Reserve ~2-3GB per model actor, adjust based on your model size
-        model_vram_mb = max(gpu_memory_limit_mb * 2, 3000)  # At least 2x task VRAM or 3GB
+        model_vram_mb = max(gpu_memory_limit_mb, 3000)  # At least VRAM or 3GB for EQCCT (subject to change) 
         
         # Create one model actor per GPU
         model_actors = []
@@ -741,10 +741,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     model_actor = model_actors[i % len(model_actors)]
 
                     if use_gpu is False:
-                        tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False, None))
+                        tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
                     elif use_gpu is True:
                         # Don't allocate GPUs to workers, only to model actors
-                        tasks_queue.append(parallel_predict.options(num_cpus=1, num_gpus=0).remote(tasks_predictor[i], model_actor, True, gpu_memory_limit_mb))
+                        tasks_queue.append(parallel_predict.options(num_cpus=1, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
                     break
                 # If there are more tasks than maximum, just process them
                 else:
@@ -792,7 +792,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Intra-parallelism Threads": intra_threads if intra_threads is not None else "",
             "Inter-parallelism Threads": inter_threads if inter_threads is not None else "",
             "GPUs Used": json.dumps(list(gpu_id)) if (use_gpu and gpu_id is not None) else "[]",
-            "VRAM Used Per Task": float(gpu_memory_limit_mb) if (use_gpu and gpu_memory_limit_mb is not None) else "",
+            "Inference Actor Memory Limit (MB)": float(model_vram_mb) if (use_gpu and gpu_memory_limit_mb is not None) else "",
             "Total Waveform Analysis Timespace (min)": float(total_analysis_time.total_seconds() / 60.0) if hasattr(total_analysis_time, "total_seconds") else (float(total_analysis_time) if total_analysis_time else ""),
             "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
             "Concurrent Timechunks Used": int(number_of_concurrent_timechunk_predictions) if number_of_concurrent_timechunk_predictions is not None else "",
@@ -863,7 +863,7 @@ class ModelActor:
 
 
 @ray.remote
-def parallel_predict(predict_args, model_actor, gpu=False, gpu_memory_limit_mb=None):
+def parallel_predict(predict_args, model_actor, gpu=False):
     """
     Modified to use shared ModelActor instead of loading model per task
     """

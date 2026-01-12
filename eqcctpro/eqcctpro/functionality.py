@@ -308,7 +308,7 @@ class EvaluateSystem():
                  min_cpu_amount: int = 1,
                  min_conc_stations: int = 1, 
                  conc_station_tasks_step_size: int = 1,
-                 vram_mb:float = None,
+                 max_vram_mb:float = None,
                  gpu_vram_safety_cap:float = 0.90, 
                  selected_gpus:list = None,
                  start_time:str = None, 
@@ -335,7 +335,7 @@ class EvaluateSystem():
         self.s_model_filepath = s_model_filepath
         self.stations2use = stations2use
         self.cpu_id_list = cpu_id_list
-        self.vram_mb = vram_mb
+        self.vram_mb = max_vram_mb
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
         self.selected_gpus = selected_gpus
         self.use_gpu = True if self.eval_mode == 'gpu' else False
@@ -455,9 +455,13 @@ class EvaluateSystem():
         tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
         self.tasks_picker = tasks
 
-    def _trial_key(self, *, num_cpus: int, stations: int, predictions: int, gpu_memory_limit_mb, timechunks: int) -> str:
-        gpus = self.selected_gpus if self.selected_gpus is not None else []
-        gpus_norm = tuple(sorted(int(x) for x in gpus))
+    def _trial_key(self, *, num_cpus: int, stations: int, predictions: int, gpu_memory_limit_mb, timechunks: int, gpus: list = None) -> str:
+        # Use provided gpus parameter if available, otherwise fall back to self.selected_gpus
+        if gpus is not None:
+            gpus_to_use = gpus
+        else:
+            gpus_to_use = self.selected_gpus if self.selected_gpus is not None else []
+        gpus_norm = tuple(sorted(int(x) for x in gpus_to_use))
         vram_norm = int(round(float(gpu_memory_limit_mb))) if gpu_memory_limit_mb not in ("", None) else ""
         return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|vram={vram_norm}"
         
@@ -476,11 +480,12 @@ class EvaluateSystem():
                 stations = int(float(row.get("Number of Stations Used", 0) or 0))
                 predictions = int(float(row.get("Number of Concurrent Station Tasks", 0) or 0))
                 timechunks = int(float(row.get("Concurrent Timechunks Used", 0) or 0))
-                vram = row.get("VRAM Used Per Task", "")
+                vram = row.get("Inference Actor Memory Limit (MB)", "")
                 vram_mb = float(vram) if vram not in ("", None) else ""
-                # normalize GPU list stored as JSON-like string
-                self.selected_gpus = _parse_gpus_field(row.get("GPUs Used")) or self.selected_gpus
-                keys.add(self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, gpu_memory_limit_mb=vram_mb, timechunks=timechunks))
+                # Parse GPUs from this specific row (don't overwrite self.selected_gpus)
+                row_gpus = _parse_gpus_field(row.get("GPUs Used")) or []
+                # Pass the row's GPUs directly to _trial_key
+                keys.add(self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, gpu_memory_limit_mb=vram_mb, timechunks=timechunks, gpus=row_gpus))
             except Exception:
                 continue
         return keys
@@ -737,7 +742,31 @@ class EvaluateSystem():
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/gpu_test_results.csv"
         prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
+        
+        # Normalize existing CSV to ensure consistent "GPUs Used" formatting and quoting
+        if os.path.exists(csv_filepath):
+            from .tools import normalize_gpu_csv_quoting
+            normalize_gpu_csv_quoting(csv_filepath)
+            self.logger.info("Normalized existing CSV entries for consistent 'GPUs Used' formatting.")
+        
         planned_keys = self._load_existing_trial_keys(csv_filepath)
+        
+        # Log summary of existing trials
+        if planned_keys:
+            self.logger.info(f"Loaded {len(planned_keys)} existing trial(s) from CSV. These will be skipped.")
+            # Count trials by GPU configuration
+            gpu_counts = {}
+            for key in planned_keys:
+                # Extract GPU info from key (format: cpus=X|gpus=(...)|...)
+                if "gpus=" in key:
+                    gpu_part = key.split("gpus=")[1].split("|")[0]
+                    gpu_counts[gpu_part] = gpu_counts.get(gpu_part, 0) + 1
+            if gpu_counts:
+                self.logger.info("Existing trials by GPU configuration:")
+                for gpu_config, count in sorted(gpu_counts.items()):
+                    self.logger.info(f"  {gpu_config}: {count} trial(s)")
+        else:
+            self.logger.info("No existing trials found in CSV. Starting fresh evaluation.")
 
         # Calculate these at the start
         self.chunk_time()
@@ -746,6 +775,10 @@ class EvaluateSystem():
         trial_num = 1
         log_queue = queue.Queue()  # Create a queue for log entries
         total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
+        
+        # Track statistics
+        trials_skipped = 0
+        trials_run = 0
         
         if self.min_cpu_amount > len(self.cpu_id_list): 
             # Code won't execute because the minimum CPU amount of > the len(cpu id list)
@@ -764,7 +797,10 @@ class EvaluateSystem():
                 
                 # VRAM budget per GPU (MB). If vram_mb is provided, treat it as an explicit per-GPU budget override.
                 free_vram_mb = float(self.vram_mb) if self.vram_mb else self.calculate_vram()
-                self.logger.info(f"Testing Using {len(gpus_to_use)} GPU(s) with IDs {gpus_to_use}")
+                self.logger.info("")
+                self.logger.info("=" * 80)
+                self.logger.info(f"Testing Using {len(gpus_to_use)} GPU(s) with IDs {gpus_to_use} and {len(cpus_to_use)} CPU(s)")
+                self.logger.info("=" * 80)
                 
                 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
                 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus_to_use))
@@ -784,9 +820,15 @@ class EvaluateSystem():
                         vram_per_task_mb = free_vram_mb / predictions
                         step_size = vram_per_task_mb * 0.2
                         vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
-                        self.logger.info(f"Testing the above TOTAL STATIONS and PARALLELIZATION CONDITIONS using the following iterative VRAM limitations (MB): {vram_steps.tolist()}")
+                        vram_steps = vram_steps[vram_steps >= 3000] # TEMP! 3000 for EQCCT Model, will need to change for any other model that the user will use as input
+                        # self.logger.info(f"Testing the above TOTAL STATIONS and PARALLELIZATION CONDITIONS using the following iterative VRAM limitations (MB): {vram_steps.tolist()}")
                         
-                        for gpu_memory_limit_mb in vram_steps:
+                        # We are defining the hard upper limit on how much VRAM (GPU memory) TensorFlow is allowed to use inside each ModelActor process
+                        # This includes 1) Loading the model weights into GPU memory during init and 2) Usage of the ModelActor (predictions, etc.) 
+                        # If the actor tries to allocate more memory than available, then a OOME will occur inside that actor only
+                        # Good for testing OOME prevention while not letting actors steal available memory from other actors 
+                        # LSS: It is purely the VRAM ceiling for each shared inference actor that handles the actual model predictions
+                        for gpu_memory_limit_mb in vram_steps: 
                             gpu_memory_limit_mb = int(round(float(gpu_memory_limit_mb)))
 
                             key = self._trial_key(
@@ -794,12 +836,15 @@ class EvaluateSystem():
                                 stations=stations,
                                 predictions=predictions,
                                 gpu_memory_limit_mb=gpu_memory_limit_mb,
-                                timechunks=1,  # your GPU eval is explicitly “one timechunk at a time”
+                                timechunks=1,  # your GPU eval is explicitly "one timechunk at a time"
+                                gpus=gpus_to_use,  # Pass the actual GPUs being used in this iteration
                             )
                             if key in planned_keys:
                                 self.logger.info(f"[SKIP] Already tested: {key}")
+                                trials_skipped += 1
                                 continue
                             planned_keys.add(key)
+                            trials_run += 1
                             self.logger.info("")
                             self.logger.info(f"------- Trial Number: {trial_num} -------")
                             # self.logger.info(f"VRAM Limited to {gpu_memory_limit_mb:.2f} MB per Parallel Task")
@@ -957,10 +1002,13 @@ class EvaluateSystem():
 
         self.logger.info(f"Testing complete.")
         self.logger.info(f"")
+        self.logger.info(f"Trial Summary: {trials_run} new trial(s) executed, {trials_skipped} trial(s) skipped (already in CSV)")
         self.logger.info(f"Finding Optimal Configurations...")
+        self.logger.info(f"Recalculating optimal configurations from all trial data (including new trials)...")
         # Compute optimal configurations (GPU)
         df = pd.read_csv(csv_filepath)
         optimal_configuration_df, best_overall_usecase_df = find_optimal_configurations_gpu(df)
+        # Overwrite existing files with recalculated optimal configurations
         optimal_configuration_df.to_csv(f"{self.csv_dir}/optimal_configurations_gpu.csv", index=False)
         best_overall_usecase_df.to_csv(f"{self.csv_dir}/best_overall_usecase_gpu.csv", index=False)
         self.logger.info(f"Optimal Configurations Found. Findings saved to:") 
@@ -1172,7 +1220,7 @@ class OptimalGPUConfigurationFinder:
         inter_threads = row.get("Inter-parallelism Threads")
         num_stations = row.get("Number of Stations Used")
         total_runtime = row.get("Total Run time for Picker (s)")
-        vram_used = row.get("VRAM Used Per Task")
+        vram_used = row.get("Inference Actor Memory Limit (MB)")
 
         self.logger.info("")
         self.logger.info(f"------- Finding the Best Overall GPU Usecase Configuration Based on Available Trial Data in {self.eval_sys_results_dir} -------")
@@ -1183,7 +1231,7 @@ class OptimalGPUConfigurationFinder:
         self.logger.info(f"Intra-parallelism Threads: {intra_threads}")
         self.logger.info(f"Inter-parallelism Threads: {inter_threads}")
         self.logger.info(f"Stations: {num_stations}")
-        self.logger.info(f"VRAM Used per Task: {vram_used}")
+        self.logger.info(f"Inference Actor Memory Limit (MB): {vram_used}")
         self.logger.info(f"Total Runtime (s): {total_runtime}")
         self.logger.info("")
         # return int(float(num_cpus)), int(float(num_concurrent_predictions)), int(float(intra_threads)), int(float(inter_threads)), num_gpus, int(float(vram_used)), int(float(num_stations))
@@ -1204,7 +1252,7 @@ class OptimalGPUConfigurationFinder:
         df_optimal["Number of CPUs Allocated for Ray to Use"] = pd.to_numeric(df_optimal["Number of CPUs Allocated for Ray to Use"], errors="coerce")
         df_optimal["Number of Concurrent Station Tasks"] = pd.to_numeric(df_optimal["Number of Concurrent Station Tasks"], errors="coerce")
         df_optimal["Total Run time for Picker (s)"] = pd.to_numeric(df_optimal["Total Run time for Picker (s)"], errors="coerce")
-        df_optimal["VRAM Used Per Task"] = pd.to_numeric(df_optimal["VRAM Used Per Task"], errors="coerce")
+        df_optimal["Inference Actor Memory Limit (MB)"] = pd.to_numeric(df_optimal["Inference Actor Memory Limit (MB)"], errors="coerce")
 
         # Convert "GPUs Used" from string representation to list
         df_optimal["GPUs Used"] = df_optimal["GPUs Used"].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
@@ -1233,7 +1281,7 @@ class OptimalGPUConfigurationFinder:
         self.logger.info(f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}")
         self.logger.info(f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}")
         self.logger.info(f"Stations: {station_count}")
-        self.logger.info(f"VRAM Used per Task: {best_config['VRAM Used Per Task']}")
+        self.logger.info(f"Inference Actor Memory Limit (MB): {best_config['Inference Actor Memory Limit (MB)']}")
         self.logger.info(f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
 
         # return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
@@ -1241,5 +1289,5 @@ class OptimalGPUConfigurationFinder:
         #        int(float(best_config["Intra-parallelism Threads"])), \
         #        int(float(best_config["Inter-parallelism Threads"])), \
         #        gpu_list, \
-        #        int(float(best_config["VRAM Used Per Task"])), \
+        #        int(float(best_config["Inference Actor Memory Limit (MB)"])), \
         #        int(float(station_count))
