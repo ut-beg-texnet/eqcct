@@ -32,10 +32,10 @@ class RunEQCCTPro():
                 input_dir: str, 
                 output_dir: str, 
                 log_filepath: str, 
-                p_model_filepath: str, 
-                s_model_filepath: str, 
-                number_of_concurrent_station_predictions: int,
-                number_of_concurrent_timechunk_predictions: int, 
+                p_model_filepath: str = None, 
+                s_model_filepath: str = None, 
+                number_of_concurrent_station_predictions: int = None,
+                number_of_concurrent_timechunk_predictions: int = None, 
                 intra_threads: int = 1, 
                 inter_threads: int = 1, 
                 P_threshold: float = 0.001, 
@@ -50,7 +50,12 @@ class RunEQCCTPro():
                 end_time:str = None, 
                 timechunk_dt:int = None,
                 waveform_overlap:int = None,
-                tmp_dir:str = None): 
+                tmp_dir:str = None,
+                # SeisBench model parameters
+                model_type: str = 'eqcct',  # 'eqcct' or 'seisbench'
+                seisbench_parent_model: str = None,  # e.g., 'PhaseNet', 'EQTransformer'
+                seisbench_child_model: str = None,  # e.g., 'original', 'stead'
+                Detection_threshold: float = 0.3):  # Detection threshold for SeisBench models 
          
         self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
         self.input_dir = input_dir
@@ -76,6 +81,27 @@ class RunEQCCTPro():
         self.timechunk_dt = timechunk_dt
         self.waveform_overlap = waveform_overlap
         self.home_tmp_dir = tmp_dir  
+        
+        # SeisBench model parameters
+        self.model_type = model_type.lower()
+        self.seisbench_parent_model = seisbench_parent_model
+        self.seisbench_child_model = seisbench_child_model
+        self.Detection_threshold = Detection_threshold
+
+        # Validate model type and parameters
+        if self.model_type not in ['eqcct', 'seisbench']:
+            raise ValueError(f"model_type must be 'eqcct' or 'seisbench', got '{model_type}'")
+        
+        if self.model_type == 'eqcct':
+            if p_model_filepath is None or s_model_filepath is None:
+                raise ValueError("For EQCCT model_type, p_model_filepath and s_model_filepath are required")
+            if number_of_concurrent_station_predictions is None:
+                raise ValueError("number_of_concurrent_station_predictions is required for EQCCT")
+        elif self.model_type == 'seisbench':
+            if seisbench_parent_model is None or seisbench_child_model is None:
+                raise ValueError("For SeisBench model_type, seisbench_parent_model and seisbench_child_model are required")
+            if number_of_concurrent_station_predictions is None:
+                raise ValueError("number_of_concurrent_station_predictions is required for SeisBench")
 
         # Ensures that the output_dir exists. If it doesn't, we create it 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -103,13 +129,25 @@ class RunEQCCTPro():
             sys.exit(1)
 
         # We need to ensure that the vram specified does not exceed the capabilities of the system, if not, we need to exit safely before it happens
-        if self.use_gpu: 
+        if self.use_gpu:
+            # Determine model VRAM requirement based on model type
+            if self.model_type == 'seisbench':
+                from .parallelization import get_seisbench_model_vram_mb
+                model_vram_mb = get_seisbench_model_vram_mb(
+                    self.seisbench_parent_model, 
+                    self.seisbench_child_model,
+                    default_mb=2000.0  # Default VRAM for SeisBench models
+                )
+                self.logger.info(f"Using VRAM requirement: {model_vram_mb:.0f} MB for SeisBench model {self.seisbench_parent_model}/{self.seisbench_child_model}")
+            else:
+                model_vram_mb = 1500.0  # Safety reserve for EQCCT
+            
             check_vram_per_gpu_style(
                 selected_gpus=self.selected_gpus,
                 get_gpu_vram_fn=lambda gid: get_gpu_vram(gpu_index=gid),
                 intended_workers=self.number_of_concurrent_station_predictions * self.number_of_concurrent_timechunk_predictions,
                 vram_mb=self.vram_mb,
-                model_vram_mb=1500.0,   # your safety reserve for EQCCT
+                model_vram_mb=model_vram_mb,
                 safety_cap=0.95,
                 eqcct_overhead_gb=0.0,
                 logger=self.logger)
@@ -225,7 +263,9 @@ class RunEQCCTPro():
                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, specific_stations=specific_stations_list, 
                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                         number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time,
-                                        intra_threads=self.intra_threads, inter_threads=self.inter_threads))
+                                        intra_threads=self.intra_threads, inter_threads=self.inter_threads,
+                                        model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
+                                        seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold))
                     break
                 
                 else: # If there are more tasks than maximum, just process them
@@ -316,7 +356,12 @@ class EvaluateSystem():
                  conc_timechunk_tasks_step_size: int = 1, 
                  timechunk_dt:int = None,
                  waveform_overlap:int = None,
-                 tmp_dir:str = None): 
+                 tmp_dir:str = None,
+                 # SeisBench model parameters
+                 model_type: str = 'eqcct',  # 'eqcct' or 'seisbench'
+                 seisbench_parent_model: str = None,
+                 seisbench_child_model: str = None,
+                 Detection_threshold: float = 0.3): 
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
@@ -354,6 +399,22 @@ class EvaluateSystem():
         self.waveform_overlap = waveform_overlap
         self.home_tmp_dir = tmp_dir 
 
+        # SeisBench model parameters
+        self.model_type = model_type.lower()
+        self.seisbench_parent_model = seisbench_parent_model
+        self.seisbench_child_model = seisbench_child_model
+        self.Detection_threshold = Detection_threshold
+
+        # Validate model type and parameters
+        if self.model_type not in ['eqcct', 'seisbench']:
+            raise ValueError(f"model_type must be 'eqcct' or 'seisbench', got '{model_type}'")
+        
+        if self.model_type == 'eqcct':
+            if p_model_filepath is None or s_model_filepath is None:
+                raise ValueError("For EQCCT model_type, p_model_filepath and s_model_filepath are required")
+        elif self.model_type == 'seisbench':
+            if seisbench_parent_model is None or seisbench_child_model is None:
+                raise ValueError("For SeisBench model_type, seisbench_parent_model and seisbench_child_model are required")
         
         # Ensures that the output_dir exists. If it doesn't, we create it 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -392,12 +453,23 @@ class EvaluateSystem():
             self.chunk_time()
             intended_workers = int(len(self.stations2use_list)) * int(len(self.times_list) // 2)
 
+            # Determine model VRAM requirement based on model type
+            if self.model_type == 'seisbench':
+                from .parallelization import get_seisbench_model_vram_mb
+                model_vram_mb = get_seisbench_model_vram_mb(
+                    self.seisbench_parent_model, 
+                    self.seisbench_child_model,
+                    default_mb=2000.0
+                )
+            else:
+                model_vram_mb = 3000.0  # Default for EQCCT
+
             per_gpu_free_mb = [get_gpu_vram(gpu_index=g)[1] * 1024.0 for g in self.selected_gpus]  # free_gb -> MB
             plan = evaluate_vram_capacity(
                 intended_workers=intended_workers,
                 vram_per_worker_mb=float(self.vram_mb),
                 per_gpu_free_mb=per_gpu_free_mb,
-                model_vram_mb=3000.0,
+                model_vram_mb=model_vram_mb,
                 safety_cap=self.gpu_vram_safety_cap,
                 eqcct_overhead_gb=1.1,
             )
@@ -615,7 +687,9 @@ class EvaluateSystem():
                                                             gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, stations2use=num_stations, 
                                                             timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                                             number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
-                                                            test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt))
+                                                            test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt,
+                                                            model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
+                                                            seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold))
                                     
                                         break
                                 
@@ -820,7 +894,19 @@ class EvaluateSystem():
                         vram_per_task_mb = free_vram_mb / predictions
                         step_size = vram_per_task_mb * 0.2
                         vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
-                        vram_steps = vram_steps[vram_steps >= 3000] # TEMP! 3000 for EQCCT Model, will need to change for any other model that the user will use as input
+                        
+                        # Determine minimum VRAM filter based on model type
+                        if self.model_type == 'seisbench':
+                            from .parallelization import get_seisbench_model_vram_mb
+                            min_vram = get_seisbench_model_vram_mb(
+                                self.seisbench_parent_model, 
+                                self.seisbench_child_model,
+                                default_mb=2000.0
+                            )
+                        else:
+                            min_vram = 3000.0  # EQCCT minimum
+                            
+                        vram_steps = vram_steps[vram_steps >= min_vram] 
                         # self.logger.info(f"Testing the above TOTAL STATIONS and PARALLELIZATION CONDITIONS using the following iterative VRAM limitations (MB): {vram_steps.tolist()}")
                         
                         # We are defining the hard upper limit on how much VRAM (GPU memory) TensorFlow is allowed to use inside each ModelActor process
@@ -908,7 +994,9 @@ class EvaluateSystem():
                                     test_csv_filepath=csv_filepath, 
                                     intra_threads=self.intra_threads, 
                                     inter_threads=self.inter_threads, 
-                                    timechunk_dt=self.timechunk_dt
+                                    timechunk_dt=self.timechunk_dt,
+                                    model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
+                                    seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold
                                 )
                                 
                                 # Wait for result

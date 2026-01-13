@@ -570,7 +570,7 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
     # 3) Configure fixed VRAM slices on all visible GPUs
     vis_gpus = tf.config.list_physical_devices("GPU")
     if not vis_gpus:
-        logger.info(f"No GPUs visible; proceeding on CPU.")
+        logger.info(f"TensorFlow: No GPUs visible; TF will proceed on CPU.")
         logger.info("")
         return {"logical_gpus": [], "physical_gpus": []}
 

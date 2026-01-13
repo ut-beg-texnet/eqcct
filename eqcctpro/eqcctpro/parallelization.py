@@ -25,6 +25,22 @@ from obspy import UTCDateTime
 from datetime import datetime, timedelta 
 from logging.handlers import QueueHandler
 
+# Dictionary of VRAM requirements (MB) for SeisBench models
+# Format: (parent_model_name, child_model_name): vram_mb
+# This will be populated with values provided by the user later
+SEISBENCH_MODEL_VRAM_MB = {
+    # Example entries:
+    ('PhaseNet', 'original'): 2000.0,
+    ('EQTransformer', 'stead'): 2500.0,
+}
+
+def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=2000.0):
+    """
+    Get VRAM requirement for a SeisBench model.
+    """
+    key = (parent_model_name, child_model_name)
+    return SEISBENCH_MODEL_VRAM_MB.get(key, default_mb)
+
 def parse_time_range(time_string):
     """
     Parses a time range string and returns start time, end time, and time delta.
@@ -555,7 +571,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
               total_analysis_time=None,
               intra_threads=None,
               inter_threads=None, 
-              timechunk_dt=None): 
+              timechunk_dt=None,
+              # SeisBench model parameters
+              model_type='eqcct',
+              seisbench_parent_model=None,
+              seisbench_child_model=None,
+              Detection_threshold=0.3): 
     
     """ 
     
@@ -635,7 +656,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
     "gpu_limit": gpu_limit,
     "p_model": p_model,
     "s_model": s_model,
-    "stations_filters": stations_filters
+    "stations_filters": stations_filters,
+    "model_type": model_type,
+    "seisbench_parent_model": seisbench_parent_model,
+    "seisbench_child_model": seisbench_child_model,
+    "Detection_threshold": Detection_threshold
     }
 
     logger.info(f"------- Hardware Configuration -------")
@@ -681,33 +706,76 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # CREATE MODEL ACTOR(S) - Add this before the task loop
     logger.info(f"Creating model actor(s)...") 
     
-    if use_gpu:
-        # Allocate more VRAM to model actors (they need to hold the full model)
-        # Reserve ~2-3GB per model actor, adjust based on your model size
-        model_vram_mb = max(gpu_memory_limit_mb, 3000)  # At least VRAM or 3GB for EQCCT (subject to change) 
-        
-        # Create one model actor per GPU
-        model_actors = []
-        logger.info(f"Using GPUs: {gpu_id}")
-        for gpu_idx in gpu_id: # gpu_id is a list of GPU IDs and gpu_idx is the current GPU ID in the loop 
-            logger.info(f"Creating ModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
-            actor = ModelActor.options(num_gpus=1, num_cpus=1).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
-            # Wait for __init__ to complete and raise if error
-            try:
-                ray.get(actor.ready.remote())
-            except Exception as e:
-                logger.error(f"Failed to create ModelActor on GPU {gpu_idx}: {e}")
-                raise
-            logger.info(f"ModelActor created on GPU {gpu_idx}.")
-            model_actors.append(actor)
+    model_type_lower = model_type.lower() if model_type else 'eqcct'
+    
+    if model_type_lower == 'seisbench':
+        # Create SeisBench model actors
+        if use_gpu:
+            # Get VRAM requirement for this SeisBench model
+            model_vram_mb = get_seisbench_model_vram_mb(
+                seisbench_parent_model, 
+                seisbench_child_model,
+                default_mb=2000.0
+            )
+            # Use max of requested VRAM or model requirement (similar to EQCCT logic)
+            model_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
             
-        logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s).") 
-        # Using CUDA_VISIBLE_DEVICES is not a reliable way to report which physical GPU is being used bc Ray can overwrite, clear, or remap the assigned GPU so that each worker sees them as local indices (often starting from 0)
-        logger.info(f"[ModelActor] Model successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
+            model_actors = []
+            logger.info(f"Using GPUs: {gpu_id}")
+            for gpu_idx in gpu_id:
+                logger.info(f"Creating SeisBenchModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM requirement...")
+                actor = SeisBenchModelActor.options(num_gpus=1, num_cpus=1).remote(
+                    parent_model_name=seisbench_parent_model,
+                    child_model_name=seisbench_child_model,
+                    gpus_to_use=[gpu_idx],
+                    use_gpu=True
+                )
+                try:
+                    ray.get(actor.ready.remote())
+                except Exception as e:
+                    logger.error(f"Failed to create SeisBenchModelActor on GPU {gpu_idx}: {e}")
+                    raise
+                logger.info(f"SeisBenchModelActor created on GPU {gpu_idx}.")
+                model_actors.append(actor)
+            logger.info(f"Created {len(model_actors)} GPU-sized SeisBenchModelActor(s).")
+        else:
+            model_actors = [SeisBenchModelActor.options(num_cpus=1).remote(
+                parent_model_name=seisbench_parent_model,
+                child_model_name=seisbench_child_model,
+                gpus_to_use=False,
+                use_gpu=False
+            )]
+            ray.get(model_actors[0].ready.remote())
+            logger.info(f"Created a 1 CPU-sized SeisBenchModelActor")
     else:
-        # Create CPU model actor
-        model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)]
-        logger.info(f"Created a 1 CPU-sized ModelActor") 
+        # Create EQCCT model actors (original logic)
+        if use_gpu:
+            # Allocate more VRAM to model actors (they need to hold the full model)
+            # Reserve ~2-3GB per model actor, adjust based on your model size
+            model_vram_mb = max(gpu_memory_limit_mb, 3000)  # At least VRAM or 3GB for EQCCT (subject to change) 
+            
+            # Create one model actor per GPU
+            model_actors = []
+            logger.info(f"Using GPUs: {gpu_id}")
+            for gpu_idx in gpu_id: # gpu_id is a list of GPU IDs and gpu_idx is the current GPU ID in the loop 
+                logger.info(f"Creating ModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
+                actor = ModelActor.options(num_gpus=1, num_cpus=1).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
+                # Wait for __init__ to complete and raise if error
+                try:
+                    ray.get(actor.ready.remote())
+                except Exception as e:
+                    logger.error(f"Failed to create ModelActor on GPU {gpu_idx}: {e}")
+                    raise
+                logger.info(f"ModelActor created on GPU {gpu_idx}.")
+                model_actors.append(actor)
+                
+            logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s).") 
+            # Using CUDA_VISIBLE_DEVICES is not a reliable way to report which physical GPU is being used bc Ray can overwrite, clear, or remap the assigned GPU so that each worker sees them as local indices (often starting from 0)
+            logger.info(f"[ModelActor] Model successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
+        else:
+            # Create CPU model actor
+            model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)]
+            logger.info(f"Created a 1 CPU-sized ModelActor") 
 
     # Submit tasks to ray in a queue
     tasks_queue = []
@@ -715,7 +783,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
     logger.info(f"Starting EQCCTPro parallelized waveform processing...") 
     logger.info("")
     start_time = time.time() 
-    logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
+    model_type_lower = model_type.lower() if model_type else 'eqcct'
+    if model_type_lower == 'seisbench':
+        logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model}) -------")
+    else:
+        logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
 
     if timechunk_id is None:
         # derive from the path if caller forgot to pass it
@@ -740,11 +812,23 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     # SELECT WHICH MODEL ACTOR TO USE (round-robin across GPUs)
                     model_actor = model_actors[i % len(model_actors)]
 
-                    if use_gpu is False:
-                        tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
-                    elif use_gpu is True:
-                        # Don't allocate GPUs to workers, only to model actors
-                        tasks_queue.append(parallel_predict.options(num_cpus=1, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
+                    # Route to appropriate prediction function based on model type
+                    if model_type_lower == 'seisbench':
+                        # SeisBench models use parallel_predict_seisbench
+                        if use_gpu is False:
+                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
+                        elif use_gpu is True:
+                            # Don't allocate GPUs to workers, only to model actors
+                            # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
+                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
+                    else:
+                        # EQCCT models use parallel_predict (original)
+                        if use_gpu is False:
+                            tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
+                        elif use_gpu is True:
+                            # Don't allocate GPUs to workers, only to model actors
+                            # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
+                            tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
                     break
                 # If there are more tasks than maximum, just process them
                 else:
@@ -860,6 +944,267 @@ class ModelActor:
                                             batch_size=batch_size, norm_mode=norm_mode)
         return self.model.predict(pred_generator, verbose=0)
 
+
+@ray.remote
+class SeisBenchModelActor:
+    """
+    Ray actor for SeisBench models that loads the model once and shares it across predictions.
+    Similar to ModelActor but for SeisBench models (PyTorch-based).
+    """
+    def __init__(self, parent_model_name, child_model_name, gpus_to_use=False, use_gpu=True):
+        self.logger = logging.getLogger("eqcctpro.seisbench_model_actor")
+        self.logger.setLevel(logging.INFO)
+        self.logger.handlers[:] = []
+        self.logger.propagate = False
+        self.logger.addHandler(logging.StreamHandler())
+
+        self.logger.info("=== SeisBenchModelActor __init__ STARTED ===")
+        self.logger.info(f"parent_model_name = {parent_model_name}")
+        self.logger.info(f"child_model_name = {child_model_name}")
+        self.use_gpu = use_gpu
+        self.gpus_to_use = gpus_to_use
+
+        # Set device for PyTorch (SeisBench uses PyTorch)
+        try:
+            import torch
+        except ImportError:
+            self.logger.error("PyTorch (torch) is not installed. SeisBench models require PyTorch.")
+            raise ImportError("PyTorch (torch) is not installed. Please install it to use SeisBench models.")
+
+        if use_gpu:
+            if gpus_to_use and len(gpus_to_use) > 0:
+                device_id = gpus_to_use[0]
+                self.device = torch.device(f'cuda:{device_id}')
+            else:
+                self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+            self.logger.info(f"Using device: {self.device}")
+        else:
+            self.device = torch.device('cpu')
+            self.logger.info("Using CPU device")
+
+        # Load the SeisBench model
+        self.logger.info("Loading SeisBench model...")
+        from .seisbench_models import SeisBenchModels
+        self.model_wrapper = SeisBenchModels(parent_model_name, child_model_name)
+        self.model_wrapper.load_model()
+        
+        # Move model to device if using GPU
+        if use_gpu:
+            try:
+                if hasattr(self.model_wrapper.model, 'to'):
+                    self.model_wrapper.model.to(self.device)
+                self.logger.info(f"Model moved to {self.device}")
+            except Exception as e:
+                self.logger.warning(f"Could not move model to GPU: {e}")
+        
+        self.logger.info("SeisBench model loaded successfully.")
+    
+    def ready(self):
+        """Simple method to check if the actor is ready"""
+        return True
+    
+    def classify(self, stream, P_threshold=0.3, S_threshold=0.3, Detection_threshold=0.3, **kwargs):
+        """
+        Classify a stream and return picks.
+        
+        Parameters:
+        -----------
+        stream : obspy.Stream
+            3-component ObsPy Stream
+        P_threshold : float
+            P phase detection threshold
+        S_threshold : float
+            S phase detection threshold
+        Detection_threshold : float
+            Detection threshold
+        **kwargs : dict
+            Additional arguments for model.classify()
+        
+        Returns:
+        --------
+        ClassifyOutput
+            Object containing picks
+        """
+        return self.model_wrapper.classify(
+            stream, 
+            P_threshold=P_threshold,
+            S_threshold=S_threshold,
+            Detection_threshold=Detection_threshold,
+            **kwargs
+        )
+
+
+@ray.remote
+def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
+    """
+    Prediction function for SeisBench models.
+    Uses mseed2stream_3c for preprocessing and SeisBenchModelActor for predictions.
+    """
+    import glob
+    import shutil
+    import csv
+    import logging
+    from logging.handlers import QueueHandler
+    from pathlib import Path
+    from .seisbench_models import mseed2stream_3c
+    
+    pos, station, out_dir, args = predict_args
+    
+    # Set up logger to forward to the main listener
+    logger = logging.getLogger(f"eqcctpro.worker.{station}")
+    logger.setLevel(logging.INFO)
+    if args.get('log_queue') is not None:
+        logger.addHandler(QueueHandler(args['log_queue']))
+    
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+
+    if os.path.isfile(csv_filename):
+        if args['overwrite']:
+            shutil.rmtree(save_dir)
+        else:
+            return f"{pos} {station}: Skipped (already exists - overwrite=False)."
+
+    os.makedirs(save_dir, exist_ok=True)
+    csvPr_gen = open(csv_filename, 'w')
+    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    predict_writer.writerow(['file_name', 
+                            'network',
+                            'station',
+                            'instrument_type',
+                            'station_lat',
+                            'station_lon',
+                            'station_elv',
+                            'p_arrival_time',
+                            'p_probability',
+                            's_arrival_time',
+                            's_probability'])  
+    csvPr_gen.flush()
+    
+    start_Predicting = time.time()
+    files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+    
+    if not files_list:
+        csvPr_gen.close()
+        return f"{pos} {station}: FAILED - No mSEED files found."
+    
+    try:
+        # Use SeisBench preprocessing
+        stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
+    except Exception as e:
+        csvPr_gen.close()
+        return f"{pos} {station}: FAILED reading mSEED: {str(e)}"
+
+    try:
+        # Get picks from SeisBench model
+        # Use ray.get with a timeout or just normally if we fixed the CPU deadlock
+        classify_output = ray.get(model_actor.classify.remote(
+            stream3c,
+            P_threshold=args.get('P_threshold', 0.3),
+            S_threshold=args.get('S_threshold', 0.3),
+            Detection_threshold=args.get('Detection_threshold', 0.3),
+            strict=False,
+            flexible_horizontal_components=True
+        ))
+        
+        # Extract metadata from stream
+        station_code = stream3c[0].stats.station if len(stream3c) > 0 else station
+        network_code = stream3c[0].stats.network if len(stream3c) > 0 else ""
+        # Try to get coordinates from stream metadata if available
+        station_lat = getattr(stream3c[0].stats, 'coordinates', {}).get('latitude', 0.0) if len(stream3c) > 0 else 0.0
+        station_lon = getattr(stream3c[0].stats, 'coordinates', {}).get('longitude', 0.0) if len(stream3c) > 0 else 0.0
+        station_elv = getattr(stream3c[0].stats, 'coordinates', {}).get('elevation', 0.0) if len(stream3c) > 0 else 0.0
+        
+        # Extract picks from ClassifyOutput
+        picks = classify_output.picks if hasattr(classify_output, 'picks') else []
+        
+        # Group picks by time to write to CSV
+        # SeisBench picks are individual. We'll group them if they are very close or just write them.
+        # To match EQCCT style, we'll try to find P and S pairs within a 10s window? 
+        # Actually, let's just write them as they come for now, or use a simple grouping.
+        
+        p_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'P']
+        s_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'S']
+        
+        # Simple pairing: for each P, find the first S that comes after it within 30s
+        used_s = set()
+        for p in p_picks:
+            # Use peak_time and peak_value instead of time and score
+            p_time = getattr(p, 'peak_time', None)
+            p_prob = getattr(p, 'peak_value', 0.0)
+            
+            if p_time is None:
+                continue
+            
+            match_s = None
+            for s in s_picks:
+                s_time = getattr(s, 'peak_time', None)
+                if s not in used_s and s_time and 0 < (s_time - p_time) < 30:
+                    match_s = s
+                    used_s.add(s)
+                    break
+            
+            s_time_str = match_s.peak_time.strftime('%Y-%m-%d %H:%M:%S.%f') if match_s and hasattr(match_s, 'peak_time') else ''
+            s_prob_str = f"{match_s.peak_value:.6f}" if match_s and hasattr(match_s, 'peak_value') else ''
+            
+            predict_writer.writerow([
+                station_code,
+                network_code,
+                station_code,
+                0,  # instrument_type
+                station_lat,
+                station_lon,
+                station_elv,
+                p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                f"{p_prob:.6f}",
+                s_time_str,
+                s_prob_str
+            ])
+            
+        # Write remaining S picks
+        for s in s_picks:
+            if s not in used_s:
+                s_time = getattr(s, 'peak_time', None)
+                s_prob = getattr(s, 'peak_value', 0.0)
+                if s_time:
+                    predict_writer.writerow([
+                        station_code,
+                        network_code,
+                        station_code,
+                        0,  # instrument_type
+                        station_lat,
+                        station_lon,
+                        station_elv,
+                        '',
+                        '',
+                        s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                        f"{s_prob:.6f}"
+                    ])
+        
+        # If no picks found at all, write one row with station info
+        if not picks:
+            predict_writer.writerow([
+                station_code,
+                network_code,
+                station_code,
+                0,  # instrument_type
+                station_lat,
+                station_lon,
+                station_elv,
+                '', '', '', ''
+            ])
+            
+        csvPr_gen.flush()
+        csvPr_gen.close()
+        
+        end_Predicting = time.time()
+        delta = (end_Predicting - start_Predicting)
+        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
+
+    except Exception as exp:
+        if 'csvPr_gen' in locals():
+            csvPr_gen.close()
+        return f"{pos} {station}: FAILED the prediction. {exp}"
 
 
 @ray.remote
