@@ -637,8 +637,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
     # We set up the tf_environ again for the Raylets, who adopt their own import state and TF runtime when created. 
     # We want to ensure that they are configured properly so that they won't die (bad)
+    skip_tf = (model_type.lower() != 'eqcct')
     if not use_gpu: 
-        tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads, logger=logger)
+        tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads, logger=logger, skip_tf=skip_tf)
         # tf_environ(gpu_id=1, gpu_memory_limit_mb=gpu_memory_limit_mb, gpus_to_use=gpu_id, intra_threads=intra_threads, inter_threads=inter_threads)
 
 
@@ -724,7 +725,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Using GPUs: {gpu_id}")
             for gpu_idx in gpu_id:
                 logger.info(f"Creating SeisBenchModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM requirement...")
-                actor = SeisBenchModelActor.options(num_gpus=1, num_cpus=1).remote(
+                actor = SeisBenchModelActor.options(num_gpus=1, num_cpus=0).remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
                     gpus_to_use=[gpu_idx],
@@ -759,7 +760,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Using GPUs: {gpu_id}")
             for gpu_idx in gpu_id: # gpu_id is a list of GPU IDs and gpu_idx is the current GPU ID in the loop 
                 logger.info(f"Creating ModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
-                actor = ModelActor.options(num_gpus=1, num_cpus=1).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
+                actor = ModelActor.options(num_gpus=1, num_cpus=0).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
                 # Wait for __init__ to complete and raise if error
                 try:
                     ray.get(actor.ready.remote())
@@ -1129,23 +1130,29 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         # Simple pairing: for each P, find the first S that comes after it within 30s
         used_s = set()
         for p in p_picks:
-            # Use peak_time and peak_value instead of time and score
-            p_time = getattr(p, 'peak_time', None)
-            p_prob = getattr(p, 'peak_value', 0.0)
+            # Robust attribute extraction for SeisBench Pick objects
+            p_time = getattr(p, 'peak_time', getattr(p, 'start_time', getattr(p, 'time', None)))
+            p_prob = getattr(p, 'peak_value', getattr(p, 'score', getattr(p, 'value', 0.0)))
             
             if p_time is None:
                 continue
             
             match_s = None
             for s in s_picks:
-                s_time = getattr(s, 'peak_time', None)
+                s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
                 if s not in used_s and s_time and 0 < (s_time - p_time) < 30:
                     match_s = s
                     used_s.add(s)
                     break
             
-            s_time_str = match_s.peak_time.strftime('%Y-%m-%d %H:%M:%S.%f') if match_s and hasattr(match_s, 'peak_time') else ''
-            s_prob_str = f"{match_s.peak_value:.6f}" if match_s and hasattr(match_s, 'peak_value') else ''
+            if match_s:
+                ms_time = getattr(match_s, 'peak_time', getattr(match_s, 'start_time', getattr(match_s, 'time', None)))
+                ms_prob = getattr(match_s, 'peak_value', getattr(match_s, 'score', getattr(match_s, 'value', 0.0)))
+                s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
+                s_prob_str = f"{ms_prob:.6f}"
+            else:
+                s_time_str = ''
+                s_prob_str = ''
             
             predict_writer.writerow([
                 station_code,
@@ -1164,8 +1171,8 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         # Write remaining S picks
         for s in s_picks:
             if s not in used_s:
-                s_time = getattr(s, 'peak_time', None)
-                s_prob = getattr(s, 'peak_value', 0.0)
+                s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
+                s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
                 if s_time:
                     predict_writer.writerow([
                         station_code,

@@ -519,7 +519,7 @@ If it is a CPU, the CUDA_DEVICE_ORDER is configured for a CPU; Intra/inter paral
 If a GPU, the CUDA_DEVICE_ORDER is set for a GPU, as well as intra/inter threads, and we configure that GPU to only 
 use up to a limited number of vram (vram_limit_mb), which we need for the trials.
 """
-def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True, logger=None):
+def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None, inter_threads=None, log_device=True, logger=None, skip_tf=False):
     """
     Configure TensorFlow to use fixed VRAM slices per visible GPU.
     Call this ONCE per Ray actor, BEFORE building/loading any TF model.
@@ -547,6 +547,10 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
         logger.info(f"GPU enabled. Visible GPU IDs: {gpus_to_use}")
     else:
         logger.info(f"GPU visibility left to environment (Ray). CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+
+    if skip_tf:
+        logger.info("Skipping framework-specific initialization in the driver process.")
+        return
 
     # 1) Now import TF (it will honor visibility)
     import tensorflow as tf

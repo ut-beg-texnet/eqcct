@@ -192,6 +192,7 @@ class RunEQCCTPro():
     def configure_cpu(self): 
         # We need to configure the tf_environ for the CPU configuration that is being inputted
         self.logger.info(f"Running EQCCT over Requested MSeed Files using CPU(s)...")
+        skip_tf = (self.model_type != 'eqcct')
         if self.best_usecase_config:
             # We use the best usecase configuration that was found using EvaluateSystem
             result = find_optimal_configuration_cpu(best_overall_usecase=True, eval_sys_results_dir=self.csv_dir)
@@ -202,14 +203,18 @@ class RunEQCCTPro():
             cpus_to_use, num_concurrent_predictions, intra, inter, station_count = result
             self.logger.info("")
             self.logger.info(f"Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, and {inter} Inter Threads...")
-            tf_environ(gpu_id=-1, intra_threads=intra, inter_threads=inter, logger=self.logger)
+            tf_environ(gpu_id=-1, intra_threads=intra, inter_threads=inter, logger=self.logger, skip_tf=skip_tf)
         else:
             # We pass the requested parameters to the tf_environ 
-            tf_environ(gpu_id=-1, intra_threads=self.intra_threads, inter_threads=self.inter_threads, logger=self.logger) 
+            tf_environ(gpu_id=-1, intra_threads=self.intra_threads, inter_threads=self.inter_threads, logger=self.logger, skip_tf=skip_tf) 
             
     def configure_gpu(self):
         # We need to configure the tf_environ for the GPU configuration that is being inputted
         self.logger.info(f"Running EQCCT over Requested MSeed Files using GPU(s)...")
+        # In the main process (driver), we only set environment variables. 
+        # We ALWAYS skip TensorFlow initialization here because the main process doesn't run models.
+        # This avoids confusing "No GPUs visible" messages if the driver's environment differs from workers.
+        skip_tf = True 
         if self.best_usecase_config: 
             result = find_optimal_configuration_gpu(True, self.csv_dir)
             if result is None:
@@ -220,12 +225,12 @@ class RunEQCCTPro():
             self.logger.info("")
             cpus_to_use, num_concurrent_predictions, intra, inter, gpus, vram_mb, station_count = result # Unpack values only if result is valid
             self.logger.info(f"Using {cpus_to_use} CPUs, {num_concurrent_predictions} Conc. Predictions, {intra} Intra Threads, {inter} Inter Threads, {gpus} GPU IDs, and {vram_mb} MB VRAM per Task...")
-            tf_environ(gpu_id=1, vram_limit_mb=vram_mb, gpus_to_use=gpus, intra_threads=intra, inter_threads=inter, logger=self.logger)
+            tf_environ(gpu_id=1, vram_limit_mb=vram_mb, gpus_to_use=gpus, intra_threads=intra, inter_threads=inter, logger=self.logger, skip_tf=skip_tf)
         
         else: 
             self.logger.info("")
             self.logger.info(f"User requested to use GPU(s): {self.selected_gpus} with {self.vram_mb} MB of VRAM per Raylet (intra-op threads = {self.intra_threads}, inter-op threads = {self.inter_threads})") # Use the selected GPUs 
-            tf_environ(gpu_id=1, vram_limit_mb=self.vram_mb, gpus_to_use=self.selected_gpus, intra_threads=self.intra_threads, inter_threads=self.inter_threads, logger=self.logger)
+            tf_environ(gpu_id=1, vram_limit_mb=self.vram_mb, gpus_to_use=self.selected_gpus, intra_threads=self.intra_threads, inter_threads=self.inter_threads, logger=self.logger, skip_tf=skip_tf)
     
     def eqcctpro_parallelization(self):
         if self.specific_stations is None: # We check if the station dirs are consistent, if not, exit
