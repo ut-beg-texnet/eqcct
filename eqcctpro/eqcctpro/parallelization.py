@@ -786,7 +786,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     start_time = time.time() 
     model_type_lower = model_type.lower() if model_type else 'eqcct'
     if model_type_lower == 'seisbench':
-        logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model}) -------")
+        logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) -------")
     else:
         logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
 
@@ -868,6 +868,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
         else:
             timechunk_length_min = None
 
+        # Determine model name for logging
+        if model_type_lower == 'seisbench':
+            model_used = f"{seisbench_parent_model}/{seisbench_child_model}"
+        else:
+            model_used = "eqcct"
+
         # To-Do: Add column for CPU IDs 
         trial_data = {
             "Trial Number": None,  # Will be auto-filled by append_trial_row
@@ -884,6 +890,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
             "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
             "Total Run time for Picker (s)": round(end_time - start_time, 6),
+            "Model Used": model_used,
             "Trial Success": "",
             "Error Message": str(""),
         }
@@ -973,12 +980,10 @@ class SeisBenchModelActor:
             raise ImportError("PyTorch (torch) is not installed. Please install it to use SeisBench models.")
 
         if use_gpu:
-            if gpus_to_use and len(gpus_to_use) > 0:
-                device_id = gpus_to_use[0]
-                self.device = torch.device(f'cuda:{device_id}')
-            else:
-                self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-            self.logger.info(f"Using device: {self.device}")
+            # When using Ray with num_gpus=1, the assigned GPU is always visible as cuda:0
+            # regardless of its physical ID (0, 1, etc.) because Ray sets CUDA_VISIBLE_DEVICES.
+            self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+            self.logger.info(f"Using device: {self.device} (mapped by Ray from physical {gpus_to_use})")
         else:
             self.device = torch.device('cpu')
             self.logger.info("Using CPU device")

@@ -35,21 +35,21 @@ class RunEQCCTPro():
                 p_model_filepath: str = None, 
                 s_model_filepath: str = None, 
                 number_of_concurrent_station_predictions: int = None,
-                number_of_concurrent_timechunk_predictions: int = None, 
+                number_of_concurrent_timechunk_predictions: int = 1, 
                 intra_threads: int = 1, 
                 inter_threads: int = 1, 
                 P_threshold: float = 0.001, 
                 S_threshold: float = 0.02,
                 specific_stations: str = None,
                 csv_dir: str = None,
-                best_usecase_config: bool = None,
+                best_usecase_config: bool = False,
                 vram_mb: float = None,
                 selected_gpus: list = None,
                 cpu_id_list: list = [1],
                 start_time:str = None, 
                 end_time:str = None, 
-                timechunk_dt:int = None,
-                waveform_overlap:int = None,
+                timechunk_dt:int = 1,
+                waveform_overlap:int = 0,
                 tmp_dir:str = None,
                 # SeisBench model parameters
                 model_type: str = 'eqcct',  # 'eqcct' or 'seisbench'
@@ -339,8 +339,8 @@ class EvaluateSystem():
                  output_dir: str,
                  log_filepath: str,
                  csv_dir: str, 
-                 p_model_filepath: str, 
-                 s_model_filepath: str, 
+                 p_model_filepath: str = None, 
+                 s_model_filepath: str = None, 
                  P_threshold: float = 0.001, 
                  S_threshold: float = 0.02, 
                  intra_threads: int = 1,
@@ -359,8 +359,8 @@ class EvaluateSystem():
                  start_time:str = None, 
                  end_time:str = None, 
                  conc_timechunk_tasks_step_size: int = 1, 
-                 timechunk_dt:int = None,
-                 waveform_overlap:int = None,
+                 timechunk_dt:int = 1,
+                 waveform_overlap:int = 0,
                  tmp_dir:str = None,
                  # SeisBench model parameters
                  model_type: str = 'eqcct',  # 'eqcct' or 'seisbench'
@@ -532,7 +532,7 @@ class EvaluateSystem():
         tasks = [[f"({i+1}/{len(self.times_list)})", f"{self.times_list[i][0].strftime(format='%Y%m%dT%H%M%SZ')}_{self.times_list[i][1].strftime(format='%Y%m%dT%H%M%SZ')}"] for i in range((len(self.times_list)))]
         self.tasks_picker = tasks
 
-    def _trial_key(self, *, num_cpus: int, stations: int, predictions: int, gpu_memory_limit_mb, timechunks: int, gpus: list = None) -> str:
+    def _trial_key(self, *, num_cpus: int, stations: int, predictions: int, gpu_memory_limit_mb, timechunks: int, model: str, gpus: list = None) -> str:
         # Use provided gpus parameter if available, otherwise fall back to self.selected_gpus
         if gpus is not None:
             gpus_to_use = gpus
@@ -540,7 +540,7 @@ class EvaluateSystem():
             gpus_to_use = self.selected_gpus if self.selected_gpus is not None else []
         gpus_norm = tuple(sorted(int(x) for x in gpus_to_use))
         vram_norm = int(round(float(gpu_memory_limit_mb))) if gpu_memory_limit_mb not in ("", None) else ""
-        return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|vram={vram_norm}"
+        return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|vram={vram_norm}|model={model}"
         
     def _load_existing_trial_keys(self, csv_path: str) -> set[str]:
         if not os.path.exists(csv_path):
@@ -561,8 +561,11 @@ class EvaluateSystem():
                 vram_mb = float(vram) if vram not in ("", None) else ""
                 # Parse GPUs from this specific row (don't overwrite self.selected_gpus)
                 row_gpus = _parse_gpus_field(row.get("GPUs Used")) or []
-                # Pass the row's GPUs directly to _trial_key
-                keys.add(self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, gpu_memory_limit_mb=vram_mb, timechunks=timechunks, gpus=row_gpus))
+                # Extract model info
+                model = row.get("Model Used", "eqcct") # Default to eqcct for legacy rows
+                # Pass the row's info directly to _trial_key
+                keys.add(self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, 
+                                       gpu_memory_limit_mb=vram_mb, timechunks=timechunks, model=model, gpus=row_gpus))
             except Exception:
                 continue
         return keys
@@ -621,23 +624,34 @@ class EvaluateSystem():
                 # sets are a set of multiple items stored in a single variable 
                 # unchangable after being set, cannot have duplicates and is unordered
                 timechunks_list = sorted(list(set(timechunks_list))) 
+                # Determine model name for trial key
+                if self.model_type == 'seisbench':
+                    trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
+                else:
+                    trial_model = "eqcct"
+
                 for timechunks in timechunks_list:
-                    tested_concurrency = set() # Rest for each cpu / timechunk
+                    tested_concurrency = set() # Reset for each cpu / timechunk configuration
                     for num_stations in self.stations2use_list: 
-                        concurrent_predictions_list = generate_station_list(self.min_conc_stations, num_stations, self.conc_station_tasks_step_size)
-                        # We do this so that we don't repeat concurrent prediction tests 
-                        # Because a number of concurrent predictions running can be equivilated to the number of total stations that need to be processed
-                        # There is no need to duplicate more tests that will be doing the same amount of concurrent testing for a different number of total stations
-                        new_concurrent_values = [x for x in concurrent_predictions_list if x not in tested_concurrency and x <= num_stations]
+                        # Use a 20% step size for concurrency testing as requested
+                        # This tests 20%, 40%, 60%, 80%, and 100% of the current total stations
+                        step = max(1, int(num_stations * 0.2))
+                        concurrent_predictions_list = sorted(list(set(range(step, num_stations + 1, step))))
+                        
+                        # Efficiency optimization: only test concurrency values we haven't seen yet 
+                        # for this CPU/Timechunk combo to save compute time. 
+                        new_concurrent_values = [x for x in concurrent_predictions_list if x not in tested_concurrency]
                         if not new_concurrent_values:
                             continue  # All concurrency values already tested
                         for num_concurrent_predictions in new_concurrent_values:
+                            tested_concurrency.add(num_concurrent_predictions)
                             key = self._trial_key(
                                 num_cpus=len(cpus_to_use),
                                 stations=num_stations,
                                 predictions=num_concurrent_predictions,
                                 gpu_memory_limit_mb="",   # CPU eval has no per-task VRAM cap
                                 timechunks=timechunks,
+                                model=trial_model
                             )
                             if key in planned_keys:
                                 self.logger.info(f"[SKIP] Already tested: {key}")
@@ -892,9 +906,22 @@ class EvaluateSystem():
                 self.logger.info(f"Ray Successfully Initialized with {len(gpus_to_use)} GPU(s) and {len(cpus_to_use)} CPU(s) ({list(cpus_to_use)} CPU Affinity Binding).")
                 self.logger.info(f"Trials will evalute GPU(s) performance against Iterative Total Station Tasks ({self.stations2use_list}) with Varying Concurrent Predictions.")
                 self.logger.info("")
+                
+                # Efficiency optimization: track tested configurations for this GPU/CPU combo
+                tested_gpu_configs = set() 
+
+                # Determine model name for trial key
+                if self.model_type == 'seisbench':
+                    trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
+                else:
+                    trial_model = "eqcct"
+
                 for stations in self.stations2use_list:
-                    concurrent_predictions_list = generate_station_list(self.min_conc_stations, stations, self.conc_station_tasks_step_size)
-                    self.logger.info(f"Evaluating GPU(s) against {stations} TOTAL STATION(s) with ITERATIVE CONCURRENT STATION PREDICTIONS: {concurrent_predictions_list}")
+                    # Use a 20% step size for concurrency testing as requested
+                    step = max(1, int(stations * 0.2))
+                    concurrent_predictions_list = sorted(list(set(range(step, stations + 1, step))))
+                    
+                    self.logger.info(f"Evaluating GPU(s) against {stations} TOTAL STATION(s) with 20% STEP CONCURRENT STATION PREDICTIONS: {concurrent_predictions_list}")
                     for predictions in concurrent_predictions_list:
                         vram_per_task_mb = free_vram_mb / predictions
                         step_size = vram_per_task_mb * 0.2
@@ -912,7 +939,6 @@ class EvaluateSystem():
                             min_vram = 3000.0  # EQCCT minimum
                             
                         vram_steps = vram_steps[vram_steps >= min_vram] 
-                        # self.logger.info(f"Testing the above TOTAL STATIONS and PARALLELIZATION CONDITIONS using the following iterative VRAM limitations (MB): {vram_steps.tolist()}")
                         
                         # We are defining the hard upper limit on how much VRAM (GPU memory) TensorFlow is allowed to use inside each ModelActor process
                         # This includes 1) Loading the model weights into GPU memory during init and 2) Usage of the ModelActor (predictions, etc.) 
@@ -922,12 +948,19 @@ class EvaluateSystem():
                         for gpu_memory_limit_mb in vram_steps: 
                             gpu_memory_limit_mb = int(round(float(gpu_memory_limit_mb)))
 
+                            # Efficiency check: avoid redundant tests for same (concurrency, vram)
+                            config_key = (predictions, gpu_memory_limit_mb)
+                            if config_key in tested_gpu_configs:
+                                continue
+                            tested_gpu_configs.add(config_key)
+
                             key = self._trial_key(
                                 num_cpus=len(cpus_to_use),
                                 stations=stations,
                                 predictions=predictions,
                                 gpu_memory_limit_mb=gpu_memory_limit_mb,
                                 timechunks=1,  # your GPU eval is explicitly "one timechunk at a time"
+                                model=trial_model,
                                 gpus=gpus_to_use,  # Pass the actual GPUs being used in this iteration
                             )
                             if key in planned_keys:
@@ -1195,9 +1228,11 @@ class OptimalCPUConfigurationFinder:
         inter_threads = best_config_dict.get("Inter-parallelism Threads")
         num_stations = best_config_dict.get("Number of Stations Used")
         total_runtime = best_config_dict.get("Total Run time for Picker (s)")
+        model_used = best_config_dict.get("Model Used")
         
         self.logger.info("")
         self.logger.info(f"------- Finding the Best Overall CPU Usecase Configuration Based on Available Trial Data in {self.eval_sys_results_dir} -------")
+        self.logger.info(f"Model Used: {model_used}")
         self.logger.info(f"CPU(s): {num_cpus}")
         self.logger.info(f"Intra-parallelism Threads: {intra_threads}")
         self.logger.info(f"Inter-parallelism Threads: {inter_threads}")
@@ -1242,6 +1277,7 @@ class OptimalCPUConfigurationFinder:
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
 
         self.logger.info(f"------- Best CPU-EQCCTPro Configuration for Requested Input Parameters Based on the available Trial Data in {self.eval_sys_results_dir} -------")
+        self.logger.info(f"Model Used: {best_config.get('Model Used')}")
         self.logger.info(f"CPU(s): {cpu}")
         self.logger.info(f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}")
         self.logger.info(f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}")
@@ -1314,10 +1350,12 @@ class OptimalGPUConfigurationFinder:
         num_stations = row.get("Number of Stations Used")
         total_runtime = row.get("Total Run time for Picker (s)")
         vram_used = row.get("Inference Actor Memory Limit (MB)")
+        model_used = row.get("Model Used")
 
         self.logger.info("")
         self.logger.info(f"------- Finding the Best Overall GPU Usecase Configuration Based on Available Trial Data in {self.eval_sys_results_dir} -------")
         self.logger.info("")
+        self.logger.info(f"Model Used: {model_used}")
         self.logger.info(f"CPU(s): {num_cpus}")
         self.logger.info(f"GPU ID(s): {num_gpus_list}")
         self.logger.info(f"Concurrent Predictions: {num_concurrent}")

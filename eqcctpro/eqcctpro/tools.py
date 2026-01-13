@@ -34,6 +34,7 @@ CANONICAL_CSV_HEADER = [
     "Length of Timechunk (min)",
     "Number of Concurrent Station Tasks",
     "Total Run time for Picker (s)",
+    "Model Used",
     "Trial Success",
     "Error Message",
 ]
@@ -626,9 +627,9 @@ def find_optimal_configurations_cpu(df):
     df_cleaned = df.dropna(subset=["Number of Stations Used", "Number of CPUs Allocated for Ray to Use", 
                                 "Concurrent Timechunks Used", "Number of Concurrent Station Tasks", "Total Run time for Picker (s)"])
 
-    # Find the best concurrent prediction configuration for each combination of (Stations, Timechunks, CPUs)
+    # Find the best concurrent prediction configuration for each combination of (Stations, Timechunks, CPUs, Model)
     optimal_concurrent_preds = df_cleaned.loc[
-        df_cleaned.groupby(["Number of Stations Used", "Concurrent Timechunks Used", "Number of CPUs Allocated for Ray to Use"])
+        df_cleaned.groupby(["Number of Stations Used", "Concurrent Timechunks Used", "Number of CPUs Allocated for Ray to Use", "Model Used"])
         ["Total Run time for Picker (s)"].idxmin()
     ]
 
@@ -659,6 +660,7 @@ def find_optimal_configurations_cpu(df):
         "Intra-parallelism Threads": best_overall_config["Intra-parallelism Threads"],
         "Inter-parallelism Threads": best_overall_config["Inter-parallelism Threads"],
         "Total Run time for Picker (s)": best_overall_config["Total Run time for Picker (s)"],
+        "Model Used": best_overall_config["Model Used"],
         "Trial Success": best_overall_config["Trial Success"],
         "Error Message": best_overall_config["Error Message"],
     }
@@ -698,12 +700,13 @@ def find_optimal_configurations_gpu(df):
         # Nothing to optimize; return empty frames shaped like callers expect
         return df_cleaned, df_cleaned
 
-    # 4) Fastest runtime per (Stations, CPUs, GPUs, VRAM) bucket
+    # 4) Fastest runtime per (Stations, CPUs, GPUs, VRAM, Model) bucket
     grp_cols = [
         "Number of Stations Used",
         "Number of CPUs Allocated for Ray to Use",
         "GPUs Used (key)",
         "Inference Actor Memory Limit (MB)",
+        "Model Used",
     ]
     idx = (
         df_cleaned
@@ -747,6 +750,7 @@ def find_optimal_configurations_gpu(df):
         "Intra-parallelism Threads": best_overall_config["Intra-parallelism Threads"],
         "Inter-parallelism Threads": best_overall_config["Inter-parallelism Threads"],
         "Total Run time for Picker (s)": best_overall_config["Total Run time for Picker (s)"],
+        "Model Used": best_overall_config["Model Used"],
         "Trial Success": best_overall_config["Trial Success"],
         "Error Message": best_overall_config["Error Message"],
     }
@@ -788,9 +792,11 @@ def find_optimal_configuration_cpu(best_overall_usecase:bool, eval_sys_results_d
         inter_threads = best_config_dict.get("Inter-parallelism Threads")
         num_stations = best_config_dict.get("Number of Stations Used")
         total_runtime = best_config_dict.get("Total Run time for Picker (s)")
+        model_used = best_config_dict.get("Model Used")
         
         print("\nBest Overall Usecase Configuration Based on Trial Data:")
-        print(f"CPU: {num_cpus}\n"
+        print(f"Model Used: {model_used}\n"
+        f"CPU: {num_cpus}\n"
         f"Intra-parallelism Threads: {intra_threads}\n"
         f"Inter-parallelism Threads: {inter_threads}\n"
         f"Waveform Timespace: {waveform_timespace}"
@@ -836,7 +842,8 @@ def find_optimal_configuration_cpu(best_overall_usecase:bool, eval_sys_results_d
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
         
         print("\nBest Configuration for Requested Input Parameters Based on Trial Data:")
-        print(f"CPU: {cpu}\nConcurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
+        print(f"Model Used: {best_config.get('Model Used')}\n"
+            f"CPU: {cpu}\nConcurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
             f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
             f"Inter-parallelism Threads: {best_config['Inter-parallelism Threads']}\n"
             f"Stations: {station_count}\nTotal Runtime (s): {best_config['Total Run time for Picker (s)']}")
@@ -881,9 +888,11 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
         vram_used = best_config_dict.get("Inference Actor Memory Limit (MB)")
         num_gpus_st = best_config_dict.get("GPUs Used")
         num_gpus = ast.literal_eval(num_gpus_st)
+        model_used = best_config_dict.get("Model Used")
         
         print("\nBest Overall Usecase Configuration Based on Trial Data:")
-        print(f"CPU: {num_cpus}\n"
+        print(f"Model Used: {model_used}\n"
+              f"CPU: {num_cpus}\n"
               f"GPU ID(s): {num_gpus}\n"
               f"Concurrent Predictions: {num_concurrent_stations}\n"
               f"Intra-parallelism Threads: {intra_threads}\n"
@@ -939,7 +948,8 @@ def find_optimal_configuration_gpu(best_overall_usecase: bool, eval_sys_results_
         best_config = filtered_df.nsmallest(1, "Total Run time for Picker (s)").iloc[0]
         
         print("\nBest Configuration for Requested Application Usecase Based on Trial Data:")
-        print(f"CPU: {num_cpus}\n"
+        print(f"Model Used: {best_config.get('Model Used')}\n"
+              f"CPU: {num_cpus}\n"
               f"GPU: {num_gpus}\n"
               f"Concurrent Predictions: {best_config['Number of Concurrent Station Tasks']}\n"
               f"Intra-parallelism Threads: {best_config['Intra-parallelism Threads']}\n"
