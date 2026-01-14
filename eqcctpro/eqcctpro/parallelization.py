@@ -750,33 +750,33 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Created a 1 CPU-sized SeisBenchModelActor")
     else:
         # Create EQCCT model actors (original logic)
-        if use_gpu:
-            # Allocate more VRAM to model actors (they need to hold the full model)
-            # Reserve ~2-3GB per model actor, adjust based on your model size
-            model_vram_mb = max(gpu_memory_limit_mb, 3000)  # At least VRAM or 3GB for EQCCT (subject to change) 
-            
-            # Create one model actor per GPU
-            model_actors = []
-            logger.info(f"Using GPUs: {gpu_id}")
-            for gpu_idx in gpu_id: # gpu_id is a list of GPU IDs and gpu_idx is the current GPU ID in the loop 
-                logger.info(f"Creating ModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
+    if use_gpu:
+        # Allocate more VRAM to model actors (they need to hold the full model)
+        # Reserve ~2-3GB per model actor, adjust based on your model size
+        model_vram_mb = max(gpu_memory_limit_mb, 3000)  # At least VRAM or 3GB for EQCCT (subject to change) 
+        
+        # Create one model actor per GPU
+        model_actors = []
+        logger.info(f"Using GPUs: {gpu_id}")
+        for gpu_idx in gpu_id: # gpu_id is a list of GPU IDs and gpu_idx is the current GPU ID in the loop 
+            logger.info(f"Creating ModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
                 actor = ModelActor.options(num_gpus=1, num_cpus=0).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
-                # Wait for __init__ to complete and raise if error
-                try:
-                    ray.get(actor.ready.remote())
-                except Exception as e:
-                    logger.error(f"Failed to create ModelActor on GPU {gpu_idx}: {e}")
-                    raise
-                logger.info(f"ModelActor created on GPU {gpu_idx}.")
-                model_actors.append(actor)
-                
-            logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s).") 
-            # Using CUDA_VISIBLE_DEVICES is not a reliable way to report which physical GPU is being used bc Ray can overwrite, clear, or remap the assigned GPU so that each worker sees them as local indices (often starting from 0)
-            logger.info(f"[ModelActor] Model successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
-        else:
-            # Create CPU model actor
-            model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)]
-            logger.info(f"Created a 1 CPU-sized ModelActor") 
+            # Wait for __init__ to complete and raise if error
+            try:
+                ray.get(actor.ready.remote())
+            except Exception as e:
+                logger.error(f"Failed to create ModelActor on GPU {gpu_idx}: {e}")
+                raise
+            logger.info(f"ModelActor created on GPU {gpu_idx}.")
+            model_actors.append(actor)
+            
+        logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s).") 
+        # Using CUDA_VISIBLE_DEVICES is not a reliable way to report which physical GPU is being used bc Ray can overwrite, clear, or remap the assigned GPU so that each worker sees them as local indices (often starting from 0)
+        logger.info(f"[ModelActor] Model successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
+    else:
+        # Create CPU model actor
+        model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)]
+        logger.info(f"Created a 1 CPU-sized ModelActor") 
 
     # Submit tasks to ray in a queue
     tasks_queue = []
@@ -788,7 +788,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     if model_type_lower == 'seisbench':
         logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) -------")
     else:
-        logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
+    logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
 
     if timechunk_id is None:
         # derive from the path if caller forgot to pass it
@@ -824,10 +824,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                             tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
                     else:
                         # EQCCT models use parallel_predict (original)
-                        if use_gpu is False:
-                            tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
-                        elif use_gpu is True:
-                            # Don't allocate GPUs to workers, only to model actors
+                    if use_gpu is False:
+                        tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
+                    elif use_gpu is True:
+                        # Don't allocate GPUs to workers, only to model actors
                             # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
                             tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
                     break
