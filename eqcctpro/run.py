@@ -179,28 +179,28 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_gpu.evaluate()
 
 # --- Example H: Evaluate System capability using SeisBench Model (GPU) ---
-eval_seisbench_gpu = EvaluateSystem(
-    eval_mode='gpu',
-    model_type='seisbench',
-    seisbench_parent_model='EQTransformer',
-    seisbench_child_model='original_nonconservative',
-    input_dir=input_mseed_directory_path,
-    output_dir=output_pick_directory_path,
-    log_filepath=log_file_path,
-    csv_dir=os.path.join(csv_filepath, 'eval_gpu_seisbench'),
-    selected_gpus=[0, 1],
-    max_vram_mb=40000,
-    cpu_id_list=range(113,128),
-    min_cpu_amount=5,
-    cpu_test_step_size=5,
-    stations2use=100,
-    min_conc_stations=1,
-    conc_station_tasks_step_size=5,
-    tmp_dir=tmp_dir,
-    start_time='2024-12-15 12:00:00',
-    end_time='2024-12-15 12:01:00'
-)
-eval_seisbench_gpu.evaluate()
+# eval_seisbench_gpu = EvaluateSystem(
+#     eval_mode='gpu',
+#     model_type='seisbench',
+#     seisbench_parent_model='EQTransformer',
+#     seisbench_child_model='original_nonconservative',
+#     input_dir=input_mseed_directory_path,
+#     output_dir=output_pick_directory_path,
+#     log_filepath=log_file_path,
+#     csv_dir=os.path.join(csv_filepath, 'eval_gpu_seisbench'),
+#     selected_gpus=[0, 1],
+#     max_vram_mb=40000,
+#     cpu_id_list=range(113,128),
+#     min_cpu_amount=5,
+#     cpu_test_step_size=5,
+#     stations2use=100,
+#     min_conc_stations=1,
+#     conc_station_tasks_step_size=5,
+#     tmp_dir=tmp_dir,
+#     start_time='2024-12-15 12:00:00',
+#     end_time='2024-12-15 12:01:00'
+# )
+# eval_seisbench_gpu.evaluate()
 
 
 # =============================================================================
