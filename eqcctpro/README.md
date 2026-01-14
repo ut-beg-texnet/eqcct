@@ -265,6 +265,8 @@ best_config = finder.find_best_overall_usecase()
 specific_config = finder.find_optimal_for(num_cpus=4, gpu_list=[0], station_count=50)
 ```
 
+There are more examples on how to use EQCCTPro using different SeisBench and EQCCT models in `run.py` file.
+
 ---
 
 
