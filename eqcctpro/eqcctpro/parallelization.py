@@ -25,21 +25,34 @@ from obspy import UTCDateTime
 from datetime import datetime, timedelta 
 from logging.handlers import QueueHandler
 
-# Dictionary of VRAM requirements (MB) for SeisBench models
-# Format: (parent_model_name, child_model_name): vram_mb
-# This will be populated with values provided by the user later
+# VRAM requirements (MB) based on empirical testing
+CUDA_LIBRARY_OVERHEAD_MB = 432.0  # Constant overhead for CUDA context/libraries
+VRAM_BUFFER_MB = 128.0           # Safety buffer for activations and processing
+
+# Net Model Usage (excluding overhead and buffer)
 SEISBENCH_MODEL_VRAM_MB = {
-    # Example entries:
-    ('PhaseNet', 'original'): 2000.0,
-    ('EQTransformer', 'stead'): 2500.0,
+    ('PhaseNet', 'original'): 74.0,
+    ('PhaseNet', 'stead'): 4.0,
+    ('PhaseNet', 'ethz'): 2.0,
+    ('PhaseNet', 'scedc'): 2.0,
+    ('PhaseNet', 'pisdl'): 2.0,
+    ('PhaseNet', 'instance'): 2.0,
+    ('EQTransformer', 'original'): 30.0,
+    ('EQTransformer', 'original_nonconservative'): 4.0,
+    ('EQTransformer', 'stead'): 20.0,
+    ('EQTransformer', 'ethz'): 20.0,
+    ('EQTransformer', 'scedc'): 20.0,
+    ('EQTransformer', 'instance'): 20.0,
+    ('GPD', 'original'): 72.0,
 }
 
-def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=2000.0):
+def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=500.0):
     """
-    Get VRAM requirement for a SeisBench model.
+    Get VRAM requirement for a SeisBench model including overhead and buffer.
     """
     key = (parent_model_name, child_model_name)
-    return SEISBENCH_MODEL_VRAM_MB.get(key, default_mb)
+    net_vram = SEISBENCH_MODEL_VRAM_MB.get(key, default_mb)
+    return net_vram + CUDA_LIBRARY_OVERHEAD_MB + VRAM_BUFFER_MB
 
 def parse_time_range(time_string):
     """

@@ -8,6 +8,7 @@ import ray
 import sys
 import ast
 import math
+import numpy as np
 import queue 
 import psutil
 import random
@@ -45,6 +46,7 @@ class RunEQCCTPro():
                 best_usecase_config: bool = False,
                 vram_mb: float = None,
                 selected_gpus: list = None,
+                gpu_vram_safety_cap: float = 0.95,
                 cpu_id_list: list = [1],
                 start_time:str = None, 
                 end_time:str = None, 
@@ -73,6 +75,7 @@ class RunEQCCTPro():
         self.csv_dir = csv_dir
         self.best_usecase_config = best_usecase_config
         self.vram_mb = vram_mb
+        self.gpu_vram_safety_cap = gpu_vram_safety_cap
         self.selected_gpus = selected_gpus if selected_gpus is not None else list_gpu_ids() # a list of the GPU IDs. If not provided, we use all available GPUs
         self.cpu_id_list = cpu_id_list 
         self.cpu_count = len(cpu_id_list)
@@ -123,13 +126,20 @@ class RunEQCCTPro():
         self.logger.info(f"------- Welcome to EQCCTPro -------")
         self.logger.info("")
 
-        # If the user passed a GPU but no valid VRAM, need to exit 
-        if self.use_gpu and not (isinstance(self.vram_mb, numbers.Real) and math.isfinite(self.vram_mb) and self.vram_mb > 0): 
-            self.logger.error(f"No numerical VRAM passed. Please provide vram_mb (MB per Raylet per GPU) as a positive real number. Exiting...")
-            sys.exit(1)
-
         # We need to ensure that the vram specified does not exceed the capabilities of the system, if not, we need to exit safely before it happens
         if self.use_gpu:
+            if self.vram_mb is None:
+                # Calculate automatic vram_mb per worker
+                # We take the total safe budget across GPUs and divide by total potential concurrent tasks
+                total_budget = self.calculate_vram() 
+                self.vram_mb = total_budget / (self.number_of_concurrent_station_predictions * self.number_of_concurrent_timechunk_predictions)
+                self.logger.info(f"vram_mb not provided. Automatically calculated per-worker budget: {self.vram_mb:.0f} MB")
+
+            # If the user passed a GPU but no valid VRAM (and calculation failed somehow), need to exit 
+            if not (isinstance(self.vram_mb, numbers.Real) and math.isfinite(self.vram_mb) and self.vram_mb > 0): 
+                self.logger.error(f"No numerical VRAM passed or calculated. Please provide vram_mb (MB per Raylet per GPU) as a positive real number. Exiting...")
+                sys.exit(1)
+
             # Determine model VRAM requirement based on model type
             if self.model_type == 'seisbench':
                 from .parallelization import get_seisbench_model_vram_mb
@@ -148,7 +158,7 @@ class RunEQCCTPro():
                 intended_workers=self.number_of_concurrent_station_predictions * self.number_of_concurrent_timechunk_predictions,
                 vram_mb=self.vram_mb,
                 model_vram_mb=model_vram_mb,
-                safety_cap=0.95,
+                safety_cap=self.gpu_vram_safety_cap,
                 eqcct_overhead_gb=0.0,
                 logger=self.logger)
     
@@ -331,6 +341,38 @@ class RunEQCCTPro():
             # Running parllelization
             self.eqcctpro_parallelization()
 
+    def calculate_vram(self):
+        """
+        Calculates the VRAM budget per GPU based on the safety cap and free VRAM.
+        Used for automatic calculation of vram_mb if not provided.
+        """
+        cap = float(self.gpu_vram_safety_cap)
+        if not (0.0 < cap <= 0.99):
+            raise ValueError(f"gpu_vram_safety_cap must be in (0, 0.99], got {cap}.")
+
+        gpus = self.selected_gpus if self.selected_gpus else list_gpu_ids()
+        if not gpus:
+            raise RuntimeError("No GPUs detected for VRAM calculation.")
+
+        per_gpu_budget_mb = []
+        for gid in gpus:
+            total_gb, free_gb = get_gpu_vram(gpu_index=gid)
+            total_mb = float(total_gb) * 1024.0
+            free_mb  = float(free_gb)  * 1024.0
+
+            # hard cap vs physical total, plus never exceed currently free memory
+            budget_mb = min(total_mb * cap, free_mb)
+            per_gpu_budget_mb.append(budget_mb)
+
+            self.logger.info(
+                f"GPU {gid}: total={total_gb:.2f} GB, free={free_gb:.2f} GB, "
+                f"budget={budget_mb/1024.0:.2f} GB (cap={cap:.2f})"
+            )
+
+        budget_mb_min = float(min(per_gpu_budget_mb))
+        # self.logger.info(f"Using per-GPU VRAM budget = {budget_mb_min:.0f} MB (min across selected GPUs).")
+        return budget_mb_min
+
 class EvaluateSystem(): 
     """Evaluate System class for running the evaluation system functions for multiple instances of the class"""
     def __init__(self,
@@ -396,7 +438,7 @@ class EvaluateSystem():
         self.min_cpu_amount = min_cpu_amount
         self.min_conc_stations = min_conc_stations # default is = 1 
         self.conc_station_tasks_step_size = conc_station_tasks_step_size # default is = 1 
-        self.stations2use_list = list(range(1, 11)) + list(range(15, 50, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
+        self.stations2use_list = list(range(1, 11)) + list(range(15, 105, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
         self.start_time = start_time
         self.end_time = end_time
         self.conc_timechunk_tasks_step_size = conc_timechunk_tasks_step_size
@@ -449,14 +491,17 @@ class EvaluateSystem():
         os.environ['TMP'] = self.home_tmp_dir
         self.logger.info(f"Successfully set up temp files to be stored at {self.home_tmp_dir}")
 
-        # We need to ensure that the vram specified does not exceed the capabilities of t  he system, if not, we need to exit safely before it happens
+        # Calculate these at the start to determine total potential concurrency
         self.chunk_time()
-        intended_workers = int(len(self.stations2use_list)) * int(len(self.times_list) // 2)
+        max_stations = max(self.stations2use_list) if self.stations2use_list else 1
+        max_timechunks = len(self.times_list) if self.times_list else 1
+        intended_workers = max_stations * max_timechunks
+
         if self.eval_mode == 'gpu':
             if not self.selected_gpus:
                 raise ValueError("selected_gpus must be set in GPU mode.")
-            self.chunk_time()
-            intended_workers = int(len(self.stations2use_list)) * int(len(self.times_list) // 2)
+            # Total potential workers across all GPUs
+            intended_workers = max_stations * max_timechunks
 
             # Determine model VRAM requirement based on model type
             if self.model_type == 'seisbench':
@@ -467,38 +512,34 @@ class EvaluateSystem():
                     default_mb=2000.0
                 )
             else:
-                model_vram_mb = 3000.0  # Default for EQCCT
+                model_vram_mb = 1500.0  # Default for EQCCT
 
             per_gpu_free_mb = [get_gpu_vram(gpu_index=g)[1] * 1024.0 for g in self.selected_gpus]  # free_gb -> MB
-            plan = evaluate_vram_capacity(
-                intended_workers=intended_workers,
-                vram_per_worker_mb=float(self.vram_mb),
-                per_gpu_free_mb=per_gpu_free_mb,
-                model_vram_mb=model_vram_mb,
-                safety_cap=self.gpu_vram_safety_cap,
-                eqcct_overhead_gb=1.1,
-            )
-            if not plan.ok_aggregate:
-                unit = plan.per_worker_mb + plan.overhead_mb
-                raise RuntimeError(
-                    f"Insufficient aggregate VRAM. Cap={plan.aggregate_cap_mb:.0f} MB, "
-                    f"Need={plan.aggregate_need_mb:.0f} MB (= {plan.model_vram_mb:.0f}×{len(self.selected_gpus)} + "
-                    f"{plan.intended_workers}×{unit:.0f})."
+            
+            # If vram_mb is None, we skip the initial capacity check here and let evaluate_gpu calculate it
+            if self.vram_mb is not None:
+                plan = evaluate_vram_capacity(
+                    intended_workers=intended_workers,
+                    vram_per_worker_mb=float(self.vram_mb),
+                    per_gpu_free_mb=per_gpu_free_mb,
+                    model_vram_mb=model_vram_mb,
+                    safety_cap=self.gpu_vram_safety_cap,
+                    eqcct_overhead_gb=1.0,
                 )
-            self.logger.info(
-                f"VRAM budget OK. Need {plan.aggregate_need_mb:.0f} MB ≤ Cap {plan.aggregate_cap_mb:.0f} MB "
-                f"across {len(self.selected_gpus)} GPU(s)."
-            )
-        
-    def _generate_stations_list(self):
-        """Generates station list"""
-        if self.station2use is None: 
-            return list(range(1, 11)) + list(range(15, 50, 5))
-        return generate_station_list(self.stations2use, self.starting_amount_of_stations, self.station_list_step_size)
-    
-    # def _prepare_environment(self):
-    #     """Removed 'output_dir' so that there is no conflicts in the save for a clean output return"""
-    #     remove_directory(self.output_dir)
+                if not plan.ok_aggregate:
+                    unit = plan.per_worker_mb + plan.overhead_mb
+                    self.logger.warning(
+                        f"Aggregate VRAM might be insufficient for the largest trials ({intended_workers} total tasks: {max_stations} stations * {max_timechunks} timechunks). "
+                        f"Cap={plan.aggregate_cap_mb:.0f} MB, Need={plan.aggregate_need_mb:.0f} MB. "
+                        f"The system will automatically lower concurrent predictions during evaluation to ensure testing reaches all station counts."
+                    )
+                else:
+                    self.logger.info(
+                        f"VRAM budget OK. Need {plan.aggregate_need_mb:.0f} MB ≤ Cap {plan.aggregate_cap_mb:.0f} MB "
+                        f"across {len(self.selected_gpus)} GPU(s) for up to {intended_workers} concurrent tasks ({max_stations} stations * {max_timechunks} timechunks)."
+                    )
+            else:
+                self.logger.info("vram_mb not provided. VRAM capacity will be calculated during evaluation based on safety cap.")
         
     def chunk_time(self):
         starttime = UTCDateTime(self.start_time) - (self.waveform_overlap * 60)
@@ -631,8 +672,8 @@ class EvaluateSystem():
                     trial_model = "eqcct"
 
                 for timechunks in timechunks_list:
-                    tested_concurrency = set() # Reset for each cpu / timechunk configuration
                     for num_stations in self.stations2use_list: 
+                        tested_concurrency = set() # Reset for each configuration
                         # Use a 20% step size for concurrency testing as requested
                         # This tests 20%, 40%, 60%, 80%, and 100% of the current total stations
                         step = max(1, int(num_stations * 0.2))
@@ -913,32 +954,77 @@ class EvaluateSystem():
                 # Determine model name for trial key
                 if self.model_type == 'seisbench':
                     trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
+                    from .parallelization import get_seisbench_model_vram_mb
+                    model_vram_mb = get_seisbench_model_vram_mb(
+                        self.seisbench_parent_model, 
+                        self.seisbench_child_model,
+                        default_mb=2000.0
+                    )
                 else:
                     trial_model = "eqcct"
+                    # EQCCT Net Model Usage: 1305.0 MB + CUDA Overhead: 431.31 MB + Buffer
+                    from .parallelization import CUDA_LIBRARY_OVERHEAD_MB
+                    model_vram_mb = 1305.0 + CUDA_LIBRARY_OVERHEAD_MB + 128.0 
+
+                # Calculate absolute maximum concurrent workers allowed by VRAM for this GPU/CPU setup
+                # Each concurrent prediction task uses minimal extra VRAM beyond the shared ModelActor
+                # Set overhead_mb to a more realistic 256MB for data transfer and buffers
+                overhead_mb = 256.0 
+                # Use TOTAL VRAM for calculation to ensure stable testing steps across restarts.
+                per_gpu_total_mb = [get_gpu_vram(gpu_index=g)[0] * 1024.0 for g in gpus_to_use]
+                
+                # We need to find the max 'predictions' such that at least one 'gpu_memory_limit_mb' fits.
+                # The smallest gpu_memory_limit_mb we test is 'min_vram'.
+                # Aggregate Capacity Check: model_vram_mb * num_gpus + predictions * (min_vram + overhead_mb) <= sum(per_gpu_cap)
+                aggregate_cap_mb = sum(per_gpu_total_mb) * self.gpu_vram_safety_cap
+                model_reserve_total = model_vram_mb * len(gpus_to_use)
+                available_for_workers = aggregate_cap_mb - model_reserve_total
+                
+                if available_for_workers <= 0:
+                    self.logger.warning(f"Insufficient VRAM on {len(gpus_to_use)} GPU(s) to even load the model reserve ({model_reserve_total:.0f} MB). Skipping this resource block.")
+                    ray.shutdown()
+                    continue
+
+                # Since ModelActors are shared across GPUs, we only reserve the model weights VRAM once per GPU (already in model_reserve_total).
+                # Each concurrent station task (worker) only needs overhead VRAM for data transfer/buffers.
+                max_total_predictions = int(available_for_workers // overhead_mb)
+                if max_total_predictions < 1:
+                    max_total_predictions = 1 # Always try at least one, if possible
+
+                self.logger.info(f"VRAM Capacity Analysis: Aggregate Cap={aggregate_cap_mb:.0f} MB | Model Reserve={model_reserve_total:.0f} MB | Max Concurrent Predictions={max_total_predictions}")
 
                 for stations in self.stations2use_list:
                     # Use a 20% step size for concurrency testing as requested
                     step = max(1, int(stations * 0.2))
                     concurrent_predictions_list = sorted(list(set(range(step, stations + 1, step))))
                     
-                    self.logger.info(f"Evaluating GPU(s) against {stations} TOTAL STATION(s) with 20% STEP CONCURRENT STATION PREDICTIONS: {concurrent_predictions_list}")
-                    for predictions in concurrent_predictions_list:
-                        vram_per_task_mb = free_vram_mb / predictions
+                    # Capping logic: If the list exceeds our calculated capacity, we trim it and ensure we at least try something that fits.
+                    valid_predictions = [p for p in concurrent_predictions_list if p <= max_total_predictions]
+                    
+                    if not valid_predictions and stations > 0:
+                        # If even the first step (20%) is too much, try just 1 prediction or the max possible
+                        if max_total_predictions >= 1:
+                            valid_predictions = [1]
+                            self.logger.info(f"Station count {stations} is high; 20% step ({step}) exceeds VRAM. Lowering concurrency to 1 to ensure testing reaches this station count.")
+                        else:
+                            self.logger.warning(f"Station count {stations} is too high for available VRAM even at 1 concurrency. Skipping.")
+                            continue
+                    elif len(valid_predictions) < len(concurrent_predictions_list):
+                        self.logger.info(f"Trimming concurrency list for {stations} stations from {concurrent_predictions_list} to {valid_predictions} due to VRAM limits.")
+
+                    self.logger.info(f"Evaluating GPU(s) against {stations} TOTAL STATION(s) with VRAM-CAPPED CONCURRENT STATION PREDICTIONS: {valid_predictions}")
+                    for predictions in valid_predictions:
+                        vram_per_task_mb = (aggregate_cap_mb - model_reserve_total) / predictions - overhead_mb
+                        # Ensure we don't request less than min_vram
+                        vram_per_task_mb = max(vram_per_task_mb, model_vram_mb)
+                        
                         step_size = vram_per_task_mb * 0.2
                         vram_steps = np.arange(step_size, vram_per_task_mb + step_size, step_size)
                         
-                        # Determine minimum VRAM filter based on model type
-                        if self.model_type == 'seisbench':
-                            from .parallelization import get_seisbench_model_vram_mb
-                            min_vram = get_seisbench_model_vram_mb(
-                                self.seisbench_parent_model, 
-                                self.seisbench_child_model,
-                                default_mb=2000.0
-                            )
-                        else:
-                            min_vram = 3000.0  # EQCCT minimum
-                            
-                        vram_steps = vram_steps[vram_steps >= min_vram] 
+                        # Filter vram steps
+                        vram_steps = vram_steps[vram_steps >= model_vram_mb] 
+                        if len(vram_steps) == 0:
+                            vram_steps = [model_vram_mb] # Always try at least the minimum
                         
                         # We are defining the hard upper limit on how much VRAM (GPU memory) TensorFlow is allowed to use inside each ModelActor process
                         # This includes 1) Loading the model weights into GPU memory during init and 2) Usage of the ModelActor (predictions, etc.) 
@@ -948,8 +1034,8 @@ class EvaluateSystem():
                         for gpu_memory_limit_mb in vram_steps: 
                             gpu_memory_limit_mb = int(round(float(gpu_memory_limit_mb)))
 
-                            # Efficiency check: avoid redundant tests for same (concurrency, vram)
-                            config_key = (predictions, gpu_memory_limit_mb)
+                            # Efficiency check: avoid redundant tests for same (concurrency, vram, stations)
+                            config_key = (stations, predictions, gpu_memory_limit_mb)
                             if config_key in tested_gpu_configs:
                                 continue
                             tested_gpu_configs.add(config_key)
