@@ -269,6 +269,55 @@ There are more examples on how to use EQCCTPro using different SeisBench and EQC
 
 ---
 
+# **Understanding Evaluation Results (CSV Columns)**
+
+The `EvaluateSystem` functionality generates a detailed CSV file (e.g., `cpu_test_results.csv` or `gpu_test_results.csv`) to help you analyze performance and memory utilization. Below are the definitions for all columns:
+
+### **Core Parameters**
+- **`Trial Number`**: The sequential ID of the benchmark test.
+- **`Stations Used`**: A list of the specific station codes processed in the trial.
+- **`Number of Stations Used`**: Total number of stations processed.
+- **`Number of CPUs Allocated for Ray to Use`**: The CPU affinity limit set for the Ray cluster.
+- **`Intra-parallelism Threads` / `Inter-parallelism Threads`**: TensorFlow-specific threading configurations.
+- **`GPUs Used`**: List of physical GPU IDs utilized (e.g., `[0, 1]`).
+- **`Inference Actor Memory Limit (MB)`**: The VRAM ceiling per shared inference actor.
+- **`Total Waveform Analysis Timespace (min)`**: Total duration of the analyzed waveforms.
+- **`Total Number of Timechunks`**: Number of temporal segments the data was split into.
+- **`Concurrent Timechunks Used`**: Number of timechunks processed in parallel.
+- **`Length of Timechunk (min)`**: Duration of a single timechunk.
+- **`Number of Concurrent Station Tasks`**: Concurrency level for station predictions.
+- **`Total Run time for Picker (s)`**: The wall-clock time taken to complete the workload.
+- **`Model Used`**: The specific model/weights pair tested (e.g., `PhaseNet/stead`).
+
+### **System-Wide RAM (Physical Memory)**
+- **`System Total RAM (MB)`**: Total physical RAM available on the host machine.
+- **`System Available RAM Before (MB)`**: Unused RAM available before the trial started.
+- **`System Available RAM After (MB)`**: Unused RAM available after the trial finished.
+
+### **Process/Main RAM (Driver Process)**
+- **`Process RAM Baseline (MB)`**: Initial RAM usage of the main Python driver process.
+- **`Process RAM After Run (MB)`**: RAM usage of the main process after trial execution.
+- **`Process RAM Delta (MB)`**: The net change in main process memory consumption (\(After - Baseline\)).
+- **`Process RAM Peak (MB)`**: The maximum recorded memory (RSS) reached by the main process during the trial.
+
+### **Raylet Worker/Raylet RAM (Parallel Processes)**
+- **`Num Raylet Processes`**: Number of child processes (workers) spawned by Ray.
+- **`Total Raylet RAM (MB)`**: Combined Resident Set Size (RSS) of all Ray worker processes.
+- **`Avg Raylet RAM (MB)`**: Average RAM consumption per individual worker process.
+- **`Max Raylet RAM (MB)`**: The RAM usage of the single largest worker process.
+
+### **GPU VRAM (Video Memory)**
+*Note: These columns are populated only for GPU evaluation modes.*
+- **`GPU Total VRAM (MB)`**: Total combined VRAM of the selected GPUs.
+- **`GPU VRAM Free Before (MB)`**: Combined free VRAM across selected GPUs before trial start.
+- **`GPU VRAM Free After (MB)`**: Combined free VRAM across selected GPUs after trial completion.
+- **`GPU VRAM Used by Trial (MB)`**: Total VRAM consumed by model loading and inference during the trial.
+
+### **Trial Outcome**
+- **`Trial Success`**: `1` for success, `0` for failure.
+- **`Error Message`**: Detailed exception info if the trial failed (e.g., OOM error details).
+
+---
 
 # **License & Citation**
 EQCCTPro is provided under an open-source license. If you use this software in your research, please cite our work:

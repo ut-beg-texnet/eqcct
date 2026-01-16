@@ -624,10 +624,21 @@ class EvaluateSystem():
         prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
         planned_keys = self._load_existing_trial_keys(csv_filepath)
         
+        # Resume from existing trial count if CSV has trials
+        existing_trial_count = 0
+        if os.path.exists(csv_filepath):
+            try:
+                df_existing = pd.read_csv(csv_filepath, keep_default_na=False)
+                existing_trial_count = len(df_existing)
+                if existing_trial_count > 0:
+                    self.logger.info(f"Resuming from trial {existing_trial_count + 1} (found {existing_trial_count} existing trial(s) in CSV).")
+            except Exception:
+                pass
+        
         self.chunk_time()
         self.dt_task_generator()
         
-        trial_num = 1
+        trial_num = existing_trial_count + 1  # Resume from where we left off
         log_queue = queue.Queue()  # Create a queue for log entries
         total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
 
@@ -713,30 +724,8 @@ class EvaluateSystem():
                             tasks_queue = []
                             log_queue = queue.Queue()  # Create a queue for log entries
 
-
-                            # ===== RAM Baseline (before launching worker) =====
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_before_total_mb = _rss / 1e6
-
-                            # peak before (platform-aware)
-                            if resource is not None:  # Linux/macOS
-                                _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                                if sys.platform.startswith("linux"):
-                                    peak_before_mb = _ru / 1024.0            # ru_maxrss in KB on Linux
-                                elif sys.platform == "darwin":
-                                    peak_before_mb = _ru / (1024.0 * 1024.0) # ru_maxrss in bytes on macOS
-                                else:
-                                    peak_before_mb = mem_before_total_mb     # safe fallback
-                            else:  # Windows: no 'resource'
-                                try:
-                                    peak_before_mb = process.memory_full_info().peak_wset / 1e6
-                                except Exception:
-                                    peak_before_mb = mem_before_total_mb
+                            # ===== COMPREHENSIVE MEMORY TRACKING (BEFORE) =====
+                            mem_before = get_memory_snapshot(process)
 
                             try: 
                                 while True: 
@@ -766,11 +755,22 @@ class EvaluateSystem():
                                         log_entry = ray.get(finished_task)
                                         log_queue.put(log_entry)  # Add log entry to the queue
 
-                                    update_csv(csv_filepath, success=1, error_message="")
+                                # ===== COMPREHENSIVE MEMORY TRACKING (AFTER) =====
+                                mem_after = get_memory_snapshot(process)
+                                
+                                # Build memory data for CSV and update
+                                memory_trial_data = build_memory_trial_data(mem_before, mem_after)
+                                update_csv(csv_filepath, success=1, error_message="")
+                                update_csv_with_memory(csv_filepath, memory_trial_data)
+                                
                             except Exception as e:
                                 # Failure occured, need to add to log 
                                 error_msg = f"{type(e).__name__}: {str(e)}"
+                                # Still capture memory after failure
+                                mem_after = get_memory_snapshot(process)
+                                memory_trial_data = build_memory_trial_data(mem_before, mem_after)
                                 update_csv(csv_filepath, success=0, error_message=error_msg)
+                                update_csv_with_memory(csv_filepath, memory_trial_data)
                                 self.logger.error(f"Trial {trial_num} FAILED: {error_msg}")
                                 
                             # Write log entries from the queue to the file
@@ -780,66 +780,30 @@ class EvaluateSystem():
                             remove_output_subdirs(self.output_dir, logger=self.logger)
                             trial_num += 1  
                             
-                            # RAM cleanup
-                            # ===== AFTER RUN (before cleanup) =====
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_after_run_total_mb = _rss / 1e6
-                            delta_run_mb = mem_after_run_total_mb - mem_before_total_mb
-
-                            # updated peak (platform-aware)
-                            if resource is not None:
-                                _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                                if sys.platform.startswith("linux"):
-                                    peak_after_mb = _ru / 1024.0
-                                elif sys.platform == "darwin":
-                                    peak_after_mb = _ru / (1024.0 * 1024.0)
-                                else:
-                                    peak_after_mb = mem_after_run_total_mb
-                            else:
-                                try:
-                                    peak_after_mb = process.memory_full_info().peak_wset / 1e6
-                                except Exception:
-                                    peak_after_mb = mem_after_run_total_mb
-
+                            # ===== MEMORY LOGGING =====
+                            delta = compute_memory_delta(mem_before, mem_after)
                             self.logger.info("")
                             self.logger.info(
-                                f"[MEM] Baseline: {mem_before_total_mb:.2f} MB | After run: {mem_after_run_total_mb:.2f} MB "
-                                f"| Δrun: {delta_run_mb:.2f} MB | Peak≈{max(peak_before_mb, peak_after_mb):.2f} MB"
+                                f"[MEM] Baseline: {mem_before.process_rss_mb:.2f} MB | After run: {mem_after.process_rss_mb:.2f} MB "
+                                f"| Δrun: {delta['process_ram_delta_mb']:.2f} MB | Peak≈{mem_after.process_peak_mb:.2f} MB"
+                            )
+                            self.logger.info(
+                                f"[MEM] System Available: {mem_before.system_available_mb:.2f} MB → {mem_after.system_available_mb:.2f} MB "
+                                f"| Raylets: {mem_after.num_raylet_processes} (Total: {mem_after.total_raylet_ram_mb:.2f} MB, Avg: {mem_after.avg_raylet_ram_mb:.2f} MB)"
                             )
 
                             # ===== CLEANUP =====
-                            # drop strong refs so GC matters
                             try: del ref
                             except NameError: pass
                             try: del log_entry
                             except NameError: pass
 
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_before_clean_mb = _rss / 1e6
-
                             gc.collect()
                             time.sleep(0.1)
 
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_after_clean_mb = _rss / 1e6
-
-                            freed_mb = mem_before_clean_mb - mem_after_clean_mb
-                            self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean_mb:.2f} MB") # To-Do: Fix the Freed so its beeter (for cpu and gpu)
+                            mem_after_clean = get_memory_snapshot(process)
+                            freed_mb = mem_after.combined_rss_mb - mem_after_clean.combined_rss_mb
+                            self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean.combined_rss_mb:.2f} MB")
                             self.logger.info("")
                             
                         # tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
@@ -902,11 +866,22 @@ class EvaluateSystem():
         else:
             self.logger.info("No existing trials found in CSV. Starting fresh evaluation.")
 
+        # Resume from existing trial count if CSV has trials
+        existing_trial_count = 0
+        if os.path.exists(csv_filepath):
+            try:
+                df_existing = pd.read_csv(csv_filepath, keep_default_na=False)
+                existing_trial_count = len(df_existing)
+                if existing_trial_count > 0:
+                    self.logger.info(f"Resuming from trial {existing_trial_count + 1} (found {existing_trial_count} existing trial(s) in CSV).")
+            except Exception:
+                pass
+
         # Calculate these at the start
         self.chunk_time()
         self.dt_task_generator()
 
-        trial_num = 1
+        trial_num = existing_trial_count + 1  # Resume from where we left off
         log_queue = queue.Queue()  # Create a queue for log entries
         total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
         
@@ -1068,30 +1043,9 @@ class EvaluateSystem():
                             self.logger.info(f"VRAM per Parallel Task: {gpu_memory_limit_mb:.2f} MB")
                             self.logger.info("")
 
-
-                            # ===== Baseline RAM consumption (before launching worker) =====
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_before_total_mb = _rss / 1e6
-
-                            # peak before (platform-aware)
-                            if resource is not None:  # Linux/macOS
-                                _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                                if sys.platform.startswith("linux"):
-                                    peak_before_mb = _ru / 1024.0            # ru_maxrss in KB on Linux
-                                elif sys.platform == "darwin":
-                                    peak_before_mb = _ru / (1024.0 * 1024.0) # ru_maxrss in bytes on macOS
-                                else:
-                                    peak_before_mb = mem_before_total_mb     # safe fallback
-                            else:  # Windows: no 'resource'
-                                try:
-                                    peak_before_mb = process.memory_full_info().peak_wset / 1e6
-                                except Exception:
-                                    peak_before_mb = mem_before_total_mb
+                            # ===== COMPREHENSIVE MEMORY TRACKING (BEFORE) =====
+                            mem_before = get_memory_snapshot(process)
+                            vram_before = get_gpu_vram_snapshot(gpus_to_use)
                             
                             try: # To Do: Add Concurrent Timechunks Testing for GPU/CPU too, reference eqcctpro_parallelization()
                                 # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
@@ -1127,82 +1081,62 @@ class EvaluateSystem():
                                 log_entry = ray.get(ref)
                                 log_queue.put(log_entry)  # Add log entry to the queue
                                 
-                                # Success - update CSV
+                                # ===== COMPREHENSIVE MEMORY TRACKING (AFTER) =====
+                                mem_after = get_memory_snapshot(process)
+                                vram_after = get_gpu_vram_snapshot(gpus_to_use)
+                                
+                                # Build memory data for CSV and update
+                                memory_trial_data = build_memory_trial_data(mem_before, mem_after, vram_before, vram_after)
                                 update_csv(csv_filepath, success=1, error_message="")
+                                update_csv_with_memory(csv_filepath, memory_trial_data)
                                 
                             except Exception as e:
                                 # Failure occurred, need to add to log 
                                 error_msg = f"{type(e).__name__}: {str(e)}"
+                                # Still capture memory after failure
+                                mem_after = get_memory_snapshot(process)
+                                vram_after = get_gpu_vram_snapshot(gpus_to_use)
+                                memory_trial_data = build_memory_trial_data(mem_before, mem_after, vram_before, vram_after)
                                 update_csv(csv_filepath, success=0, error_message=error_msg)
+                                update_csv_with_memory(csv_filepath, memory_trial_data)
                                 self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
                             
                             # Write log entries from the queue to the file
                             while not log_queue.empty():
                                 log_entry = log_queue.get()
-                                self.logger.info(f"{log_entry}") # FIX ME 
+                                self.logger.info(f"{log_entry}")
                             
                             remove_output_subdirs(self.output_dir, logger=self.logger) 
                             trial_num += 1
                             
-                            # RAM cleanup
-                            # ===== AFTER RUN (before cleanup) =====
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_after_run_total_mb = _rss / 1e6
-                            delta_run_mb = mem_after_run_total_mb - mem_before_total_mb
-
-                            # updated peak (platform-aware)
-                            if resource is not None:
-                                _ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                                if sys.platform.startswith("linux"):
-                                    peak_after_mb = _ru / 1024.0
-                                elif sys.platform == "darwin":
-                                    peak_after_mb = _ru / (1024.0 * 1024.0)
-                                else:
-                                    peak_after_mb = mem_after_run_total_mb
-                            else:
-                                try:
-                                    peak_after_mb = process.memory_full_info().peak_wset / 1e6
-                                except Exception:
-                                    peak_after_mb = mem_after_run_total_mb
-
+                            # ===== MEMORY LOGGING =====
+                            delta = compute_memory_delta(mem_before, mem_after)
                             self.logger.info(
-                                f"[MEM] Baseline: {mem_before_total_mb:.2f} MB | After run: {mem_after_run_total_mb:.2f} MB "
-                                f"| Δrun: {delta_run_mb:.2f} MB | Peak≈{max(peak_before_mb, peak_after_mb):.2f} MB"
+                                f"[MEM] Baseline: {mem_before.process_rss_mb:.2f} MB | After run: {mem_after.process_rss_mb:.2f} MB "
+                                f"| Δrun: {delta['process_ram_delta_mb']:.2f} MB | Peak≈{mem_after.process_peak_mb:.2f} MB"
+                            )
+                            self.logger.info(
+                                f"[MEM] System Available: {mem_before.system_available_mb:.2f} MB → {mem_after.system_available_mb:.2f} MB "
+                                f"| Raylets: {mem_after.num_raylet_processes} (Total: {mem_after.total_raylet_ram_mb:.2f} MB)"
+                            )
+                            vram_used = vram_before.get("gpu_free_vram_mb", 0) - vram_after.get("gpu_free_vram_mb", 0)
+                            self.logger.info(
+                                f"[VRAM] Total: {vram_before.get('gpu_total_vram_mb', 0):.2f} MB | Free Before: {vram_before.get('gpu_free_vram_mb', 0):.2f} MB "
+                                f"| Free After: {vram_after.get('gpu_free_vram_mb', 0):.2f} MB | Used by Trial: {max(0, vram_used):.2f} MB"
                             )
 
                             # ===== CLEANUP =====
-                            # drop strong refs so GC matters
                             try: del ref
                             except NameError: pass
                             try: del log_entry
                             except NameError: pass
 
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_before_clean_mb = _rss / 1e6
-
                             gc.collect()
                             time.sleep(0.1)
 
-                            _rss = process.memory_info().rss
-                            for _ch in process.children(recursive=True):
-                                try:
-                                    _rss += _ch.memory_info().rss
-                                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                    pass
-                            mem_after_clean_mb = _rss / 1e6
-
-                            freed_mb = mem_before_clean_mb - mem_after_clean_mb
-                            self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean_mb:.2f} MB\n")
+                            mem_after_clean = get_memory_snapshot(process)
+                            freed_mb = mem_after.combined_rss_mb - mem_after_clean.combined_rss_mb
+                            self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean.combined_rss_mb:.2f} MB")
                             self.logger.info("")
                 
                 # stop log forwarder
