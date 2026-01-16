@@ -25,34 +25,140 @@ from obspy import UTCDateTime
 from datetime import datetime, timedelta 
 from logging.handlers import QueueHandler
 
-# VRAM requirements (MB) based on empirical testing
-CUDA_LIBRARY_OVERHEAD_MB = 432.0  # Constant overhead for CUDA context/libraries
-VRAM_BUFFER_MB = 128.0           # Safety buffer for activations and processing
+# =============================================================================
+# RESOURCE REQUIREMENTS (MB) - Based on isolated process testing
+# =============================================================================
+# These values represent the "first-load" memory footprint when each model
+# is loaded into a fresh process (like a Ray ModelActor). This includes:
+# - Library initialization (PyTorch/TensorFlow, cuDNN, CUDA context)
+# - Model architecture definition
+# - Model weights
+# - Inference buffers and activations
 
-# Net Model Usage (excluding overhead and buffer)
+# Safety buffers for unexpected allocations during inference
+VRAM_BUFFER_MB = 128.0   # Extra VRAM headroom per model actor
+RAM_BUFFER_MB = 256.0    # Extra RAM headroom per model actor
+
+# GPU Mode - VRAM requirements (MB) for each model actor (first-load cost)
+# These include the CUDA context overhead (~500MB) that each actor pays
+# Measured via test_resource_usage.py using isolated process + NVML
 SEISBENCH_MODEL_VRAM_MB = {
-    ('PhaseNet', 'original'): 74.0,
-    ('PhaseNet', 'stead'): 4.0,
-    ('PhaseNet', 'ethz'): 2.0,
-    ('PhaseNet', 'scedc'): 2.0,
-    ('PhaseNet', 'pisdl'): 2.0,
-    ('PhaseNet', 'instance'): 2.0,
-    ('EQTransformer', 'original'): 30.0,
-    ('EQTransformer', 'original_nonconservative'): 4.0,
-    ('EQTransformer', 'stead'): 20.0,
-    ('EQTransformer', 'ethz'): 20.0,
-    ('EQTransformer', 'scedc'): 20.0,
-    ('EQTransformer', 'instance'): 20.0,
-    ('GPD', 'original'): 72.0,
+    ('PhaseNet', 'original'): 500.0,
+    ('PhaseNet', 'stead'): 502.0,
+    ('PhaseNet', 'ethz'): 502.0,
+    ('PhaseNet', 'scedc'): 502.0,
+    ('PhaseNet', 'pisdl'): 502.0,
+    ('PhaseNet', 'instance'): 502.0,
+    ('PhaseNetLight', 'stead'): 500.0,
+    ('PhaseNetLight', 'ethz'): 500.0,
+    ('PhaseNetLight', 'scedc'): 500.0,
+    ('PhaseNetLight', 'instance'): 500.0,
+    ('EQTransformer', 'original'): 528.0,
+    ('EQTransformer', 'original_nonconservative'): 530.0,
+    ('EQTransformer', 'stead'): 528.0,
+    ('EQTransformer', 'ethz'): 528.0,
+    ('EQTransformer', 'scedc'): 528.0,
+    ('EQTransformer', 'instance'): 528.0,
+    ('GPD', 'original'): 584.0
 }
+
+# GPU Mode - RAM requirements (MB) for each model actor (first-load cost)
+# Includes PyTorch + ObsPy + CUDA runtime in system RAM
+# Measured via test_resource_usage.py using isolated process + psutil RSS
+SEISBENCH_MODEL_RAM_MB = {
+    ('PhaseNet', 'original'): 870.0,
+    ('PhaseNet', 'stead'): 889.0,
+    ('PhaseNet', 'ethz'): 900.0,
+    ('PhaseNet', 'scedc'): 889.0,
+    ('PhaseNet', 'pisdl'): 887.0,
+    ('PhaseNet', 'instance'): 897.0,
+    ('PhaseNetLight', 'stead'): 861.0,
+    ('PhaseNetLight', 'ethz'): 861.0,
+    ('PhaseNetLight', 'scedc'): 873.0,
+    ('PhaseNetLight', 'instance'): 861.0,
+    ('EQTransformer', 'original'): 1001.0,
+    ('EQTransformer', 'original_nonconservative'): 1017.0,
+    ('EQTransformer', 'stead'): 1017.0,
+    ('EQTransformer', 'ethz'): 1021.0,
+    ('EQTransformer', 'scedc'): 1025.0,
+    ('EQTransformer', 'instance'): 1019.0,
+    ('GPD', 'original'): 876.0
+    }
+
+# CPU Mode - RAM requirements (MB) for each model (no CUDA overhead)
+# Measured via test_resource_usage.py using isolated process + psutil RSS
+SEISBENCH_MODEL_CPU_RAM_MB = {
+    ('PhaseNet', 'original'): 502.0,
+    ('PhaseNet', 'stead'): 511.0,
+    ('PhaseNet', 'ethz'): 516.0,
+    ('PhaseNet', 'scedc'): 514.0,
+    ('PhaseNet', 'pisdl'): 501.0,
+    ('PhaseNet', 'instance'): 501.0,
+    ('PhaseNetLight', 'stead'): 502.0,
+    ('PhaseNetLight', 'ethz'): 498.0,
+    ('PhaseNetLight', 'scedc'): 512.0,
+    ('PhaseNetLight', 'instance'): 512.0,
+    ('EQTransformer', 'original'): 521.0,
+    ('EQTransformer', 'original_nonconservative'): 524.0,
+    ('EQTransformer', 'stead'): 509.0,
+    ('EQTransformer', 'ethz'): 511.0,
+    ('EQTransformer', 'scedc'): 509.0,
+    ('EQTransformer', 'instance'): 522.0,
+    ('GPD', 'original'): 576.0
+}
+
+# EQCCT Model Requirements
+# Measured via test_resource_usage.py using isolated process
+EQCCT_GPU_VRAM_MB = 1732.0   # TensorFlow + XLA compilation + inference buffers
+EQCCT_GPU_RAM_MB = 2311.0    # Heavy due to XLA compiled graph stored in system RAM
+EQCCT_CPU_RAM_MB = 728.0     # TensorFlow CPU-only runtime
 
 def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=500.0):
     """
-    Get VRAM requirement for a SeisBench model including overhead and buffer.
+    Get VRAM requirement for a SeisBench model including buffer.
+    
+    Args:
+        parent_model_name: SeisBench model class (e.g., 'PhaseNet')
+        child_model_name: Pretrained version (e.g., 'original')
+        default_mb: Default if model not found in lookup table
+        
+    Returns:
+        float: Total VRAM in MB needed for one model actor
     """
     key = (parent_model_name, child_model_name)
-    net_vram = SEISBENCH_MODEL_VRAM_MB.get(key, default_mb)
-    return net_vram + CUDA_LIBRARY_OVERHEAD_MB + VRAM_BUFFER_MB
+    base_vram = SEISBENCH_MODEL_VRAM_MB.get(key, default_mb)
+    return base_vram + VRAM_BUFFER_MB
+
+def get_seisbench_model_ram_mb(parent_model_name, child_model_name, use_gpu=True, default_mb=500.0):
+    """
+    Get RAM requirement for a SeisBench model including buffer.
+    
+    Args:
+        parent_model_name: SeisBench model class (e.g., 'PhaseNet')
+        child_model_name: Pretrained version (e.g., 'original')
+        use_gpu: Whether GPU mode is being used
+        default_mb: Default if model not found in lookup table
+        
+    Returns:
+        float: Total RAM in MB needed for one model actor
+    """
+    key = (parent_model_name, child_model_name)
+    if use_gpu:
+        base_ram = SEISBENCH_MODEL_RAM_MB.get(key, default_mb)
+    else:
+        base_ram = SEISBENCH_MODEL_CPU_RAM_MB.get(key, default_mb)
+    return base_ram + RAM_BUFFER_MB
+
+def get_eqcct_vram_mb():
+    """Get VRAM requirement for EQCCT model actor."""
+    return EQCCT_GPU_VRAM_MB + VRAM_BUFFER_MB
+
+def get_eqcct_ram_mb(use_gpu=True):
+    """Get RAM requirement for EQCCT model actor."""
+    if use_gpu:
+        return EQCCT_GPU_RAM_MB + RAM_BUFFER_MB
+    else:
+        return EQCCT_CPU_RAM_MB + RAM_BUFFER_MB
 
 def parse_time_range(time_string):
     """
@@ -766,7 +872,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         if use_gpu:
             # Allocate more VRAM to model actors (they need to hold the full model)
             # Reserve ~2-3GB per model actor, adjust based on your model size
-            model_vram_mb = max(gpu_memory_limit_mb, 3000)  # At least VRAM or 3GB for EQCCT (subject to change) 
+            model_vram_mb = max(gpu_memory_limit_mb, 1500)  # At least VRAM or 1.5GB for EQCCT (recorded EQCCT uses 1.3GB VRAM) 
             
             # Create one model actor per GPU
             model_actors = []

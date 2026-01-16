@@ -1434,11 +1434,3 @@ class OptimalGPUConfigurationFinder:
         self.logger.info(f"Stations: {station_count}")
         self.logger.info(f"Inference Actor Memory Limit (MB): {best_config['Inference Actor Memory Limit (MB)']}")
         self.logger.info(f"Total Runtime (s): {best_config['Total Run time for Picker (s)']}")
-
-        # return int(float(best_config["Number of CPUs Allocated for Ray to Use"])), \
-        #        int(float(best_config["Number of Concurrent Station Tasks"])), \
-        #        int(float(best_config["Intra-parallelism Threads"])), \
-        #        int(float(best_config["Inter-parallelism Threads"])), \
-        #        gpu_list, \
-        #        int(float(best_config["Inference Actor Memory Limit (MB)"])), \
-        #        int(float(station_count))
