@@ -229,6 +229,7 @@ eval_gpu = EvaluateSystem(
     selected_gpus=[0, 1],
     max_vram_mb=48000,                # Total VRAM pool to test across all GPUs
     gpu_vram_safety_cap=0.95,         # Reserve 5% VRAM for system stability
+    ram_safety_cap=0.95,              # Reserve 5% System RAM for machine stability
     stations2use=100,                 # Max stations to test
     cpu_id_list=range(0, 8),          # CPUs available for Ray management
     input_dir='/path/to/mseed',
@@ -241,6 +242,7 @@ eval_gpu.evaluate()
 - **`eval_mode (str)`**: `'cpu'` or `'gpu'`.
 - **`max_vram_mb (float)`**: The total aggregate VRAM budget across all GPUs for the evaluation. If not provided, it is calculated from physical VRAM.
 - **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use. Default: `0.95`.
+- **`ram_safety_cap (float)`**: The fraction of Total System RAM (0.0 to 0.98) EQCCTPro is allowed to use. Default: `0.90`.
 - **`stations2use (int)`**: The maximum number of stations to test in the benchmark.
 - **`min_cpu_amount / cpu_test_step_size (int)`**: Controls the iterative testing of CPU core counts.
 - **`starting_amount_of_stations / station_list_step_size (int)`**: Controls the iterative testing of total workload size.

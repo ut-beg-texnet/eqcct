@@ -397,6 +397,7 @@ class EvaluateSystem():
                  conc_station_tasks_step_size: int = 1,
                  max_vram_mb:float = None,
                  gpu_vram_safety_cap:float = 0.90, 
+                 ram_safety_cap:float = 0.90,
                  selected_gpus:list = None,
                  start_time:str = None, 
                  end_time:str = None, 
@@ -429,6 +430,11 @@ class EvaluateSystem():
         self.cpu_id_list = cpu_id_list
         self.vram_mb = max_vram_mb
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
+        
+        if ram_safety_cap > 0.98:
+            raise ValueError(f"ram_safety_cap cannot exceed 0.98, got {ram_safety_cap}")
+        self.ram_safety_cap = ram_safety_cap
+
         self.selected_gpus = selected_gpus
         self.use_gpu = True if self.eval_mode == 'gpu' else False
         self.cpu_count = len(cpu_id_list)
@@ -512,7 +518,8 @@ class EvaluateSystem():
                     default_mb=2000.0
                 )
             else:
-                model_vram_mb = 1500.0  # Default for EQCCT
+                from .parallelization import get_eqcct_vram_mb
+                model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
 
             per_gpu_free_mb = [get_gpu_vram(gpu_index=g)[1] * 1024.0 for g in self.selected_gpus]  # free_gb -> MB
             
@@ -580,7 +587,8 @@ class EvaluateSystem():
         else:
             gpus_to_use = self.selected_gpus if self.selected_gpus is not None else []
         gpus_norm = tuple(sorted(int(x) for x in gpus_to_use))
-        vram_norm = int(round(float(gpu_memory_limit_mb))) if gpu_memory_limit_mb not in ("", None) else ""
+        # Round VRAM to nearest 100MB to ensure stability across restarts despite small system fluctuations
+        vram_norm = int(round(float(gpu_memory_limit_mb) / 100.0) * 100) if gpu_memory_limit_mb not in ("", None) else ""
         return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|vram={vram_norm}|model={model}"
         
     def _load_existing_trial_keys(self, csv_path: str) -> set[str]:
@@ -676,11 +684,39 @@ class EvaluateSystem():
                 # sets are a set of multiple items stored in a single variable 
                 # unchangable after being set, cannot have duplicates and is unordered
                 timechunks_list = sorted(list(set(timechunks_list))) 
-                # Determine model name for trial key
+                # Determine model name and RAM requirement for trial key
                 if self.model_type == 'seisbench':
                     trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
+                    from .parallelization import get_seisbench_model_ram_mb
+                    model_ram_mb = get_seisbench_model_ram_mb(
+                        self.seisbench_parent_model, 
+                        self.seisbench_child_model,
+                        use_gpu=False,  # CPU mode
+                        default_mb=600.0
+                    )
                 else:
                     trial_model = "eqcct"
+                    from .parallelization import get_eqcct_ram_mb
+                    model_ram_mb = get_eqcct_ram_mb(use_gpu=False)  # CPU mode
+                
+                # ===== RAM-BASED CAPACITY CHECK =====
+                # Get total system RAM to determine absolute machine capacity
+                system_mem = psutil.virtual_memory()
+                total_ram_mb = system_mem.total / (1024 * 1024)
+                
+                # Usable RAM is a percentage of the TOTAL machine RAM
+                # This ensures the check is based on what the computer can handle physically
+                usable_ram_mb = total_ram_mb * self.ram_safety_cap
+                
+                # Calculate max concurrent predictions based on RAM
+                # Each worker needs model_ram_mb of RAM
+                overhead_ram_mb = 100.0  # Base overhead per worker for data handling
+                ram_per_worker = model_ram_mb + overhead_ram_mb
+                max_total_predictions_ram = int(usable_ram_mb // ram_per_worker)
+                if max_total_predictions_ram < 1:
+                    max_total_predictions_ram = 1  # Always try at least one
+                
+                self.logger.info(f"RAM Capacity Analysis: Total System RAM={total_ram_mb:.0f} MB | Usable ({self.ram_safety_cap*100:.0f}%)={usable_ram_mb:.0f} MB | Model RAM={model_ram_mb:.0f} MB | Max Concurrent Predictions={max_total_predictions_ram}")
 
                 for timechunks in timechunks_list:
                     for num_stations in self.stations2use_list: 
@@ -689,6 +725,23 @@ class EvaluateSystem():
                         # This tests 20%, 40%, 60%, 80%, and 100% of the current total stations
                         step = max(1, int(num_stations * 0.2))
                         concurrent_predictions_list = sorted(list(set(range(step, num_stations + 1, step))))
+                        
+                        # ===== RAM-BASED TRIMMING (20% MARCHING CORRECTION) =====
+                        # Cap concurrency based on available RAM, similar to GPU VRAM logic
+                        valid_predictions = [p for p in concurrent_predictions_list if p <= max_total_predictions_ram]
+                        
+                        if not valid_predictions and num_stations > 0:
+                            # If even the first step (20%) is too much, try just 1 prediction or the max possible
+                            if max_total_predictions_ram >= 1:
+                                valid_predictions = [1]
+                                self.logger.info(f"Station count {num_stations} is high; 20% step ({step}) exceeds RAM capacity. Lowering concurrency to 1 to ensure testing reaches this station count.")
+                            else:
+                                self.logger.warning(f"Station count {num_stations} is too high for available RAM even at 1 concurrency. Skipping.")
+                                continue
+                        elif len(valid_predictions) < len(concurrent_predictions_list):
+                            self.logger.info(f"Trimming concurrency list for {num_stations} stations from {concurrent_predictions_list} to {valid_predictions} due to RAM limits.")
+                        
+                        concurrent_predictions_list = valid_predictions
                         
                         # Efficiency optimization: only test concurrency values we haven't seen yet 
                         # for this CPU/Timechunk combo to save compute time. 
@@ -937,9 +990,9 @@ class EvaluateSystem():
                     )
                 else:
                     trial_model = "eqcct"
-                    # EQCCT Net Model Usage: 1305.0 MB + CUDA Overhead: 431.31 MB + Buffer
-                    from .parallelization import CUDA_LIBRARY_OVERHEAD_MB
-                    model_vram_mb = 1305.0 + CUDA_LIBRARY_OVERHEAD_MB + 128.0 
+                    # Use the measured EQCCT VRAM requirement (includes CUDA context + TensorFlow + XLA)
+                    from .parallelization import get_eqcct_vram_mb
+                    model_vram_mb = get_eqcct_vram_mb() 
 
                 # Calculate absolute maximum concurrent workers allowed by VRAM for this GPU/CPU setup
                 # Each concurrent prediction task uses minimal extra VRAM beyond the shared ModelActor
