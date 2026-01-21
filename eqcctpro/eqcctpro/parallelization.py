@@ -888,12 +888,21 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Create N SeisBench ModelActors for CPU where N = number_of_concurrent_station_predictions
             n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            logger.info(f"Creating {n_actors} CPU-based SeisBenchModelActor(s)...")
+            # Calculate fractional CPU allocation similar to GPU mode
+            # This allows more actors than CPUs by time-sharing (Ray uses logical resources)
+            n_cpus = len(ray_cpus) if ray_cpus else 1
+            # Each actor gets a fraction of the available CPUs
+            # If n_actors <= n_cpus, each gets 1 full CPU
+            # If n_actors > n_cpus, they share via fractional allocation
+            fractional_cpu = n_cpus / n_actors if n_actors > n_cpus else 1.0
+            fractional_cpu = max(0.1, fractional_cpu)  # Ensure at least 0.1 CPU per actor to avoid scheduling issues
+            
+            logger.info(f"Creating {n_actors} CPU-based SeisBenchModelActor(s) across {n_cpus} CPU(s) ({fractional_cpu:.2f} CPU each)")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on CPU...")
-                actor = SeisBenchModelActor.options(num_cpus=1).remote(
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on CPU with {fractional_cpu:.2f} CPU allocation...")
+                actor = SeisBenchModelActor.options(num_cpus=fractional_cpu).remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
                     gpus_to_use=False,
@@ -906,7 +915,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     raise
                 logger.info(f"SeisBenchModelActor {i+1} created on CPU.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} CPU-sized SeisBenchModelActor(s).")
+            logger.info(f"Created {len(model_actors)} CPU-sized SeisBenchModelActor(s) with fractional CPU={fractional_cpu:.2f}.")
     else:
         # Create EQCCT model actors
         if use_gpu:
@@ -946,12 +955,21 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Create N EQCCT ModelActors for CPU where N = number_of_concurrent_station_predictions
             n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            logger.info(f"Creating {n_actors} CPU-based ModelActor(s)...")
+            # Calculate fractional CPU allocation similar to GPU mode
+            # This allows more actors than CPUs by time-sharing (Ray uses logical resources)
+            n_cpus = len(ray_cpus) if ray_cpus else 1
+            # Each actor gets a fraction of the available CPUs
+            # If n_actors <= n_cpus, each gets 1 full CPU
+            # If n_actors > n_cpus, they share via fractional allocation
+            fractional_cpu = n_cpus / n_actors if n_actors > n_cpus else 1.0
+            fractional_cpu = max(0.1, fractional_cpu)  # Ensure at least 0.1 CPU per actor to avoid scheduling issues
+            
+            logger.info(f"Creating {n_actors} CPU-based ModelActor(s) across {n_cpus} CPU(s) ({fractional_cpu:.2f} CPU each)")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} on CPU...")
-                actor = ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} on CPU with {fractional_cpu:.2f} CPU allocation...")
+                actor = ModelActor.options(num_cpus=fractional_cpu).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
@@ -959,7 +977,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     raise
                 logger.info(f"ModelActor {i+1} created on CPU.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} CPU-sized ModelActor(s).") 
+            logger.info(f"Created {len(model_actors)} CPU-sized ModelActor(s) with fractional CPU={fractional_cpu:.2f}.") 
 
     # Submit tasks to ray in a queue
     tasks_queue = []

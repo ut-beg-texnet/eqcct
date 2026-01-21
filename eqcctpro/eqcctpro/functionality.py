@@ -736,9 +736,13 @@ class EvaluateSystem():
                 self.logger.info(f"")
                 self.logger.info(f"RAM Capacity: {aggregate_ram_cap_mb:.0f} MB (Total: {system_ram_total_mb:.0f} MB × {self.ram_safety_cap:.0%} safety)")
                 self.logger.info(f"Currently Available RAM: {system_ram_available_mb:.0f} MB")
+                self.logger.info(f"Available CPUs: {len(cpus_to_use)}")
                 self.logger.info(f"")
                 self.logger.info(f"Max ModelActors by RAM: {max_actors} ({aggregate_ram_cap_mb:.0f} MB / {ram_per_actor:.0f} MB per actor)")
                 self.logger.info(f"Max Concurrent Prediction Tasks (N ModelActors): {max_actors}")
+                # Note about CPU time-sharing when actors > CPUs
+                if max_actors > len(cpus_to_use):
+                    self.logger.info(f"NOTE: max_actors ({max_actors}) > available CPUs ({len(cpus_to_use)}). Actors will use fractional CPU allocation and time-share.")
                 self.logger.info(f"================================================")
 
                 for timechunks in timechunks_list:

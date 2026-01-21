@@ -146,29 +146,29 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqtransformer_original.evaluate()
 
 # --- Example F: Evaluate System capability using EQTransformer Model (CPU/GPU) ---
-eval_eqtransformer_original_nonconservative = EvaluateSystem(
-    eval_mode='cpu',
-    # eval_mode='gpu',
-    # selected_gpus=[0, 1],
-    # max_vram_mb=93100,
-    model_type='seisbench',
-    seisbench_parent_model='EQTransformer',
-    seisbench_child_model='original_nonconservative',
-    input_dir=input_mseed_directory_path,
-    output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative'),
-    log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative', 'eqcctpro.log'),
-    csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqtransformer_nonconservative'),
-    cpu_id_list=range(100, 120),
-    min_cpu_amount=5,
-    cpu_test_step_size=1,
-    stations2use=100,
-    starting_amount_of_stations=1,
-    station_list_step_size=1,
-    min_conc_stations=1,
-    conc_station_tasks_step_size=1,
-    ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
-    tmp_dir=tmp_dir,
-    start_time='2024-12-15 12:00:00',
-    end_time='2024-12-15 12:01:00'
-)
-eval_eqtransformer_original_nonconservative.evaluate()
+# eval_eqtransformer_original_nonconservative = EvaluateSystem(
+#     eval_mode='cpu',
+#     # eval_mode='gpu',
+#     # selected_gpus=[0, 1],
+#     # max_vram_mb=93100,
+#     model_type='seisbench',
+#     seisbench_parent_model='EQTransformer',
+#     seisbench_child_model='original_nonconservative',
+#     input_dir=input_mseed_directory_path,
+#     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative'),
+#     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative', 'eqcctpro.log'),
+#     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqtransformer_nonconservative'),
+#     cpu_id_list=range(100, 120),
+#     min_cpu_amount=5,
+#     cpu_test_step_size=1,
+#     stations2use=100,
+#     starting_amount_of_stations=1,
+#     station_list_step_size=1,
+#     min_conc_stations=1,
+#     conc_station_tasks_step_size=1,
+#     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
+#     tmp_dir=tmp_dir,
+#     start_time='2024-12-15 12:00:00',
+#     end_time='2024-12-15 12:01:00'
+# )
+# eval_eqtransformer_original_nonconservative.evaluate()

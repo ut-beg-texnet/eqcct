@@ -216,6 +216,7 @@ Before running large-scale production jobs, use `EvaluateSystem` to benchmark yo
 - **20% Step Size**: Automatically tests station concurrency at 20%, 40%, 60%, 80%, and 100% levels.
 - **Redundancy Filtering**: Skips configurations that are already in the results CSV, allowing for interrupted evaluations to resume instantly.
 - **GPU Resource Slicing**: Dynamically calculates per-task VRAM limits based on an aggregate pool.
+- **Fractional CPU Allocation**: Dynamically assigns fractional CPU resources (e.g., 0.8 CPU/actor) when concurrency exceeds physical core count. This ensures all ModelActors can initialize and time-share available cores instead of blocking indefinitely.
 
 ### **Example: Evaluating GPU Performance**
 ```python
@@ -279,7 +280,7 @@ The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results
 - **`Trial Number`**: The sequential ID of the benchmark test.
 - **`Model Used`**: The specific model/weights pair tested (e.g., `PhaseNet/stead`).
 - **`Number of Stations Used`**: Total number of stations processed.
-- **`Number of CPUs Allocated for Ray to Use`**: The CPU affinity limit set for the Ray cluster.
+- **`Number of CPUs Allocated for Ray to Use`**: The CPU affinity limit set for the Ray cluster. If `N ModelActors` exceeds this count, actors will automatically share cores via fractional CPU allocation.
 - **`GPUs Used`**: List of physical GPU IDs utilized (e.g., `[0, 1]`).
 - **`N ModelActors`**: The total number of Ray ModelActors spawned for parallel inference.
 - **`Number of Concurrent Station Tasks`**: Concurrency level for station predictions.
