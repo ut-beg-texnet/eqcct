@@ -36,8 +36,10 @@ from logging.handlers import QueueHandler
 # - Inference buffers and activations
 
 # Safety buffers for unexpected allocations during inference
-VRAM_BUFFER_MB = 128.0   # Extra VRAM headroom per model actor
-RAM_BUFFER_MB = 256.0    # Extra RAM headroom per model actor
+# These account for Ray worker process overhead, framework (TF/PyTorch) initialization,
+# and runtime memory spikes.
+VRAM_BUFFER_MB = 1024.0   # 1GB Extra VRAM headroom per model actor
+RAM_BUFFER_MB = 1536.0    # 1.5GB Extra RAM headroom per model actor (includes Ray worker + framework cost)
 
 # GPU Mode - VRAM requirements (MB) for each model actor (first-load cost)
 # These include the CUDA context overhead (~500MB) that each actor pays
@@ -113,7 +115,7 @@ EQCCT_GPU_VRAM_MB = 1732.0   # TensorFlow + XLA compilation + inference buffers
 EQCCT_GPU_RAM_MB = 2311.0    # Heavy due to XLA compiled graph stored in system RAM
 EQCCT_CPU_RAM_MB = 728.0     # TensorFlow CPU-only runtime
 
-def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=500.0):
+def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=500.0, logger=None):
     """
     Get VRAM requirement for a SeisBench model including buffer.
     
@@ -121,15 +123,22 @@ def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=
         parent_model_name: SeisBench model class (e.g., 'PhaseNet')
         child_model_name: Pretrained version (e.g., 'original')
         default_mb: Default if model not found in lookup table
+        logger: Optional logger to warn when using default values
         
     Returns:
         float: Total VRAM in MB needed for one model actor
     """
     key = (parent_model_name, child_model_name)
-    base_vram = SEISBENCH_MODEL_VRAM_MB.get(key, default_mb)
+    if key not in SEISBENCH_MODEL_VRAM_MB:
+        if logger:
+            logger.warning(f"Unknown SeisBench model '{parent_model_name}/{child_model_name}' - using default VRAM estimate ({default_mb} MB). "
+                          f"Consider running measure_model_memory_usage.py to get accurate values.")
+        base_vram = default_mb
+    else:
+        base_vram = SEISBENCH_MODEL_VRAM_MB[key]
     return base_vram + VRAM_BUFFER_MB
 
-def get_seisbench_model_ram_mb(parent_model_name, child_model_name, use_gpu=True, default_mb=500.0):
+def get_seisbench_model_ram_mb(parent_model_name, child_model_name, use_gpu=True, default_mb=500.0, logger=None):
     """
     Get RAM requirement for a SeisBench model including buffer.
     
@@ -138,15 +147,21 @@ def get_seisbench_model_ram_mb(parent_model_name, child_model_name, use_gpu=True
         child_model_name: Pretrained version (e.g., 'original')
         use_gpu: Whether GPU mode is being used
         default_mb: Default if model not found in lookup table
+        logger: Optional logger to warn when using default values
         
     Returns:
         float: Total RAM in MB needed for one model actor
     """
     key = (parent_model_name, child_model_name)
-    if use_gpu:
-        base_ram = SEISBENCH_MODEL_RAM_MB.get(key, default_mb)
+    lookup_table = SEISBENCH_MODEL_RAM_MB if use_gpu else SEISBENCH_MODEL_CPU_RAM_MB
+    if key not in lookup_table:
+        mode_str = "GPU" if use_gpu else "CPU"
+        if logger:
+            logger.warning(f"Unknown SeisBench model '{parent_model_name}/{child_model_name}' in {mode_str} mode - using default RAM estimate ({default_mb} MB). "
+                          f"Consider running measure_model_memory_usage.py to get accurate values.")
+        base_ram = default_mb
     else:
-        base_ram = SEISBENCH_MODEL_CPU_RAM_MB.get(key, default_mb)
+        base_ram = lookup_table[key]
     return base_ram + RAM_BUFFER_MB
 
 def get_eqcct_vram_mb():
@@ -840,11 +855,22 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Use max of requested VRAM or model requirement (similar to EQCCT logic)
             model_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
             
-            model_actors = []
+            # Create N ModelActors where N = number_of_concurrent_station_predictions
+            # Distribute them across available GPUs using fractional GPU allocation
+            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            n_gpus = len(gpu_id)
+            actors_per_gpu = max(1, n_actors // n_gpus)
+            fractional_gpu = 1.0 / actors_per_gpu  # Each actor gets a fraction of a GPU
+            
+            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) across {n_gpus} GPU(s) ({actors_per_gpu} per GPU, {fractional_gpu:.2f} GPU each)")
             logger.info(f"Using GPUs: {gpu_id}")
-            for gpu_idx in gpu_id:
-                logger.info(f"Creating SeisBenchModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM requirement...")
-                actor = SeisBenchModelActor.options(num_gpus=1, num_cpus=0).remote(
+            
+            model_actors = []
+            for i in range(n_actors):
+                # Round-robin assignment to GPUs
+                gpu_idx = gpu_id[i % n_gpus]
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM requirement...")
+                actor = SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
                     gpus_to_use=[gpu_idx],
@@ -855,47 +881,85 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 except Exception as e:
                     logger.error(f"Failed to create SeisBenchModelActor on GPU {gpu_idx}: {e}")
                     raise
-                logger.info(f"SeisBenchModelActor created on GPU {gpu_idx}.")
+                logger.info(f"SeisBenchModelActor {i+1} created on GPU {gpu_idx}.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} GPU-sized SeisBenchModelActor(s).")
+            logger.info(f"Created {len(model_actors)} GPU-sized SeisBenchModelActor(s) with fractional GPU={fractional_gpu:.2f}.")
         else:
-            model_actors = [SeisBenchModelActor.options(num_cpus=1).remote(
-                parent_model_name=seisbench_parent_model,
-                child_model_name=seisbench_child_model,
-                gpus_to_use=False,
-                use_gpu=False
-            )]
-            ray.get(model_actors[0].ready.remote())
-            logger.info(f"Created a 1 CPU-sized SeisBenchModelActor")
+            # Create N SeisBench ModelActors for CPU where N = number_of_concurrent_station_predictions
+            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+            logger.info(f"Creating {n_actors} CPU-based SeisBenchModelActor(s)...")
+            
+            model_actors = []
+            for i in range(n_actors):
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on CPU...")
+                actor = SeisBenchModelActor.options(num_cpus=1).remote(
+                    parent_model_name=seisbench_parent_model,
+                    child_model_name=seisbench_child_model,
+                    gpus_to_use=False,
+                    use_gpu=False
+                )
+                try:
+                    ray.get(actor.ready.remote())
+                except Exception as e:
+                    logger.error(f"Failed to create SeisBenchModelActor on CPU: {e}")
+                    raise
+                logger.info(f"SeisBenchModelActor {i+1} created on CPU.")
+                model_actors.append(actor)
+            logger.info(f"Created {len(model_actors)} CPU-sized SeisBenchModelActor(s).")
     else:
-        # Create EQCCT model actors (original logic)
+        # Create EQCCT model actors
         if use_gpu:
             # Allocate more VRAM to model actors (they need to hold the full model)
             # Reserve ~2-3GB per model actor, adjust based on your model size
             model_vram_mb = max(gpu_memory_limit_mb, 1500)  # At least VRAM or 1.5GB for EQCCT (recorded EQCCT uses 1.3GB VRAM) 
             
-            # Create one model actor per GPU
-            model_actors = []
+            # Create N ModelActors where N = number_of_concurrent_station_predictions
+            # Distribute them across available GPUs using fractional GPU allocation
+            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            n_gpus = len(gpu_id)
+            actors_per_gpu = max(1, n_actors // n_gpus)
+            fractional_gpu = 1.0 / actors_per_gpu  # Each actor gets a fraction of a GPU
+            
+            logger.info(f"Creating {n_actors} ModelActor(s) across {n_gpus} GPU(s) ({actors_per_gpu} per GPU, {fractional_gpu:.2f} GPU each)")
             logger.info(f"Using GPUs: {gpu_id}")
-            for gpu_idx in gpu_id: # gpu_id is a list of GPU IDs and gpu_idx is the current GPU ID in the loop 
-                logger.info(f"Creating ModelActor on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
-                actor = ModelActor.options(num_gpus=1, num_cpus=0).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
+            
+            model_actors = []
+            for i in range(n_actors):
+                # Round-robin assignment to GPUs
+                gpu_idx = gpu_id[i % n_gpus]
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
+                actor = ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
                 # Wait for __init__ to complete and raise if error
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
                     logger.error(f"Failed to create ModelActor on GPU {gpu_idx}: {e}")
                     raise
-                logger.info(f"ModelActor created on GPU {gpu_idx}.")
+                logger.info(f"ModelActor {i+1} created on GPU {gpu_idx}.")
                 model_actors.append(actor)
                 
-            logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s).") 
+            logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s) with fractional GPU={fractional_gpu:.2f}.") 
             # Using CUDA_VISIBLE_DEVICES is not a reliable way to report which physical GPU is being used bc Ray can overwrite, clear, or remap the assigned GPU so that each worker sees them as local indices (often starting from 0)
-            logger.info(f"[ModelActor] Model successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
+            logger.info(f"[ModelActor] Models successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
         else:
-            # Create CPU model actor
-            model_actors = [ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)]
-            logger.info(f"Created a 1 CPU-sized ModelActor") 
+            # Create N EQCCT ModelActors for CPU where N = number_of_concurrent_station_predictions
+            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+            logger.info(f"Creating {n_actors} CPU-based ModelActor(s)...")
+            
+            model_actors = []
+            for i in range(n_actors):
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} on CPU...")
+                actor = ModelActor.options(num_cpus=1).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)
+                try:
+                    ray.get(actor.ready.remote())
+                except Exception as e:
+                    logger.error(f"Failed to create ModelActor on CPU: {e}")
+                    raise
+                logger.info(f"ModelActor {i+1} created on CPU.")
+                model_actors.append(actor)
+            logger.info(f"Created {len(model_actors)} CPU-sized ModelActor(s).") 
 
     # Submit tasks to ray in a queue
     tasks_queue = []

@@ -273,51 +273,133 @@ There are more examples on how to use EQCCTPro using different SeisBench and EQC
 
 # **Understanding Evaluation Results (CSV Columns)**
 
-The `EvaluateSystem` functionality generates a detailed CSV file (e.g., `cpu_test_results.csv` or `gpu_test_results.csv`) to help you analyze performance and memory utilization. Below are the definitions for all columns:
+The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results.csv` or `gpu_test_results.csv`) with **PID-isolated absolute memory tracking**. This ensures accurate measurements even when running multiple EvaluateSystem instances in parallel on the same machine.
 
-### **Core Parameters**
+### **Core Configuration**
 - **`Trial Number`**: The sequential ID of the benchmark test.
-- **`Stations Used`**: A list of the specific station codes processed in the trial.
+- **`Model Used`**: The specific model/weights pair tested (e.g., `PhaseNet/stead`).
 - **`Number of Stations Used`**: Total number of stations processed.
 - **`Number of CPUs Allocated for Ray to Use`**: The CPU affinity limit set for the Ray cluster.
-- **`Intra-parallelism Threads` / `Inter-parallelism Threads`**: TensorFlow-specific threading configurations.
 - **`GPUs Used`**: List of physical GPU IDs utilized (e.g., `[0, 1]`).
-- **`Inference Actor Memory Limit (MB)`**: The VRAM ceiling per shared inference actor.
-- **`Total Waveform Analysis Timespace (min)`**: Total duration of the analyzed waveforms.
-- **`Total Number of Timechunks`**: Number of temporal segments the data was split into.
-- **`Concurrent Timechunks Used`**: Number of timechunks processed in parallel.
-- **`Length of Timechunk (min)`**: Duration of a single timechunk.
+- **`N ModelActors`**: The total number of Ray ModelActors spawned for parallel inference.
 - **`Number of Concurrent Station Tasks`**: Concurrency level for station predictions.
+- **`Concurrent Timechunks Used`**: Number of timechunks processed in parallel.
+- **`Total Number of Timechunks`**: Number of temporal segments the data was split into.
+- **`Length of Timechunk (min)`**: Duration of a single timechunk.
+- **`Total Waveform Analysis Timespace (min)`**: Total duration of the analyzed waveforms.
+
+### **Model-Requested Memory (Theoretical)**
+*These values represent the expected memory footprint based on empirical model data.*
+- **`Requested VRAM per Actor (MB)`**: Theoretical VRAM required for one model instance (GPU trials only). **Includes safety buffer** (1024 MB).
+- **`Requested RAM per Actor (MB)`**: Theoretical system RAM required for one model instance (CPU trials). **Includes safety buffer** (1536 MB).
+- **`Total Requested VRAM (MB)`**: The total theoretical VRAM footprint expected (`N ModelActors × Requested per Actor`).
+- **`Total Requested RAM (MB)`**: The total theoretical RAM footprint expected (`N ModelActors × Requested per Actor`).
+
+### **Actual Memory Used (PID-Isolated Absolute Values)**
+*These are absolute values for THIS specific process tree only. Unlike deltas, these will never be 0 when workers are reused.*
+
+- **`Process Tree VRAM (MB)`**: The **absolute** VRAM used by this process tree (main PID + all child workers) on the assigned GPUs. Calculated using `pynvml` to query which of our specific PIDs are running on the GPU and their exact VRAM consumption.
+- **`Num GPU Processes`**: Number of processes from this trial found running on the GPUs.
+- **`Process Tree RAM (MB)`**: The **absolute** combined RSS (Resident Set Size) of the main process and all its child processes (Ray workers). This is the total RAM this process tree is currently consuming.
+- **`Peak RAM (MB)`**: The **maximum** RSS observed during the trial, captured via `getrusage()`. Useful for understanding peak memory pressure during inference.
+- **`RAM Growth (MB)`**: The increase in RAM during the trial (`Process Tree RAM (after) - Process Tree RAM (before)`). Shows how much additional RAM was allocated during the trial.
+- **`Num Worker Processes`**: Total number of Ray worker processes in this process tree.
+
+### **Memory Overhead (Ray + Framework Cost)**
+*Overhead represents the difference between the actual memory consumed and the theoretical model requirements. This includes memory used by Ray infrastructure (Raylets, worker processes), TensorFlow/PyTorch framework buffers, CUDA context, and other runtime overhead.*
+
+- **`VRAM Overhead (MB)`**: The additional VRAM consumed beyond what was theoretically requested (`Process Tree VRAM - Total Requested VRAM`). A **positive value** indicates that Ray/CUDA/framework infrastructure uses more memory than just the model weights. A **negative value** would indicate that the actual usage is less than expected (rare).
+- **`RAM Overhead (MB)`**: The additional system RAM consumed beyond what was theoretically requested (`Process Tree RAM - Total Requested RAM`). This is calculated for **both** CPU and GPU trials since Ray workers and data processing always use RAM regardless of whether models run on GPU.
+
+**Overhead Breakdown:**
+The overhead typically consists of:
+1. **CUDA Context**: ~400-500 MB per GPU for CUDA library initialization.
+2. **Ray Raylets**: ~100-200 MB per Raylet process for Ray's distributed runtime.
+3. **Ray Workers**: ~50-150 MB per worker process for Python interpreter and framework imports.
+4. **TensorFlow/PyTorch Buffers**: Variable memory for gradient caching, intermediate tensors, and framework-specific optimizations.
+5. **Safety Buffer**: ~1024 MB (1 GB) for VRAM and ~1536 MB (1.5 GB) for RAM reserved for operational stability and framework overhead.
+
+### **Efficiency & Performance**
+- **`VRAM Utilization (%)`**: How much VRAM is actually being used relative to what was requested (`Process Tree VRAM / Total Requested VRAM × 100`). Values **>100%** indicate overhead exceeds buffer allocations; values **<100%** indicate underutilization or efficient memory sharing.
+- **`RAM Utilization (%)`**: How much RAM is actually being used relative to what was requested (`Process Tree RAM / Total Requested RAM × 100`). Similar interpretation to VRAM utilization.
 - **`Total Run time for Picker (s)`**: The wall-clock time taken to complete the workload.
-- **`Model Used`**: The specific model/weights pair tested (e.g., `PhaseNet/stead`).
-
-### **System-Wide RAM (Physical Memory)**
-- **`System Total RAM (MB)`**: Total physical RAM available on the host machine.
-- **`System Available RAM Before (MB)`**: Unused RAM available before the trial started.
-- **`System Available RAM After (MB)`**: Unused RAM available after the trial finished.
-
-### **Process/Main RAM (Driver Process)**
-- **`Process RAM Baseline (MB)`**: Initial RAM usage of the main Python driver process.
-- **`Process RAM After Run (MB)`**: RAM usage of the main process after trial execution.
-- **`Process RAM Delta (MB)`**: The net change in main process memory consumption (\(After - Baseline\)).
-- **`Process RAM Peak (MB)`**: The maximum recorded memory (RSS) reached by the main process during the trial.
-
-### **Raylet Worker/Raylet RAM (Parallel Processes)**
-- **`Num Raylet Processes`**: Number of child processes (workers) spawned by Ray.
-- **`Total Raylet RAM (MB)`**: Combined Resident Set Size (RSS) of all Ray worker processes.
-- **`Avg Raylet RAM (MB)`**: Average RAM consumption per individual worker process.
-- **`Max Raylet RAM (MB)`**: The RAM usage of the single largest worker process.
-
-### **GPU VRAM (Video Memory)**
-*Note: These columns are populated only for GPU evaluation modes.*
-- **`GPU Total VRAM (MB)`**: Total combined VRAM of the selected GPUs.
-- **`GPU VRAM Free Before (MB)`**: Combined free VRAM across selected GPUs before trial start.
-- **`GPU VRAM Free After (MB)`**: Combined free VRAM across selected GPUs after trial completion.
-- **`GPU VRAM Used by Trial (MB)`**: Total VRAM consumed by model loading and inference during the trial.
+- **`Intra-parallelism Threads` / `Inter-parallelism Threads`**: TensorFlow-specific threading configurations.
+- **`Inference Actor Memory Limit (MB)`**: Legacy VRAM ceiling per shared inference actor.
 
 ### **Trial Outcome**
 - **`Trial Success`**: `1` for success, `0` for failure.
-- **`Error Message`**: Detailed exception info if the trial failed (e.g., OOM error details).
+- **`Error Message`**: Detailed exception info if the trial failed (e.g., OOM prevention details).
+- **`Stations Used`**: (Legacy) List of specific station codes processed.
+
+---
+
+# **Understanding Memory Consumption Patterns**
+
+When analyzing evaluation results, it's important to understand why memory values vary between trials. This section explains the patterns you'll observe.
+
+## How Memory Values Are Calculated
+
+| Column | Formula | Description |
+|--------|---------|-------------|
+| **Requested RAM per Actor** | `Model_RAM + RAM_BUFFER (1536 MB)` | Theoretical per-actor cost from isolated testing |
+| **Total Requested RAM** | `N × Requested_per_Actor + N × 256 MB` | Worst-case estimate for N fresh actors |
+| **Process Tree RAM** | `sum(RSS of main + all children)` | Actual total footprint at snapshot time |
+| **RAM Growth** | `Process_Tree_RAM(after) - Process_Tree_RAM(before)` | What THIS specific trial added |
+
+## Why RAM Growth Varies Between Trials
+
+### Pattern 1: New Actor Spawned → Large Growth (+1000-3000 MB)
+
+When a trial needs **more actors than currently exist in the Ray session**, new ones are spawned:
+
+| Trial | N Actors | RAM Growth | What Happened |
+|-------|----------|------------|---------------|
+| 1 | 1 | +1128 MB | 🆕 First actor spawned |
+| 3 | 2 | +1596 MB | 🆕 Second actor spawned |
+| 6 | 3 | +2931 MB | 🆕 Third actor spawned |
+
+Each new actor costs ~1500-3000 MB (model weights + TensorFlow runtime + Ray worker).
+
+### Pattern 2: Existing Actors Reused → Minimal Growth (<100 MB)
+
+When a trial needs **fewer or equal actors** than already exist, Ray reuses them:
+
+| Trial | N Actors | RAM Growth | What Happened |
+|-------|----------|------------|---------------|
+| 4 | 1 | -61 MB | ♻️ Reused existing actor |
+| 7 | 1 | +3.74 MB | ♻️ Reused existing actor |
+| 8 | 2 | +1.94 MB | ♻️ Reused existing actors |
+
+**Idle actors stay in memory** - Ray doesn't deallocate them between trials within the same session.
+
+### Pattern 3: Process Tree RAM Shows "High Water Mark"
+
+Since `ray.shutdown()` is only called **once per CPU count configuration** (not between individual trials), the Process Tree RAM reflects the **maximum actors ever spawned** in that session:
+
+```
+Trial 1:  Spawn 1 actor  → Process Tree RAM ~2500 MB
+Trial 3:  Spawn 2 actors → Process Tree RAM ~4000 MB  
+Trial 6:  Spawn 3 actors → Process Tree RAM ~6100 MB  ← Peak for 3 actors
+Trial 7:  Use only 1     → Process Tree RAM ~3867 MB  ← Still shows accumulated memory
+```
+
+## Why "Actual < Requested" (Negative Overhead)
+
+You may see **RAM Utilization < 100%** or negative overhead. This is normal because:
+
+1. **Ray Worker Pooling**: Multiple actors share Python libraries, TensorFlow runtime, and Ray infrastructure
+2. **Copy-on-Write**: Linux shares memory pages between forked processes until modified
+3. **Conservative Buffers**: The 1.5 GB buffer is a worst-case estimate; actual usage is often lower
+
+## Quick Reference: Reading the CSV
+
+| If you see... | It means... |
+|---------------|-------------|
+| Large RAM Growth (+1000+ MB) | New ModelActor was spawned |
+| Small RAM Growth (<100 MB) | Existing actors were reused |
+| Process Tree RAM much higher than Requested | Accumulated from previous trials in session |
+| RAM Utilization < 100% | Memory sharing between actors (efficient) |
+| RAM Utilization > 100% | Overhead exceeded buffers (rare, may need larger safety cap) |
 
 ---
 

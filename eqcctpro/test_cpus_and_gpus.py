@@ -18,8 +18,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct'),
 #     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct', 'eqcctpro.log'),
 #     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct'),
-#     cpu_id_list=range(0, 15),
-#     min_cpu_amount=1,
+#     cpu_id_list=range(0, 20),
+#     min_cpu_amount=5,
 #     cpu_test_step_size=1,
 #     stations2use=100,
 #     starting_amount_of_stations=1,
@@ -45,8 +45,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     csv_dir=os.path.join(csv_filepath, 'eval_gpu_eqcct'),
 #     selected_gpus=[0, 1],
 #     max_vram_mb=93100,
-#     cpu_id_list=range(15, 30),
-#     min_cpu_amount=1,
+#     cpu_id_list=range(20, 40),
+#     min_cpu_amount=5,
 #     cpu_test_step_size=1,
 #     stations2use=100,                                               
 #     starting_amount_of_stations=1,
@@ -73,8 +73,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     output_dir=os.path.join(output_pick_directory_path, f'eval_cpu_phasenet_original'),
 #     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_phasenet_original', 'eqcctpro.log'),
 #     csv_dir=os.path.join(csv_filepath, 'eval_cpu_phasenet_original'),
-#     cpu_id_list=range(15, 30), # (30, 45) for GPU evaluation 1/20/26 approved by costaki to do 15, 30 - hi costaki i love you be good bye :)
-#     min_cpu_amount=1,
+#     cpu_id_list=range(40, 60),
+#     min_cpu_amount=5,
 #     cpu_test_step_size=1,
 #     stations2use=100,
 #     starting_amount_of_stations=1,
@@ -89,32 +89,32 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_phasenet_original.evaluate()
 
 # --- Example D: Evaluate System capability using PhaseNetLight Model (CPU/GPU) ---
-eval_phasenetlight_stead = EvaluateSystem(
-    eval_mode='cpu',
-    # eval_mode='gpu',
-    # selected_gpus=[0, 1],
-    # max_vram_mb=93100,
-    model_type='seisbench',
-    seisbench_parent_model='PhaseNetLight',
-    seisbench_child_model='stead',
-    input_dir=input_mseed_directory_path,
-    output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_phasenetlight_stead'),
-    log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_phasenetlight_stead', 'eqcctpro.log'),
-    csv_dir=os.path.join(csv_filepath, 'eval_cpu_phasenetlight_stead'),
-    cpu_id_list=range(75, 90),
-    min_cpu_amount=1,
-    cpu_test_step_size=1,
-    stations2use=100,
-    starting_amount_of_stations=1,
-    station_list_step_size=1,
-    min_conc_stations=1,
-    conc_station_tasks_step_size=1,
-    ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
-    tmp_dir=tmp_dir,
-    start_time='2024-12-15 12:00:00',
-    end_time='2024-12-15 12:01:00'
-)
-eval_phasenetlight_stead.evaluate()
+# eval_phasenetlight_stead = EvaluateSystem(
+#     eval_mode='cpu',
+#     # eval_mode='gpu',
+#     # selected_gpus=[0, 1],
+#     # max_vram_mb=93100,
+#     model_type='seisbench',
+#     seisbench_parent_model='PhaseNetLight',
+#     seisbench_child_model='stead',
+#     input_dir=input_mseed_directory_path,
+#     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_phasenetlight_stead'),
+#     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_phasenetlight_stead', 'eqcctpro.log'),
+#     csv_dir=os.path.join(csv_filepath, 'eval_cpu_phasenetlight_stead'),
+#     cpu_id_list=range(60, 80),
+#     min_cpu_amount=5,
+#     cpu_test_step_size=1,
+#     stations2use=100,
+#     starting_amount_of_stations=1,
+#     station_list_step_size=1,
+#     min_conc_stations=1,
+#     conc_station_tasks_step_size=1,
+#     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
+#     tmp_dir=tmp_dir,
+#     start_time='2024-12-15 12:00:00',
+#     end_time='2024-12-15 12:01:00'
+# )
+# eval_phasenetlight_stead.evaluate()
 
 
 # --- Example E: Evaluate System capability using EQTransformer Model (CPU/GPU) ---
@@ -130,8 +130,8 @@ eval_phasenetlight_stead.evaluate()
 #     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_original'),
 #     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_original', 'eqcctpro.log'),
 #     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqtransformer_original'),
-#     cpu_id_list=range(45, 60),
-#     min_cpu_amount=1,
+#     cpu_id_list=range(80, 100),
+#     min_cpu_amount=5,
 #     cpu_test_step_size=1,
 #     stations2use=100,
 #     starting_amount_of_stations=1,
@@ -146,29 +146,29 @@ eval_phasenetlight_stead.evaluate()
 # eval_eqtransformer_original.evaluate()
 
 # --- Example F: Evaluate System capability using EQTransformer Model (CPU/GPU) ---
-# eval_eqtransformer_original_nonconservative = EvaluateSystem(
-#     eval_mode='cpu',
-#     # eval_mode='gpu',
-#     # selected_gpus=[0, 1],
-#     # max_vram_mb=93100,
-#     model_type='seisbench',
-#     seisbench_parent_model='EQTransformer',
-#     seisbench_child_model='original_nonconservative',
-#     input_dir=input_mseed_directory_path,
-#     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative'),
-#     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative', 'eqcctpro.log'),
-#     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqtransformer_nonconservative'),
-#     cpu_id_list=range(60, 75),
-#     min_cpu_amount=1,
-#     cpu_test_step_size=1,
-#     stations2use=100,
-#     starting_amount_of_stations=1,
-#     station_list_step_size=1,
-#     min_conc_stations=1,
-#     conc_station_tasks_step_size=1,
-#     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
-#     tmp_dir=tmp_dir,
-#     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00'
-# )
-# eval_eqtransformer_original_nonconservative.evaluate()
+eval_eqtransformer_original_nonconservative = EvaluateSystem(
+    eval_mode='cpu',
+    # eval_mode='gpu',
+    # selected_gpus=[0, 1],
+    # max_vram_mb=93100,
+    model_type='seisbench',
+    seisbench_parent_model='EQTransformer',
+    seisbench_child_model='original_nonconservative',
+    input_dir=input_mseed_directory_path,
+    output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative'),
+    log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqtransformer_nonconservative', 'eqcctpro.log'),
+    csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqtransformer_nonconservative'),
+    cpu_id_list=range(100, 120),
+    min_cpu_amount=5,
+    cpu_test_step_size=1,
+    stations2use=100,
+    starting_amount_of_stations=1,
+    station_list_step_size=1,
+    min_conc_stations=1,
+    conc_station_tasks_step_size=1,
+    ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
+    tmp_dir=tmp_dir,
+    start_time='2024-12-15 12:00:00',
+    end_time='2024-12-15 12:01:00'
+)
+eval_eqtransformer_original_nonconservative.evaluate()
