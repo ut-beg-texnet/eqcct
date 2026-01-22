@@ -215,8 +215,33 @@ Before running large-scale production jobs, use `EvaluateSystem` to benchmark yo
 ### **Key Benchmark Optimizations**
 - **20% Step Size**: Automatically tests station concurrency at 20%, 40%, 60%, 80%, and 100% levels.
 - **Redundancy Filtering**: Skips configurations that are already in the results CSV, allowing for interrupted evaluations to resume instantly.
-- **GPU Resource Slicing**: Dynamically calculates per-task VRAM limits based on an aggregate pool.
-- **Fractional CPU Allocation**: Dynamically assigns fractional CPU resources (e.g., 0.8 CPU/actor) when concurrency exceeds physical core count. This ensures all ModelActors can initialize and time-share available cores instead of blocking indefinitely.
+- **Optimal Actor Pool Architecture**: Deep learning frameworks (TensorFlow/PyTorch) cannot share GPU memory between processes. EQCCTPro creates exactly 1 ModelActor per GPU (or 1 per CPU), with tasks distributed via round-robin. This achieves parallelism without memory conflicts.
+- **Automatic Ray Restart for OOM Prevention**: When increasing concurrency between trials, actors from previous trials may remain in GPU/RAM. If spawning new actors alongside existing ones would exceed the user-defined VRAM/RAM capacity (`max_vram_mb` / `ram_safety_cap`), Ray is automatically restarted to clear memory before the trial runs. This prevents unexpected OOM crashes during benchmark progression.
+
+### **Optimal Actor Pool Architecture (Technical Details)**
+
+EQCCTPro uses a hardware-aware actor pool design for maximum efficiency:
+
+| Mode | Actor Creation | Concurrency Method |
+|------|----------------|-------------------|
+| **GPU** | 1 ModelActor per physical GPU | Task queue with round-robin |
+| **CPU** | 1 ModelActor per physical CPU | Task queue with round-robin |
+
+**Why not create N actors for N concurrent tasks?**
+- **GPU**: TensorFlow/PyTorch allocate GPU memory based on their own configs, not Ray's fractional GPU hints. Multiple actors on the same GPU cause OOM.
+- **CPU**: Each actor loads a full model copy into RAM. More actors than CPUs wastes memory and causes thrashing.
+
+**How concurrency works:**
+```
+Example: 2 GPUs, 50 stations to process
+- 2 ModelActors created (1 per GPU)
+- 50 tasks submitted to queue
+- Tasks round-robin distributed: Actor 0 gets tasks 0,2,4,...; Actor 1 gets tasks 1,3,5,...
+- Both actors process in parallel, each handling 25 tasks sequentially
+- Result: 2x parallelism without memory conflicts
+```
+
+The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to hardware limits).
 
 ### **Example: Evaluating GPU Performance**
 ```python
@@ -329,7 +354,7 @@ The overhead typically consists of:
 
 ### **Trial Outcome**
 - **`Trial Success`**: `1` for success, `0` for failure.
-- **`Error Message`**: Detailed exception info if the trial failed (e.g., OOM prevention details).
+- **`Error Message`**: Detailed exception info if the trial failed (e.g., OOM prevention details). It also contains informational notes like **`[RAY RESTART]`** if Ray was restarted before the trial to clear memory and prevent OOM.
 - **`Stations Used`**: (Legacy) List of specific station codes processed.
 
 ---

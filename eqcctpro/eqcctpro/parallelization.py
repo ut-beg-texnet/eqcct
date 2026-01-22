@@ -842,6 +842,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     logger.info(f"Creating model actor(s)...") 
     
     model_type_lower = model_type.lower() if model_type else 'eqcct'
+    model_vram_mb = None  # Defensive init; will be set in GPU branches, remains None for CPU
     
     if model_type_lower == 'seisbench':
         # Create SeisBench model actors
@@ -855,22 +856,32 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Use max of requested VRAM or model requirement (similar to EQCCT logic)
             model_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
             
-            # Create N ModelActors where N = number_of_concurrent_station_predictions
-            # Distribute them across available GPUs using fractional GPU allocation
-            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            # ===== OPTIMAL GPU ACTOR CREATION =====
+            # KEY INSIGHT: PyTorch/TensorFlow allocate GPU memory based on their own config,
+            # NOT Ray's fractional GPU. Each actor needs exclusive GPU access.
+            # Concurrency is achieved via the task queue, not via actor count.
             n_gpus = len(gpu_id)
-            actors_per_gpu = max(1, n_actors // n_gpus)
-            fractional_gpu = 1.0 / actors_per_gpu  # Each actor gets a fraction of a GPU
+            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) across {n_gpus} GPU(s) ({actors_per_gpu} per GPU, {fractional_gpu:.2f} GPU each)")
-            logger.info(f"Using GPUs: {gpu_id}")
+            # CAP actors to 1 per GPU - this is the OPTIMAL configuration for deep learning
+            # Multiple actors per GPU causes memory conflicts since frameworks don't share VRAM
+            n_actors = min(requested_actors, n_gpus)
+            
+            logger.info(f"===== OPTIMAL GPU ACTOR POOL =====")
+            logger.info(f"Requested concurrent tasks: {requested_actors}")
+            logger.info(f"Available GPUs: {n_gpus}")
+            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) (1 per GPU, optimal for deep learning)")
+            if requested_actors > n_actors:
+                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                logger.info(f"      This achieves parallelism without GPU memory conflicts.")
+            logger.info(f"Using GPUs: {gpu_id[:n_actors]}")
             
             model_actors = []
             for i in range(n_actors):
-                # Round-robin assignment to GPUs
-                gpu_idx = gpu_id[i % n_gpus]
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM requirement...")
-                actor = SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
+                gpu_idx = gpu_id[i]  # Each actor gets its own dedicated GPU
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on GPU {gpu_idx} (dedicated, {model_vram_mb/1024:.2f}GB VRAM)...")
+                # Each actor gets 1 full GPU (not fractional) for exclusive memory access
+                actor = SeisBenchModelActor.options(num_gpus=1.0, num_cpus=0).remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
                     gpus_to_use=[gpu_idx],
@@ -883,30 +894,36 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     raise
                 logger.info(f"SeisBenchModelActor {i+1} created on GPU {gpu_idx}.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} GPU-sized SeisBenchModelActor(s) with fractional GPU={fractional_gpu:.2f}.")
+            logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
         else:
-            # Create N SeisBench ModelActors for CPU where N = number_of_concurrent_station_predictions
-            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-            
-            # Calculate fractional CPU allocation similar to GPU mode
-            # This allows more actors than CPUs by time-sharing (Ray uses logical resources)
+            # ===== OPTIMAL CPU ACTOR CREATION =====
+            # KEY INSIGHT: Each actor loads a full model copy into RAM.
+            # Creating more actors than CPUs wastes RAM and causes thrashing.
+            # Concurrency is achieved via the task queue, not via actor count.
             n_cpus = len(ray_cpus) if ray_cpus else 1
-            # Each actor gets a fraction of the available CPUs
-            # If n_actors <= n_cpus, each gets 1 full CPU
-            # If n_actors > n_cpus, they share via fractional allocation
-            fractional_cpu = n_cpus / n_actors if n_actors > n_cpus else 1.0
-            fractional_cpu = max(0.1, fractional_cpu)  # Ensure at least 0.1 CPU per actor to avoid scheduling issues
+            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            logger.info(f"Creating {n_actors} CPU-based SeisBenchModelActor(s) across {n_cpus} CPU(s) ({fractional_cpu:.2f} CPU each)")
+            # CAP actors to number of CPUs - this is the OPTIMAL configuration
+            # Each actor gets 1 full CPU for efficient sequential processing
+            n_actors = min(requested_actors, n_cpus)
+            
+            logger.info(f"===== OPTIMAL CPU ACTOR POOL =====")
+            logger.info(f"Requested concurrent tasks: {requested_actors}")
+            logger.info(f"Available CPUs: {n_cpus}")
+            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) (1 per CPU, optimal for CPU inference)")
+            if requested_actors > n_actors:
+                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                logger.info(f"      This achieves parallelism without RAM exhaustion or CPU thrashing.")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on CPU with {fractional_cpu:.2f} CPU allocation...")
-                actor = SeisBenchModelActor.options(num_cpus=fractional_cpu).remote(
-                    parent_model_name=seisbench_parent_model,
-                    child_model_name=seisbench_child_model,
-                    gpus_to_use=False,
-                    use_gpu=False
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on CPU (dedicated, 1.0 CPU)...")
+                # Each actor gets 1 full CPU for efficient processing
+                actor = SeisBenchModelActor.options(num_cpus=1.0).remote(
+                parent_model_name=seisbench_parent_model,
+                child_model_name=seisbench_child_model,
+                gpus_to_use=False,
+                use_gpu=False
                 )
                 try:
                     ray.get(actor.ready.remote())
@@ -915,31 +932,44 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     raise
                 logger.info(f"SeisBenchModelActor {i+1} created on CPU.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} CPU-sized SeisBenchModelActor(s) with fractional CPU={fractional_cpu:.2f}.")
+            logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.")
     else:
         # Create EQCCT model actors
         if use_gpu:
-            # Allocate more VRAM to model actors (they need to hold the full model)
-            # Reserve ~2-3GB per model actor, adjust based on your model size
-            model_vram_mb = max(gpu_memory_limit_mb, 1500)  # At least VRAM or 1.5GB for EQCCT (recorded EQCCT uses 1.3GB VRAM) 
+            # ===== OPTIMAL GPU ACTOR CREATION (EQCCT/TensorFlow) =====
+            # KEY INSIGHT: TensorFlow allocates GPU memory based on gpu_memory_limit_mb,
+            # NOT Ray's fractional GPU. Each actor needs exclusive GPU access.
+            # Concurrency is achieved via the task queue, not via actor count.
+            model_vram_mb = max(gpu_memory_limit_mb, 1500) if gpu_memory_limit_mb else 1500
             
-            # Create N ModelActors where N = number_of_concurrent_station_predictions
-            # Distribute them across available GPUs using fractional GPU allocation
-            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             n_gpus = len(gpu_id)
-            actors_per_gpu = max(1, n_actors // n_gpus)
-            fractional_gpu = 1.0 / actors_per_gpu  # Each actor gets a fraction of a GPU
+            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            logger.info(f"Creating {n_actors} ModelActor(s) across {n_gpus} GPU(s) ({actors_per_gpu} per GPU, {fractional_gpu:.2f} GPU each)")
-            logger.info(f"Using GPUs: {gpu_id}")
+            # CAP actors to 1 per GPU - this is the OPTIMAL configuration for deep learning
+            # TensorFlow cannot share GPU memory between processes reliably
+            n_actors = min(requested_actors, n_gpus)
+            
+            logger.info(f"===== OPTIMAL GPU ACTOR POOL (EQCCT) =====")
+            logger.info(f"Requested concurrent tasks: {requested_actors}")
+            logger.info(f"Available GPUs: {n_gpus}")
+            logger.info(f"Creating {n_actors} ModelActor(s) (1 per GPU, optimal for TensorFlow)")
+            if requested_actors > n_actors:
+                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                logger.info(f"      This achieves parallelism without GPU memory conflicts.")
+            logger.info(f"Using GPUs: {gpu_id[:n_actors]}")
             
             model_actors = []
             for i in range(n_actors):
-                # Round-robin assignment to GPUs
-                gpu_idx = gpu_id[i % n_gpus]
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} on GPU {gpu_idx} with {model_vram_mb/1024:.2f}GB VRAM limit...")
-                actor = ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(gpus_to_use=[gpu_idx], p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=model_vram_mb, use_gpu=True)
-                # Wait for __init__ to complete and raise if error
+                gpu_idx = gpu_id[i]  # Each actor gets its own dedicated GPU
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} on GPU {gpu_idx} (dedicated, {model_vram_mb/1024:.2f}GB VRAM limit)...")
+                # Each actor gets 1 full GPU (not fractional) for exclusive memory access
+                actor = ModelActor.options(num_gpus=1.0, num_cpus=0).remote(
+                    gpus_to_use=[gpu_idx], 
+                    p_model_path=p_model, 
+                    s_model_path=s_model, 
+                    gpu_memory_limit_mb=model_vram_mb, 
+                    use_gpu=True
+                )
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
@@ -948,28 +978,38 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 logger.info(f"ModelActor {i+1} created on GPU {gpu_idx}.")
                 model_actors.append(actor)
                 
-            logger.info(f"Created {len(model_actors)} GPU-sized ModelActor(s) with fractional GPU={fractional_gpu:.2f}.") 
-            # Using CUDA_VISIBLE_DEVICES is not a reliable way to report which physical GPU is being used bc Ray can overwrite, clear, or remap the assigned GPU so that each worker sees them as local indices (often starting from 0)
-            logger.info(f"[ModelActor] Models successfully loaded onto {'GPU' if use_gpu else 'CPU'}.") # Better way to log is to use ray.get_gpu_ids()
+            logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
+            logger.info(f"[ModelActor] Models successfully loaded onto GPU(s).")
         else:
-            # Create N EQCCT ModelActors for CPU where N = number_of_concurrent_station_predictions
-            n_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-            
-            # Calculate fractional CPU allocation similar to GPU mode
-            # This allows more actors than CPUs by time-sharing (Ray uses logical resources)
+            # ===== OPTIMAL CPU ACTOR CREATION (EQCCT/TensorFlow) =====
+            # KEY INSIGHT: Each actor loads a full TensorFlow model copy into RAM.
+            # Creating more actors than CPUs wastes RAM and causes thrashing.
+            # Concurrency is achieved via the task queue, not via actor count.
             n_cpus = len(ray_cpus) if ray_cpus else 1
-            # Each actor gets a fraction of the available CPUs
-            # If n_actors <= n_cpus, each gets 1 full CPU
-            # If n_actors > n_cpus, they share via fractional allocation
-            fractional_cpu = n_cpus / n_actors if n_actors > n_cpus else 1.0
-            fractional_cpu = max(0.1, fractional_cpu)  # Ensure at least 0.1 CPU per actor to avoid scheduling issues
+            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            logger.info(f"Creating {n_actors} CPU-based ModelActor(s) across {n_cpus} CPU(s) ({fractional_cpu:.2f} CPU each)")
+            # CAP actors to number of CPUs - this is the OPTIMAL configuration
+            # Each actor gets 1 full CPU for efficient sequential processing
+            n_actors = min(requested_actors, n_cpus)
+            
+            logger.info(f"===== OPTIMAL CPU ACTOR POOL (EQCCT) =====")
+            logger.info(f"Requested concurrent tasks: {requested_actors}")
+            logger.info(f"Available CPUs: {n_cpus}")
+            logger.info(f"Creating {n_actors} ModelActor(s) (1 per CPU, optimal for TensorFlow CPU inference)")
+            if requested_actors > n_actors:
+                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                logger.info(f"      This achieves parallelism without RAM exhaustion or CPU thrashing.")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} on CPU with {fractional_cpu:.2f} CPU allocation...")
-                actor = ModelActor.options(num_cpus=fractional_cpu).remote(p_model_path=p_model, s_model_path=s_model, gpu_memory_limit_mb=None, use_gpu=False)
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} on CPU (dedicated, 1.0 CPU)...")
+                # Each actor gets 1 full CPU for efficient processing
+                actor = ModelActor.options(num_cpus=1.0).remote(
+                    p_model_path=p_model, 
+                    s_model_path=s_model, 
+                    gpu_memory_limit_mb=None, 
+                    use_gpu=False
+                )
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
@@ -977,7 +1017,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     raise
                 logger.info(f"ModelActor {i+1} created on CPU.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} CPU-sized ModelActor(s) with fractional CPU={fractional_cpu:.2f}.") 
+            logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.") 
 
     # Submit tasks to ray in a queue
     tasks_queue = []
@@ -1075,7 +1115,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
         else:
             model_used = "eqcct"
 
-        # To-Do: Add column for CPU IDs 
+        # N ModelActors = actual actors created (capped to hardware limits)
+        # This may be less than number_of_concurrent_station_predictions due to optimal capping
+        actual_actors = len(model_actors) if model_actors else 1
+        
         trial_data = {
             "Trial Number": None,  # Will be auto-filled by append_trial_row
             "Stations Used": str(station_list),
@@ -1089,6 +1132,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
             "Concurrent Timechunks Used": int(number_of_concurrent_timechunk_predictions) if number_of_concurrent_timechunk_predictions is not None else "",
             "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
+            "N ModelActors": actual_actors,  # Actual actors created (capped to hardware)
             "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
             "Total Run time for Picker (s)": round(end_time - start_time, 6),
             "Model Used": model_used,

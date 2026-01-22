@@ -671,6 +671,10 @@ class EvaluateSystem():
                 self._log_thread.start() # Starts the thread
                 self.logger.info(f"Ray Successfully Initialized with {len(cpus_to_use)} CPU(s) ({list(cpus_to_use)} CPU Affinity Binding).")
                 
+                # Track the highest number of actors spawned in this Ray session
+                # This is used to detect when we need to restart Ray to avoid OOM
+                actors_high_water_mark = 0
+                
                 timechunks_list = []
                 timechunk = 1
                 step = self.conc_timechunk_tasks_step_size # Use the class attribute
@@ -720,12 +724,22 @@ class EvaluateSystem():
                 # This ensures the check is based on what the computer can handle physically
                 aggregate_ram_cap_mb = system_ram_total_mb * self.ram_safety_cap
                 
-                # Calculate max concurrent actors based on RAM
-                # Each actor needs model_ram_per_actor_mb + overhead
+                # ===== OPTIMAL ACTOR CAPPING (CPU) =====
+                # KEY INSIGHT: Each ModelActor loads a full model copy into RAM.
+                # Creating more actors than CPUs wastes RAM and causes thrashing.
+                # Actors are capped to hardware in parallelization.py, so actual memory = capped_actors * per_actor
+                
+                # Hardware limit: 1 actor per CPU (efficient CPU utilization)
+                max_actors_by_hardware = len(cpus_to_use)
+                
+                # Memory limit: how many actors fit in RAM
                 ram_per_actor = model_ram_per_actor_mb + overhead_ram_per_task_mb
-                max_actors = int(aggregate_ram_cap_mb // ram_per_actor)
-                if max_actors < 1:
-                    max_actors = 1  # Always try at least one
+                max_actors_by_ram = int(aggregate_ram_cap_mb // ram_per_actor)
+                
+                # Check if the CAPPED actors (hardware limit) fit in memory
+                # This is the actual memory that will be used since parallelization.py caps actors
+                capped_ram_usage = max_actors_by_hardware * ram_per_actor
+                hardware_fits_in_ram = capped_ram_usage <= aggregate_ram_cap_mb
                 
                 self.logger.info(f"")
                 self.logger.info(f"===== MODEL-AWARE RESOURCE ANALYSIS (CPU) =====")
@@ -736,14 +750,17 @@ class EvaluateSystem():
                 self.logger.info(f"")
                 self.logger.info(f"RAM Capacity: {aggregate_ram_cap_mb:.0f} MB (Total: {system_ram_total_mb:.0f} MB × {self.ram_safety_cap:.0%} safety)")
                 self.logger.info(f"Currently Available RAM: {system_ram_available_mb:.0f} MB")
-                self.logger.info(f"Available CPUs: {len(cpus_to_use)}")
                 self.logger.info(f"")
-                self.logger.info(f"Max ModelActors by RAM: {max_actors} ({aggregate_ram_cap_mb:.0f} MB / {ram_per_actor:.0f} MB per actor)")
-                self.logger.info(f"Max Concurrent Prediction Tasks (N ModelActors): {max_actors}")
-                # Note about CPU time-sharing when actors > CPUs
-                if max_actors > len(cpus_to_use):
-                    self.logger.info(f"NOTE: max_actors ({max_actors}) > available CPUs ({len(cpus_to_use)}). Actors will use fractional CPU allocation and time-share.")
+                self.logger.info(f"===== OPTIMAL ACTOR CAPPING (CPU) =====")
+                self.logger.info(f"Hardware limit: {max_actors_by_hardware} CPU(s) (1 actor per CPU)")
+                self.logger.info(f"Max actors by RAM: {max_actors_by_ram} ({aggregate_ram_cap_mb:.0f} MB / {ram_per_actor:.0f} MB per actor)")
+                self.logger.info(f"Capped RAM usage: {capped_ram_usage:.0f} MB ({max_actors_by_hardware} actors × {ram_per_actor:.0f} MB)")
+                self.logger.info(f"RAM fits: {hardware_fits_in_ram} ({capped_ram_usage:.0f} MB <= {aggregate_ram_cap_mb:.0f} MB)")
                 self.logger.info(f"================================================")
+                
+                if not hardware_fits_in_ram:
+                    self.logger.warning(f"Insufficient RAM to spawn {max_actors_by_hardware} actor(s). Skipping this CPU configuration.")
+                    continue
 
                 for timechunks in timechunks_list:
                     for num_stations in self.stations2use_list: 
@@ -753,11 +770,17 @@ class EvaluateSystem():
                         step = max(1, int(num_stations * 0.2))
                         concurrent_predictions_list = sorted(list(set(range(step, num_stations + 1, step))))
                         
-                        # ===== MODEL-AWARE FEASIBILITY FILTER (CPU) =====
-                        # Filter predictions to only include values where N ModelActors can fit in available RAM
-                        valid_predictions = [p for p in concurrent_predictions_list if p <= max_actors]
-                        # Identify predictions that would cause OOM to record them as failures in CSV
-                        invalid_predictions = [p for p in concurrent_predictions_list if p > max_actors]
+                        # ===== FEASIBILITY CHECK (CPU) =====
+                        # Since actors are CAPPED to hardware in parallelization.py, all concurrency levels
+                        # are valid as long as the capped actors fit in memory (checked above).
+                        # Tasks beyond actor count are simply queued and processed round-robin.
+                        valid_predictions = concurrent_predictions_list
+                        invalid_predictions = []  # No invalid predictions since actors are capped
+                        
+                        # Only block if memory is truly insufficient (already checked above, so this is a safety fallback)
+                        if not hardware_fits_in_ram:
+                            invalid_predictions = concurrent_predictions_list
+                            valid_predictions = []
                         
                         if invalid_predictions:
                             for inv_p in invalid_predictions:
@@ -774,11 +797,12 @@ class EvaluateSystem():
                                     continue
                                 planned_keys.add(key)
                                 
-                                # Calculate theoretical OOM values
-                                est_ram = inv_p * (model_ram_per_actor_mb + overhead_ram_per_task_mb)
+                                # Calculate actual memory that would be used (capped to hardware)
+                                actual_actors = min(inv_p, max_actors_by_hardware)
+                                est_ram = actual_actors * ram_per_actor
                                 
-                                error_msg = (f"[OOM PREVENTION] Concurrent tasks ({inv_p}) would exceed RAM capacity. "
-                                           f"Estimated: {est_ram:.0f}MB RAM. "
+                                error_msg = (f"[OOM PREVENTION] Cannot fit {actual_actors} actor(s) in RAM. "
+                                           f"Required: {est_ram:.0f}MB RAM. "
                                            f"Available: {aggregate_ram_cap_mb:.0f}MB RAM.")
                                 
                                 self.logger.warning(f"Recording OOM-risk trial skip for {num_stations} stations, {inv_p} tasks: {error_msg}")
@@ -791,7 +815,11 @@ class EvaluateSystem():
                                     "GPUs Used": "[]",
                                     "Inference Actor Memory Limit (MB)": "",
                                     "Number of Concurrent Station Tasks": inv_p,
-                                    "Concurrent Timechunks Used": timechunks,
+                                    # Include timechunk metadata for consistency
+                                    "Concurrent Timechunks Used": getattr(self, 'number_of_concurrent_timechunk_predictions', 1),
+                                    "Total Number of Timechunks": timechunks,
+                                    "Length of Timechunk (min)": getattr(self, 'timechunk_dt', 1.0),
+                                    "Total Waveform Analysis Timespace (min)": float(timechunks * getattr(self, 'timechunk_dt', 1.0)),
                                     "Model Used": trial_model,
                                     "Trial Success": 0,
                                     "Error Message": error_msg,
@@ -813,14 +841,14 @@ class EvaluateSystem():
                         
                         if not valid_predictions and num_stations > 0:
                             # If even the first step (20%) is too much, try just 1 prediction or the max possible
-                            if max_actors >= 1:
-                                valid_predictions = [min(step, max_actors)]
-                                self.logger.info(f"Station count {num_stations}: 20% step ({step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
+                            if max_actors_by_hardware >= 1:
+                                valid_predictions = [min(step, max_actors_by_hardware)]
+                                self.logger.info(f"Station count {num_stations}: 20% step ({step}) exceeds max actors ({max_actors_by_hardware}). Using max={valid_predictions[0]}")
                             else:
                                 self.logger.warning(f"Station count {num_stations}: Cannot spawn any ModelActors. Skipping.")
                                 continue
                         elif len(valid_predictions) < len(concurrent_predictions_list):
-                            self.logger.info(f"Trimming concurrency for {num_stations} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors})")
+                            self.logger.info(f"Trimming concurrency for {num_stations} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors_by_hardware})")
                         
                         concurrent_predictions_list = valid_predictions
                         
@@ -854,6 +882,43 @@ class EvaluateSystem():
                             requested_ram_mb = n_model_actors * model_ram_per_actor_mb
                             task_overhead_ram_mb = n_model_actors * overhead_ram_per_task_mb
                             total_requested_ram_mb = requested_ram_mb + task_overhead_ram_mb
+                            
+                            # ===== OOM PREVENTION: Restart Ray if needed =====
+                            # When increasing concurrency, actors from previous trials may still be in RAM.
+                            # If the new actors + existing actors would exceed RAM capacity, restart Ray.
+                            restart_note = ""
+                            if num_concurrent_predictions > actors_high_water_mark and actors_high_water_mark > 0:
+                                # Estimate total RAM if we add new actors while existing ones are still in memory
+                                estimated_total_ram = (actors_high_water_mark + num_concurrent_predictions) * model_ram_per_actor_mb
+                                if estimated_total_ram > aggregate_ram_cap_mb:
+                                    self.logger.warning(f"")
+                                    self.logger.warning(f"===== RAY RESTART: Clearing RAM =====")
+                                    self.logger.warning(f"Increasing from {actors_high_water_mark} to {num_concurrent_predictions} actors")
+                                    self.logger.warning(f"Estimated RAM if additive: {estimated_total_ram:.0f} MB > capacity {aggregate_ram_cap_mb:.0f} MB")
+                                    self.logger.warning(f"Restarting Ray to prevent OOM...")
+                                    
+                                    # Stop the log drain thread gracefully
+                                    self.log_queue.put(None)  # Sentinel to stop the drain thread
+                                    time.sleep(0.5)  # Give thread time to finish
+                                    
+                                    # Shutdown and reinitialize Ray
+                                    ray.shutdown()
+                                    time.sleep(1.0)  # Allow RAM to be released
+                                    
+                                    # Reinitialize Ray with the same configuration
+                                    ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), 
+                                            logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
+                                    self.log_queue = Queue()
+                                    self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
+                                    self._log_thread.start()
+                                    
+                                    # Set the restart note BEFORE resetting the high water mark
+                                    restart_note = f"[RAY RESTART] RAM cleared (Prev Peak: {actors_high_water_mark} actors). "
+                                    # Reset the high water mark since we cleared RAM
+                                    actors_high_water_mark = 0
+                                    self.logger.info(f"Ray restarted successfully. Memory cleared.")
+                                    self.logger.info(f"==========================================")
+                                    self.logger.info(f"")
                             
                             self.logger.info("")
                             self.logger.info(f"------- Trial Number: {trial_num} -------")
@@ -913,12 +978,12 @@ class EvaluateSystem():
                                     model_ram_per_actor_mb=model_ram_per_actor_mb,
                                     is_gpu_trial=False  # CPU trial: ModelActors use RAM
                                 )
-                                update_csv(csv_filepath, success=1, error_message="")
+                                update_csv(csv_filepath, success=1, error_message=restart_note)
                                 update_csv_with_memory(csv_filepath, memory_trial_data)
                                 
                             except Exception as e:
                                 # Failure occured, need to add to log 
-                                error_msg = f"{type(e).__name__}: {str(e)}"
+                                error_msg = restart_note + f"{type(e).__name__}: {str(e)}"
                                 # Still capture memory after failure
                                 mem_after = get_memory_snapshot(process)
                                 memory_trial_data = build_memory_trial_data(
@@ -941,20 +1006,24 @@ class EvaluateSystem():
                             remove_output_subdirs(self.output_dir, logger=self.logger)
                             trial_num += 1  
                             
-                            # ===== MEMORY LOGGING =====
-                            delta = compute_memory_delta(mem_before, mem_after)
-                            actual_ram_used = mem_after.combined_rss_mb - mem_before.combined_rss_mb
-                            
+                        # Update the high water mark of actors spawned in this Ray session
+                        # This is used to detect when we need to restart Ray to prevent OOM
+                        actors_high_water_mark = max(actors_high_water_mark, num_concurrent_predictions)
+                        
+                        # ===== MEMORY LOGGING =====
+                        delta = compute_memory_delta(mem_before, mem_after)
+                        actual_ram_used = mem_after.combined_rss_mb - mem_before.combined_rss_mb
+
                             self.logger.info("")
-                            self.logger.info(f"[MODEL REQUESTED] RAM: {total_requested_ram_mb:.0f} MB")
-                            self.logger.info(f"[ACTUAL MEASURED] RAM Used: {max(0, actual_ram_used):.0f} MB")
+                        self.logger.info(f"[MODEL REQUESTED] RAM: {total_requested_ram_mb:.0f} MB")
+                        self.logger.info(f"[ACTUAL MEASURED] RAM Used: {max(0, actual_ram_used):.0f} MB")
                             self.logger.info(
-                                f"[MEM] Baseline: {mem_before.process_rss_mb:.2f} MB | After run: {mem_after.process_rss_mb:.2f} MB "
-                                f"| Δrun: {delta['process_ram_delta_mb']:.2f} MB | Peak≈{mem_after.process_peak_mb:.2f} MB"
-                            )
-                            self.logger.info(
-                                f"[MEM] System Available: {mem_before.system_available_mb:.2f} MB → {mem_after.system_available_mb:.2f} MB "
-                                f"| Raylets: {mem_after.num_raylet_processes} (Total: {mem_after.total_raylet_ram_mb:.2f} MB, Avg: {mem_after.avg_raylet_ram_mb:.2f} MB)"
+                            f"[MEM] Baseline: {mem_before.process_rss_mb:.2f} MB | After run: {mem_after.process_rss_mb:.2f} MB "
+                            f"| Δrun: {delta['process_ram_delta_mb']:.2f} MB | Peak≈{mem_after.process_peak_mb:.2f} MB"
+                        )
+                        self.logger.info(
+                            f"[MEM] System Available: {mem_before.system_available_mb:.2f} MB → {mem_after.system_available_mb:.2f} MB "
+                            f"| Raylets: {mem_after.num_raylet_processes} (Total: {mem_after.total_raylet_ram_mb:.2f} MB, Avg: {mem_after.avg_raylet_ram_mb:.2f} MB)"
                             )
 
                             # ===== CLEANUP =====
@@ -966,9 +1035,9 @@ class EvaluateSystem():
                             gc.collect()
                             time.sleep(0.1)
 
-                            mem_after_clean = get_memory_snapshot(process)
-                            freed_mb = mem_after.combined_rss_mb - mem_after_clean.combined_rss_mb
-                            self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean.combined_rss_mb:.2f} MB")
+                        mem_after_clean = get_memory_snapshot(process)
+                        freed_mb = mem_after.combined_rss_mb - mem_after_clean.combined_rss_mb
+                        self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean.combined_rss_mb:.2f} MB")
                             self.logger.info("")
                             
                         # tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
@@ -1091,6 +1160,10 @@ class EvaluateSystem():
                 # Efficiency optimization: track tested configurations for this GPU/CPU combo
                 tested_gpu_configs = set() 
 
+                # Track the highest number of actors spawned in this Ray session
+                # This is used to detect when we need to restart Ray to avoid OOM
+                actors_high_water_mark = 0
+
                 # ===== MODEL-AWARE RESOURCE CALCULATION =====
                 # Determine model name, VRAM, and RAM requirements from empirical data
                 if self.model_type == 'seisbench':
@@ -1152,21 +1225,36 @@ class EvaluateSystem():
                 self.logger.info(f"RAM Capacity: {aggregate_ram_cap_mb:.0f} MB (Total: {system_ram_total_mb:.0f} MB × {self.ram_safety_cap:.0%} safety)")
                 self.logger.info(f"Currently Available RAM: {system_ram_available_mb:.0f} MB")
                 
-                # Calculate maximum number of ModelActors that can fit in available VRAM and RAM
-                # Each actor needs: model_vram_per_actor_mb (VRAM) + model_ram_per_actor_mb (RAM)
-                # N actors spawned across GPUs: total_vram = N * model_vram_per_actor_mb, total_ram = N * model_ram_per_actor_mb
+                # ===== OPTIMAL ACTOR CAPPING =====
+                # KEY INSIGHT: Deep learning frameworks (TensorFlow/PyTorch) can't share GPU memory.
+                # Each ModelActor needs exclusive GPU access. Concurrency is achieved via task queue.
+                # Actors are capped to hardware in parallelization.py, so actual memory = capped_actors * per_actor
+                
+                # Hardware limit: 1 actor per GPU (exclusive memory access)
+                max_actors_by_hardware = len(gpus_to_use)
+                
+                # Memory limits (for reference/logging)
                 max_actors_by_vram = int(aggregate_vram_cap_mb // model_vram_per_actor_mb)
                 max_actors_by_ram = int(aggregate_ram_cap_mb // model_ram_per_actor_mb)
-                max_actors = max(1, min(max_actors_by_vram, max_actors_by_ram))
+                
+                # Check if the CAPPED actors (hardware limit) fit in memory
+                # This is the actual memory that will be used since parallelization.py caps actors
+                capped_vram_usage = max_actors_by_hardware * model_vram_per_actor_mb
+                capped_ram_usage = max_actors_by_hardware * model_ram_per_actor_mb
+                hardware_fits_in_vram = capped_vram_usage <= aggregate_vram_cap_mb
+                hardware_fits_in_ram = capped_ram_usage <= aggregate_ram_cap_mb
                 
                 self.logger.info(f"")
-                self.logger.info(f"Max ModelActors by VRAM: {max_actors_by_vram} ({aggregate_vram_cap_mb:.0f} MB / {model_vram_per_actor_mb:.0f} MB)")
-                self.logger.info(f"Max ModelActors by RAM: {max_actors_by_ram} ({aggregate_ram_cap_mb:.0f} MB / {model_ram_per_actor_mb:.0f} MB)")
-                self.logger.info(f"Max Concurrent Prediction Tasks (N ModelActors): {max_actors}")
+                self.logger.info(f"===== OPTIMAL ACTOR CAPPING (GPU) =====")
+                self.logger.info(f"Hardware limit: {max_actors_by_hardware} GPU(s) (1 actor per GPU)")
+                self.logger.info(f"Capped VRAM usage: {capped_vram_usage:.0f} MB ({max_actors_by_hardware} actors × {model_vram_per_actor_mb:.0f} MB)")
+                self.logger.info(f"Capped RAM usage: {capped_ram_usage:.0f} MB ({max_actors_by_hardware} actors × {model_ram_per_actor_mb:.0f} MB)")
+                self.logger.info(f"VRAM fits: {hardware_fits_in_vram} ({capped_vram_usage:.0f} MB <= {aggregate_vram_cap_mb:.0f} MB)")
+                self.logger.info(f"RAM fits: {hardware_fits_in_ram} ({capped_ram_usage:.0f} MB <= {aggregate_ram_cap_mb:.0f} MB)")
                 self.logger.info(f"==========================================")
                 
-                if max_actors < 1:
-                    self.logger.warning(f"Insufficient resources to spawn even 1 ModelActor. Skipping this resource block.")
+                if not hardware_fits_in_vram or not hardware_fits_in_ram:
+                    self.logger.warning(f"Insufficient memory to spawn {max_actors_by_hardware} actor(s). Skipping this resource block.")
                     ray.shutdown()
                     continue
 
@@ -1175,11 +1263,17 @@ class EvaluateSystem():
                     step = max(1, int(stations * 0.2))
                     concurrent_predictions_list = sorted(list(set(range(step, stations + 1, step))))
                     
-                    # ===== MODEL-AWARE FEASIBILITY FILTER =====
-                    # Filter predictions to only include values where N ModelActors can fit in available memory
-                    valid_predictions = [p for p in concurrent_predictions_list if p <= max_actors]
-                    # Identify predictions that would cause OOM to record them as failures in CSV
-                    invalid_predictions = [p for p in concurrent_predictions_list if p > max_actors]
+                    # ===== FEASIBILITY CHECK =====
+                    # Since actors are CAPPED to hardware in parallelization.py, all concurrency levels
+                    # are valid as long as the capped actors fit in memory (checked above).
+                    # Tasks beyond actor count are simply queued and processed round-robin.
+                    valid_predictions = concurrent_predictions_list
+                    invalid_predictions = []  # No invalid predictions since actors are capped
+                    
+                    # Only block if memory is truly insufficient (already checked above, so this is a safety fallback)
+                    if not hardware_fits_in_vram or not hardware_fits_in_ram:
+                        invalid_predictions = concurrent_predictions_list
+                        valid_predictions = []
                     
                     if invalid_predictions:
                         for inv_p in invalid_predictions:
@@ -1197,12 +1291,13 @@ class EvaluateSystem():
                                 continue
                             planned_keys.add(key)
                             
-                            # Calculate theoretical OOM values
-                            est_vram = inv_p * (model_vram_per_actor_mb + overhead_vram_per_task_mb)
-                            est_ram = inv_p * (model_ram_per_actor_mb + overhead_ram_per_task_mb)
+                            # Calculate actual memory that would be used (capped to hardware)
+                            actual_actors = min(inv_p, max_actors_by_hardware)
+                            est_vram = actual_actors * model_vram_per_actor_mb
+                            est_ram = actual_actors * model_ram_per_actor_mb
                             
-                            error_msg = (f"[OOM PREVENTION] Concurrent tasks ({inv_p}) would exceed hardware capacity. "
-                                       f"Estimated: {est_vram:.0f}MB VRAM / {est_ram:.0f}MB RAM. "
+                            error_msg = (f"[OOM PREVENTION] Cannot fit {actual_actors} actor(s) in memory. "
+                                       f"Required: {est_vram:.0f}MB VRAM / {est_ram:.0f}MB RAM. "
                                        f"Available: {aggregate_vram_cap_mb:.0f}MB VRAM / {aggregate_ram_cap_mb:.0f}MB RAM.")
                             
                             self.logger.warning(f"Recording OOM-risk trial skip for {stations} stations, {inv_p} tasks: {error_msg}")
@@ -1215,6 +1310,11 @@ class EvaluateSystem():
                                 "GPUs Used": json.dumps(list(gpus_to_use)),
                                 "Inference Actor Memory Limit (MB)": int(round(model_vram_per_actor_mb)),
                                 "Number of Concurrent Station Tasks": inv_p,
+                                # Include timechunk metadata for consistency
+                                "Concurrent Timechunks Used": getattr(self, 'number_of_concurrent_timechunk_predictions', 1),
+                                "Total Number of Timechunks": 1, 
+                                "Length of Timechunk (min)": getattr(self, 'timechunk_dt', 1.0),
+                                "Total Waveform Analysis Timespace (min)": float(getattr(self, 'timechunk_dt', 1.0)),
                                 "Model Used": trial_model,
                                 "Trial Success": 0,
                                 "Error Message": error_msg,
@@ -1228,23 +1328,25 @@ class EvaluateSystem():
                                 process=process,
                                 gpu_ids=list(gpus_to_use),
                                 model_requested_vram_mb=est_vram,
+                                model_requested_ram_mb=est_ram,
                                 n_model_actors=inv_p,
                                 model_vram_per_actor_mb=model_vram_per_actor_mb,
+                                model_ram_per_actor_mb=model_ram_per_actor_mb,
                                 is_gpu_trial=True  # GPU trial: ModelActors use VRAM
                             )
                             update_csv_with_memory(csv_filepath, mem_data)
                             trial_num += 1
-
+                    
                     if not valid_predictions and stations > 0:
-                        # If even the first step (20%) exceeds max_actors, try the max we can support
-                        if max_actors >= 1:
-                            valid_predictions = [min(step, max_actors)]
-                            self.logger.info(f"Station count {stations}: 20% step ({step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
+                        # If even the first step (20%) exceeds max_actors_by_hardware, try the max we can support
+                        if max_actors_by_hardware >= 1:
+                            valid_predictions = [min(step, max_actors_by_hardware)]
+                            self.logger.info(f"Station count {stations}: 20% step ({step}) exceeds max actors ({max_actors_by_hardware}). Using max={valid_predictions[0]}")
                         else:
                             self.logger.warning(f"Station count {stations}: Cannot spawn any ModelActors. Skipping.")
                             continue
                     elif len(valid_predictions) < len(concurrent_predictions_list):
-                        self.logger.info(f"Trimming concurrency for {stations} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors})")
+                        self.logger.info(f"Trimming concurrency for {stations} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors_by_hardware})")
 
                     self.logger.info(f"")
                     self.logger.info(f"Evaluating GPU(s) against {stations} TOTAL STATION(s)")
@@ -1261,83 +1363,120 @@ class EvaluateSystem():
                         total_requested_vram_mb = requested_vram_mb + task_overhead_vram_mb
                         total_requested_ram_mb = requested_ram_mb + task_overhead_ram_mb
 
+                        # ===== OOM PREVENTION: Restart Ray if needed =====
+                        # When increasing concurrency, actors from previous trials may still be in GPU memory.
+                        # If the new actors + existing actors would exceed VRAM capacity, restart Ray.
+                        restart_note = ""
+                        if predictions > actors_high_water_mark and actors_high_water_mark > 0:
+                            # Estimate total VRAM if we add new actors while existing ones are still in memory
+                            estimated_total_vram = (actors_high_water_mark + predictions) * model_vram_per_actor_mb
+                            if estimated_total_vram > aggregate_vram_cap_mb:
+                                self.logger.warning(f"")
+                                self.logger.warning(f"===== RAY RESTART: Clearing GPU Memory =====")
+                                self.logger.warning(f"Increasing from {actors_high_water_mark} to {predictions} actors")
+                                self.logger.warning(f"Estimated VRAM if additive: {estimated_total_vram:.0f} MB > capacity {aggregate_vram_cap_mb:.0f} MB")
+                                self.logger.warning(f"Restarting Ray to prevent OOM...")
+                                
+                                # Stop the log drain thread gracefully
+                                self.log_queue.put(None)  # Sentinel to stop the drain thread
+                                time.sleep(0.5)  # Give thread time to finish
+                                
+                                # Shutdown and reinitialize Ray
+                                ray.shutdown()
+                                time.sleep(1.0)  # Allow GPU memory to be released
+                                
+                                # Reinitialize Ray with the same configuration
+                                ray.init(ignore_reinit_error=True, num_gpus=len(gpus_to_use), num_cpus=len(cpus_to_use), 
+                                        logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
+                                self.log_queue = Queue()
+                                self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
+                                self._log_thread.start()
+                                
+                                # Set the restart note BEFORE resetting the high water mark
+                                restart_note = f"[RAY RESTART] GPU memory cleared (Prev Peak: {actors_high_water_mark} actors). "
+                                # Reset the high water mark since we cleared GPU memory
+                                actors_high_water_mark = 0
+                                self.logger.info(f"Ray restarted successfully. GPU memory cleared.")
+                                self.logger.info(f"==========================================")
+                                self.logger.info(f"")
+
                         # Efficiency check: avoid redundant tests for same (stations, predictions) - no VRAM tiers needed
                         config_key = (stations, predictions)
-                        if config_key in tested_gpu_configs:
-                            continue
-                        tested_gpu_configs.add(config_key)
+                            if config_key in tested_gpu_configs:
+                                continue
+                            tested_gpu_configs.add(config_key)
 
                         # Use model's known VRAM requirement as the gpu_memory_limit_mb (no tiers)
                         gpu_memory_limit_mb = int(round(model_vram_per_actor_mb))
 
-                        key = self._trial_key(
-                            num_cpus=len(cpus_to_use),
-                            stations=stations,
-                            predictions=predictions,
-                            gpu_memory_limit_mb=gpu_memory_limit_mb,
-                            timechunks=1,  # your GPU eval is explicitly "one timechunk at a time"
-                            model=trial_model,
-                            gpus=gpus_to_use,  # Pass the actual GPUs being used in this iteration
-                        )
-                        if key in planned_keys:
-                            self.logger.info(f"[SKIP] Already tested: {key}")
-                            trials_skipped += 1
-                            continue
-                        planned_keys.add(key)
-                        trials_run += 1
-                        self.logger.info("")
-                        self.logger.info(f"------- Trial Number: {trial_num} -------")
-                        
-                        # Get the first timechunk for testing
-                        mseed_timechunk_dir_name = self.tasks_picker[0][1]
-                        timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
-                        
-                        self.logger.info(f"Stations: {stations}")
+                            key = self._trial_key(
+                                num_cpus=len(cpus_to_use),
+                                stations=stations,
+                                predictions=predictions,
+                                gpu_memory_limit_mb=gpu_memory_limit_mb,
+                                timechunks=1,  # your GPU eval is explicitly "one timechunk at a time"
+                                model=trial_model,
+                                gpus=gpus_to_use,  # Pass the actual GPUs being used in this iteration
+                            )
+                            if key in planned_keys:
+                                self.logger.info(f"[SKIP] Already tested: {key}")
+                                trials_skipped += 1
+                                continue
+                            planned_keys.add(key)
+                            trials_run += 1
+                            self.logger.info("")
+                            self.logger.info(f"------- Trial Number: {trial_num} -------")
+                            
+                            # Get the first timechunk for testing
+                            mseed_timechunk_dir_name = self.tasks_picker[0][1]
+                            timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+                            
+                            self.logger.info(f"Stations: {stations}")
                         self.logger.info(f"Concurrent Predictions (N ModelActors): {predictions}")
                         self.logger.info(f"Model VRAM per Actor: {model_vram_per_actor_mb:.0f} MB")
                         self.logger.info(f"Model RAM per Actor: {model_ram_per_actor_mb:.0f} MB")
                         self.logger.info(f"Requested Total VRAM: {total_requested_vram_mb:.0f} MB ({n_model_actors} actors × {model_vram_per_actor_mb:.0f} MB + {task_overhead_vram_mb:.0f} MB overhead)")
                         self.logger.info(f"Requested Total RAM: {total_requested_ram_mb:.0f} MB ({n_model_actors} actors × {model_ram_per_actor_mb:.0f} MB + {task_overhead_ram_mb:.0f} MB overhead)")
-                        self.logger.info("")
+                            self.logger.info("")
 
                         # ===== COMPREHENSIVE MEMORY TRACKING (BEFORE) =====
                         mem_before = get_memory_snapshot(process)
                         vram_before = get_gpu_vram_snapshot(gpus_to_use)
-                        
-                        try: # To Do: Add Concurrent Timechunks Testing for GPU/CPU too, reference eqcctpro_parallelization()
-                            # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
-                            ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
-                                input_dir=timechunk_dir_path, 
-                                output_dir=self.output_dir, 
-                                log_queue=self.log_queue, 
-                                P_threshold=self.P_threshold, 
-                                S_threshold=self.S_threshold, 
-                                p_model=self.p_model_filepath, 
-                                s_model=self.s_model_filepath, 
-                                number_of_concurrent_station_predictions=predictions, 
-                                ray_cpus=cpus_to_use, 
-                                use_gpu=self.use_gpu, 
-                                gpu_id=gpus_to_use, 
-                                gpu_memory_limit_mb=gpu_memory_limit_mb, 
-                                stations2use=stations, 
-                                timechunk_id=mseed_timechunk_dir_name, 
-                                waveform_overlap=self.waveform_overlap, 
-                                total_timechunks=len(self.tasks_picker), 
-                                number_of_concurrent_timechunk_predictions=1,  # Testing one timechunk at a time
-                                total_analysis_time=total_analysis_time, 
-                                testing_gpu=True,  # Enable test mode
-                                test_csv_filepath=csv_filepath, 
-                                intra_threads=self.intra_threads, 
-                                inter_threads=self.inter_threads, 
-                                timechunk_dt=self.timechunk_dt,
-                                model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
-                                seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold
-                            )
                             
-                            # Wait for result
-                            log_entry = ray.get(ref)
-                            log_queue.put(log_entry)  # Add log entry to the queue
-                            
+                            try: # To Do: Add Concurrent Timechunks Testing for GPU/CPU too, reference eqcctpro_parallelization()
+                                # Call mseed_predictor directly via Ray (just like evaluate_cpu does)
+                                ref = mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                                    input_dir=timechunk_dir_path, 
+                                    output_dir=self.output_dir, 
+                                    log_queue=self.log_queue, 
+                                    P_threshold=self.P_threshold, 
+                                    S_threshold=self.S_threshold, 
+                                    p_model=self.p_model_filepath, 
+                                    s_model=self.s_model_filepath, 
+                                    number_of_concurrent_station_predictions=predictions, 
+                                    ray_cpus=cpus_to_use, 
+                                    use_gpu=self.use_gpu, 
+                                    gpu_id=gpus_to_use, 
+                                    gpu_memory_limit_mb=gpu_memory_limit_mb, 
+                                    stations2use=stations, 
+                                    timechunk_id=mseed_timechunk_dir_name, 
+                                    waveform_overlap=self.waveform_overlap, 
+                                    total_timechunks=len(self.tasks_picker), 
+                                    number_of_concurrent_timechunk_predictions=1,  # Testing one timechunk at a time
+                                    total_analysis_time=total_analysis_time, 
+                                    testing_gpu=True,  # Enable test mode
+                                    test_csv_filepath=csv_filepath, 
+                                    intra_threads=self.intra_threads, 
+                                    inter_threads=self.inter_threads, 
+                                    timechunk_dt=self.timechunk_dt,
+                                    model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
+                                    seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold
+                                )
+                                
+                                # Wait for result
+                                log_entry = ray.get(ref)
+                                log_queue.put(log_entry)  # Add log entry to the queue
+                                
                             # ===== COMPREHENSIVE MEMORY TRACKING (AFTER) =====
                             mem_after = get_memory_snapshot(process)
                             vram_after = get_gpu_vram_snapshot(gpus_to_use)
@@ -1356,12 +1495,12 @@ class EvaluateSystem():
                                 model_ram_per_actor_mb=model_ram_per_actor_mb,
                                 is_gpu_trial=True  # GPU trial: ModelActors use VRAM
                             )
-                            update_csv(csv_filepath, success=1, error_message="")
+                            update_csv(csv_filepath, success=1, error_message=restart_note)
                             update_csv_with_memory(csv_filepath, memory_trial_data)
-                            
-                        except Exception as e:
-                            # Failure occurred, need to add to log 
-                            error_msg = f"{type(e).__name__}: {str(e)}"
+                                
+                            except Exception as e:
+                                # Failure occurred, need to add to log 
+                            error_msg = restart_note + f"{type(e).__name__}: {str(e)}"
                             # Still capture memory after failure
                             mem_after = get_memory_snapshot(process)
                             memory_trial_data = build_memory_trial_data(
@@ -1376,17 +1515,21 @@ class EvaluateSystem():
                                 model_ram_per_actor_mb=model_ram_per_actor_mb,
                                 is_gpu_trial=True  # GPU trial: ModelActors use VRAM
                             )
-                            update_csv(csv_filepath, success=0, error_message=error_msg)
+                                update_csv(csv_filepath, success=0, error_message=error_msg)
                             update_csv_with_memory(csv_filepath, memory_trial_data)
-                            self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
-                        
-                        # Write log entries from the queue to the file
-                        while not log_queue.empty():
-                            log_entry = log_queue.get()
-                            self.logger.info(f"{log_entry}")
-                        
-                        remove_output_subdirs(self.output_dir, logger=self.logger) 
-                        trial_num += 1
+                                self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
+                            
+                            # Write log entries from the queue to the file
+                            while not log_queue.empty():
+                                log_entry = log_queue.get()
+                        self.logger.info(f"{log_entry}")
+                            
+                            remove_output_subdirs(self.output_dir, logger=self.logger) 
+                            trial_num += 1
+                            
+                        # Update the high water mark of actors spawned in this Ray session
+                        # This is used to detect when we need to restart Ray to prevent OOM
+                        actors_high_water_mark = max(actors_high_water_mark, predictions)
                         
                         # ===== MEMORY LOGGING =====
                         delta = compute_memory_delta(mem_before, mem_after)
@@ -1395,7 +1538,7 @@ class EvaluateSystem():
                         
                         self.logger.info(f"[MODEL REQUESTED] VRAM: {total_requested_vram_mb:.0f} MB | RAM: {total_requested_ram_mb:.0f} MB")
                         self.logger.info(f"[ACTUAL MEASURED] VRAM Used: {max(0, actual_vram_used):.0f} MB | RAM Used: {max(0, actual_ram_used):.0f} MB")
-                        self.logger.info(
+                            self.logger.info(
                             f"[MEM] Baseline: {mem_before.process_rss_mb:.2f} MB | After run: {mem_after.process_rss_mb:.2f} MB "
                             f"| Δrun: {delta['process_ram_delta_mb']:.2f} MB | Peak≈{mem_after.process_peak_mb:.2f} MB"
                         )
@@ -1406,21 +1549,21 @@ class EvaluateSystem():
                         self.logger.info(
                             f"[VRAM] Total: {vram_before.get('gpu_total_vram_mb', 0):.2f} MB | Free Before: {vram_before.get('gpu_free_vram_mb', 0):.2f} MB "
                             f"| Free After: {vram_after.get('gpu_free_vram_mb', 0):.2f} MB"
-                        )
+                            )
 
-                        # ===== CLEANUP =====
-                        try: del ref
-                        except NameError: pass
-                        try: del log_entry
-                        except NameError: pass
+                            # ===== CLEANUP =====
+                            try: del ref
+                            except NameError: pass
+                            try: del log_entry
+                            except NameError: pass
 
-                        gc.collect()
-                        time.sleep(0.1)
+                            gc.collect()
+                            time.sleep(0.1)
 
                         mem_after_clean = get_memory_snapshot(process)
                         freed_mb = mem_after.combined_rss_mb - mem_after_clean.combined_rss_mb
                         self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean.combined_rss_mb:.2f} MB")
-                        self.logger.info("")
+                            self.logger.info("")
                 
                 # stop log forwarder
                 self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
