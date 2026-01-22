@@ -19,7 +19,7 @@ import logging
 import platform
 import traceback
 import numpy as np
-from .tools import *
+from eqcctpro.tools import *
 from os import listdir
 from obspy import UTCDateTime
 from datetime import datetime, timedelta 
@@ -1340,7 +1340,7 @@ class ModelActor:
         
         # Load the model once
         self.logger.info("Importing/load_eqcct_model...")
-        from .eqcct_tf_models import load_eqcct_model
+        from eqcctpro.eqcct_tf_models import load_eqcct_model
         self.model = load_eqcct_model(p_model_path, s_model_path)
         self.logger.info("Model loaded.")
     
@@ -1353,7 +1353,7 @@ class ModelActor:
         return self.model.predict(data_generator, verbose=0)
     
     def predict_from_arrays(self, trace_start_time, data_set, batch_size, norm_mode):
-        from .eqcct_tf_models import PreLoadGeneratorTest
+        from eqcctpro.eqcct_tf_models import PreLoadGeneratorTest
         pred_generator = PreLoadGeneratorTest(trace_start_time, data_set,
                                             batch_size=batch_size, norm_mode=norm_mode)
         return self.model.predict(pred_generator, verbose=0)
@@ -1396,7 +1396,7 @@ class SeisBenchModelActor:
 
         # Load the SeisBench model
         self.logger.info("Loading SeisBench model...")
-        from .seisbench_models import SeisBenchModels
+        from eqcctpro.seisbench_models import SeisBenchModels
         self.model_wrapper = SeisBenchModels(parent_model_name, child_model_name)
         self.model_wrapper.load_model()
         
@@ -1458,7 +1458,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     import logging
     from logging.handlers import QueueHandler
     from pathlib import Path
-    from .seisbench_models import mseed2stream_3c
+    from eqcctpro.seisbench_models import mseed2stream_3c
     
     pos, station, out_dir, args = predict_args
     
@@ -1656,7 +1656,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
         # If eqcct_tf_models imports TF later, env vars above will still suppress C++ logs.
         pass
 
-    from .eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
+    from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
     pos, station, out_dir, args = predict_args
     
     # NOTE: We removed the model loading code that was causing OOM errors

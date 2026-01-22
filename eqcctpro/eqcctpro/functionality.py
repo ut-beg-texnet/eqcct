@@ -16,13 +16,13 @@ import numbers
 import logging
 import resource
 import threading
-from .tools import *
+from eqcctpro.tools import *
 from pathlib import Path
-from .parallelization import *
+from eqcctpro.parallelization import *
 from obspy import UTCDateTime
 from ray.util.queue import Queue
 from datetime import datetime, timedelta
-from .tools import _parse_gpus_field
+from eqcctpro.tools import _parse_gpus_field
 from logging.handlers import QueueHandler, QueueListener
 
 
@@ -512,7 +512,7 @@ class EvaluateSystem():
 
             # Determine model VRAM requirement based on model type
             if self.model_type == 'seisbench':
-                from .parallelization import get_seisbench_model_vram_mb
+                from eqcctpro.parallelization import get_seisbench_model_vram_mb
                 model_vram_mb = get_seisbench_model_vram_mb(
                     self.seisbench_parent_model, 
                     self.seisbench_child_model,
@@ -520,7 +520,7 @@ class EvaluateSystem():
                     logger=self.logger
                 )
             else:
-                from .parallelization import get_eqcct_vram_mb
+                from eqcctpro.parallelization import get_eqcct_vram_mb
                 model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
 
             per_gpu_free_mb = [get_gpu_vram(gpu_index=g)[1] * 1024.0 for g in self.selected_gpus]  # free_gb -> MB
@@ -665,7 +665,14 @@ class EvaluateSystem():
                 process = psutil.Process(os.getpid())
                 process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
                 
-                ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
+                # Ensure local workspace is in workers' sys.path to pick up local eqcctpro
+                # and avoid conflicts with site-packages
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                runtime_env = {"env_vars": {"PYTHONPATH": f"{workspace_root}:{os.environ.get('PYTHONPATH', '')}"}}
+                
+                ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), 
+                         logging_level=logging.FATAL, log_to_driver=False, 
+                         _temp_dir=self.home_tmp_dir, runtime_env=runtime_env)
                 self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
                 self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
                 self._log_thread.start() # Starts the thread
@@ -694,7 +701,7 @@ class EvaluateSystem():
                 # Determine model name and RAM requirement from empirical data
                 if self.model_type == 'seisbench':
                     trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
-                    from .parallelization import get_seisbench_model_ram_mb
+                    from eqcctpro.parallelization import get_seisbench_model_ram_mb
                     model_ram_per_actor_mb = get_seisbench_model_ram_mb(
                         self.seisbench_parent_model, 
                         self.seisbench_child_model,
@@ -704,11 +711,11 @@ class EvaluateSystem():
                     )
                 else:
                     trial_model = "eqcct"
-                    from .parallelization import get_eqcct_ram_mb
+                    from eqcctpro.parallelization import get_eqcct_ram_mb
                     model_ram_per_actor_mb = get_eqcct_ram_mb(use_gpu=False)  # CPU mode
                 
                 # Import buffer constants for logging clarity
-                from .parallelization import RAM_BUFFER_MB
+                from eqcctpro.parallelization import RAM_BUFFER_MB
                 
                 # Additional per-task overhead for waveform data buffers and intermediate results
                 # (Note: The main safety buffer is already included in model_ram_per_actor_mb)
@@ -826,7 +833,7 @@ class EvaluateSystem():
                                     "Trial Success": 0,
                                     "Error Message": error_msg,
                                 }
-                                from .parallelization import append_trial_row
+                                from eqcctpro.parallelization import append_trial_row
                                 append_trial_row(csv_filepath, trial_data)
                                 
                                 # Add memory metadata columns to the newly appended row
@@ -1079,7 +1086,7 @@ class EvaluateSystem():
         
         # Normalize existing CSV to ensure consistent "GPUs Used" formatting and quoting
         if os.path.exists(csv_filepath):
-            from .tools import normalize_gpu_csv_quoting
+            from eqcctpro.tools import normalize_gpu_csv_quoting
             normalize_gpu_csv_quoting(csv_filepath)
             self.logger.info("Normalized existing CSV entries for consistent 'GPUs Used' formatting.")
         
@@ -1149,9 +1156,16 @@ class EvaluateSystem():
                 
                 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
                 os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus_to_use))
-                # Initialize Ray with GPUs
+                
+                # Ensure local workspace is in workers' sys.path to pick up local eqcctpro
+                # and avoid conflicts with site-packages
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                runtime_env = {"env_vars": {"PYTHONPATH": f"{workspace_root}:{os.environ.get('PYTHONPATH', '')}"}}
+                
+                # Initialize Ray with GPUs and runtime_env
                 ray.init(ignore_reinit_error=True, num_gpus=len(gpus_to_use), num_cpus=len(cpus_to_use), 
-                        logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
+                        logging_level=logging.FATAL, log_to_driver=False, 
+                        _temp_dir=self.home_tmp_dir, runtime_env=runtime_env)
                 self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
                 self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
                 self._log_thread.start() # Starts the thread
@@ -1170,7 +1184,7 @@ class EvaluateSystem():
                 # Determine model name, VRAM, and RAM requirements from empirical data
                 if self.model_type == 'seisbench':
                     trial_model = f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
-                    from .parallelization import get_seisbench_model_vram_mb, get_seisbench_model_ram_mb
+                    from eqcctpro.parallelization import get_seisbench_model_vram_mb, get_seisbench_model_ram_mb
                     model_vram_per_actor_mb = get_seisbench_model_vram_mb(
                         self.seisbench_parent_model, 
                         self.seisbench_child_model,
@@ -1187,12 +1201,12 @@ class EvaluateSystem():
                 else:
                     trial_model = "eqcct"
                     # Use the measured EQCCT requirements (includes CUDA context + TensorFlow + XLA)
-                    from .parallelization import get_eqcct_vram_mb, get_eqcct_ram_mb
+                    from eqcctpro.parallelization import get_eqcct_vram_mb, get_eqcct_ram_mb
                     model_vram_per_actor_mb = get_eqcct_vram_mb()
                     model_ram_per_actor_mb = get_eqcct_ram_mb(use_gpu=True)
 
                 # Import buffer constants for logging clarity
-                from .parallelization import VRAM_BUFFER_MB, RAM_BUFFER_MB
+                from eqcctpro.parallelization import VRAM_BUFFER_MB, RAM_BUFFER_MB
                 
                 # Additional per-task overhead for waveform data buffers and intermediate results
                 # (Note: The main safety buffer is already included in model_*_per_actor_mb)
@@ -1320,12 +1334,12 @@ class EvaluateSystem():
                                 "Concurrent Timechunks Used": getattr(self, 'number_of_concurrent_timechunk_predictions', 1),
                                 "Total Number of Timechunks": 1, 
                                 "Length of Timechunk (min)": getattr(self, 'timechunk_dt', 1.0),
-                                "Total Waveform Analysis Timespace (min)": float(getattr(self, 'timechunk_dt', 1.0)),
-                                "Model Used": trial_model,
-                                "Trial Success": 0,
-                                "Error Message": error_msg,
-                            }
-                            from .parallelization import append_trial_row
+                                    "Total Waveform Analysis Timespace (min)": float(getattr(self, 'timechunk_dt', 1.0)),
+                                    "Model Used": trial_model,
+                                    "Trial Success": 0,
+                                    "Error Message": error_msg,
+                                }
+                            from eqcctpro.parallelization import append_trial_row
                             append_trial_row(csv_filepath, trial_data)
                             
                             # Add memory metadata columns to the newly appended row

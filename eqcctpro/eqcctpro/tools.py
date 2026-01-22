@@ -442,9 +442,10 @@ def build_memory_trial_data(
     trial_memory_data["Num Worker Processes"] = mem_after.num_raylet_processes
     
     # PID-Isolated GPU VRAM (only for GPU runs)
-    # Uses pynvml to find exactly which of OUR processes are on the GPU and how much VRAM they're using
+    # Uses nvidia-ml-py (pynvml) to find exactly which of OUR processes are on the GPU and how much VRAM they're using
     actual_vram = 0.0
     if is_gpu_trial and process is not None and gpu_ids is not None:
+        from eqcctpro.tools import get_vram_by_pid
         vram_by_pid = get_vram_by_pid(process, gpu_ids)
         actual_vram = vram_by_pid.get("process_vram_mb", 0)
         num_gpu_procs = vram_by_pid.get("num_gpu_processes", 0)

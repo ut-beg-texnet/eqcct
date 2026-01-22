@@ -246,8 +246,17 @@ def load_eqcct_model(input_modelP, input_modelS, log_file="results/logs/model.lo
                 loss=['binary_crossentropy','binary_crossentropy'],
                 metrics=['acc',f1,precision, recall])    
     
-    modelP.load_weights(input_modelP)
-    modelS.load_weights(input_modelS)
+    # Check if both paths point to the same file (combined model weights)
+    # or if they are separate files for P and S models
+    if input_modelP == input_modelS:
+        # Same file for both - this is a combined model weights file
+        # Load into the combined model which has all layers (89 layers)
+        model.load_weights(input_modelP)
+    else:
+        # Separate weight files for P and S models
+        # Load into individual sub-models
+        modelP.load_weights(input_modelP)
+        modelS.load_weights(input_modelS)
 
     # log.write(f"*** Loading is complete!")
 

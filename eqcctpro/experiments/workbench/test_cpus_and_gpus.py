@@ -1,4 +1,6 @@
-import os 
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))) # Add the parent directory to sys.path to import the local eqcctpro module
 from eqcctpro import RunEQCCTPro, EvaluateSystem, OptimalCPUConfigurationFinder, OptimalGPUConfigurationFinder
 
 # --- Common Directory Paths (Modify for your local system) ---
@@ -13,8 +15,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_cpu = EvaluateSystem(
 #     eval_mode='cpu',
 #     model_type='eqcct',
-#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
-#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'), # P Model name for EQCCT model (test_trainer_024.h5)
+#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'), # S Model name for EQCCT model (test_trainer_021.h5)
 #     input_dir=input_mseed_directory_path,
 #     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct'),
 #     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct', 'eqcctpro.log'),
@@ -38,7 +40,7 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_gpu = EvaluateSystem(
 #     eval_mode='gpu',
 #     model_type='eqcct',
-#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'),
 #     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=os.path.join(output_pick_directory_path, 'eval_gpu_eqcct'),
