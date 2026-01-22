@@ -2,10 +2,12 @@ import os
 from eqcctpro import RunEQCCTPro, EvaluateSystem, OptimalCPUConfigurationFinder, OptimalGPUConfigurationFinder
 
 # --- Common Directory Paths (Modify for your local system) ---
-input_mseed_directory_path = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/230_stations_1_min_dt'
-output_pick_directory_path = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/outputs'
-log_file_path = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/outputs/eqcctpro.log'
-csv_filepath = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro/csv'
+base_dir = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro'
+input_mseed_directory_path = os.path.join(base_dir, 'data/230_stations_1_min_dt')
+output_pick_directory_path = os.path.join(base_dir, 'results/csv/logs')
+log_file_path = os.path.join(output_pick_directory_path, 'eqcctpro.log')
+csv_filepath = os.path.join(base_dir, 'results/csv')
+models_dir = os.path.join(base_dir, 'models/EQCCT')
 tmp_dir = '/lambda1a/skevofilaxc/tmp'
 
 # =============================================================================
@@ -16,8 +18,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # runner_eqcct_cpu = RunEQCCTPro(
 #     use_gpu=False,
 #     model_type='eqcct',
-#     p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5',
-#     s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=output_pick_directory_path,
 #     log_filepath=log_file_path,
@@ -38,8 +40,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # runner_eqcct_gpu = RunEQCCTPro(
 #     use_gpu=True,
 #     model_type='eqcct',
-#     p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5',
-#     s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=output_pick_directory_path,
 #     log_filepath=log_file_path,
@@ -108,8 +110,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_cpu = EvaluateSystem(
 #     eval_mode='cpu',
 #     model_type='eqcct',
-#     p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5',
-#     s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=output_pick_directory_path,
 #     log_filepath=log_file_path,
@@ -156,8 +158,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_gpu = EvaluateSystem(
 #     eval_mode='gpu',
 #     model_type='eqcct',
-#     p_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_024.h5',
-#     s_model_filepath='/home/skevofilaxc/model/ModelPS/test_trainer_021.h5',
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=output_pick_directory_path,
 #     log_filepath=log_file_path,

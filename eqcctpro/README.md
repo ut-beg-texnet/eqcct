@@ -4,6 +4,36 @@ EQCCTPro is a high-performance seismic event detection and processing framework 
 
 EQCCTPro is engineered for **real-time performance**, identifying the optimal parallelization configurations for your specific hardware (CPU and Multi-GPU) to minimize runtime and maximize station throughput. EQCCTPro has enabled seismic networks, like the Texas Seismological Research Group (TexNet), to enable their DL picking model EQCCT to run operationally, in real-time, over its network of over 250+ seismic stations. More information on the architecture and application of EQCCTPro can be found in our upcoming publication [here](https://github.com/ut-beg-texnet/eqcct/blob/main/eqcctpro/OptimizedEQCCT_Paper.pdf).
 
+## **Project Structure**
+
+The repository is organized as follows:
+
+```text
+eqcctpro/
+├── data/                       # Dataset files and creation scripts
+│   ├── 230_stations_1_min_dt/  # Sample mseed waveforms
+│   └── scripts/                # Tools for data acquisition (create_dataset.py)
+├── docs/                       # Documentation and publications
+│   └── OptimizedEQCCT_Paper.pdf
+├── eqcctpro/                   # Core Python package source code
+├── experiments/                # Pipeline execution and benchmarking
+│   ├── main/                   # Production scripts (run.py)
+│   └── workbench/              # Performance evaluation (test_cpus_and_gpus.py)
+├── models/                     # Pre-trained model weights (.h5 files)
+│   └── EQCCT/                  # EQCCT specific model checkpoints
+├── results/                    # Output artifacts
+│   └── csv/                    # Benchmarking results and logs
+│       ├── eval_cpu_eqcct/     # CPU-only trial results
+│       ├── eval_gpu_eqcct/     # GPU-accelerated trial results
+│       └── logs/               # Detailed execution logs and predictions
+├── scripts/                    # Utility scripts
+│   ├── analysis/               # Efficiency analysis tools
+│   └── visualization/          # Plotting and GPU monitoring tools
+├── environment.yml             # Conda environment configuration
+├── pyproject.toml              # Build system requirements
+└── README.md                   # Main project documentation
+```
+
 ## **Features**
 - **Multi-Model Support**: Integrated with **EQCCT** and **SeisBench** (PhaseNet, EQTransformer, etc.).
 - **Hybrid Parallelism**: Optimized for both CPU-only and Multi-GPU environments using Ray.
@@ -297,6 +327,47 @@ There are more examples on how to use EQCCTPro using different SeisBench and EQC
 
 ---
 
+# **4. Resource Requirement Calibration**
+
+EQCCTPro relies on accurate memory footprint estimates to perform memory-aware parallelization and prevent Out-Of-Memory (OOM) errors. These estimates are stored as lookup tables in `eqcctpro/parallelization.py`.
+
+### **Measuring Model Memory Usage**
+
+If you are using a new hardware environment or a custom model, you should calibrate these values using the provided profiling script:
+
+```sh
+python measure_model_memory_usage.py
+```
+
+This script:
+1.  Spawns each model (SeisBench and EQCCT) in an **isolated subprocess**.
+2.  Measures the "first-load" footprint (Library initialization + Weights + Inference buffers).
+3.  Outputs formatted Python dictionaries that can be copied directly into the codebase.
+
+### **Updating Lookup Tables**
+
+After running the script, open `eqcctpro/parallelization.py` and update the following constants based on the script's output:
+
+#### **1. SEISBENCH_MODEL_VRAM_MB**
+- **What it is**: The **VRAM (GPU memory)** required for one SeisBench model actor when running in **GPU mode**.
+- **Why it matters**: Includes the model weights and the CUDA context overhead (~500 MB) that each fresh process incurs.
+
+#### **2. SEISBENCH_MODEL_RAM_MB**
+- **What it is**: The **System RAM** required for one SeisBench model actor when running in **GPU mode**.
+- **Why it matters**: Even in GPU mode, models require system RAM for the Python interpreter, PyTorch libraries, ObsPy, and data pre-processing.
+
+#### **3. SEISBENCH_MODEL_CPU_RAM_MB**
+- **What it is**: The **System RAM** required for one SeisBench model actor when running in **CPU mode**.
+- **Why it matters**: This is the primary memory constraint for CPU-only evaluation. It typically excludes the CUDA runtime overhead found in `SEISBENCH_MODEL_RAM_MB`.
+
+#### **EQCCT Specific Constants**
+Similarly, you should update the EQCCT-specific constants:
+- **`EQCCT_GPU_VRAM_MB`**: VRAM requirement for EQCCT in GPU mode.
+- **`EQCCT_GPU_RAM_MB`**: System RAM requirement for EQCCT in GPU mode (often higher due to XLA compilation).
+- **`EQCCT_CPU_RAM_MB`**: System RAM requirement for EQCCT in CPU mode.
+
+---
+
 # **Understanding Evaluation Results (CSV Columns)**
 
 The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results.csv` or `gpu_test_results.csv`) with **PID-isolated absolute memory tracking**. This ensures accurate measurements even when running multiple EvaluateSystem instances in parallel on the same machine.
@@ -317,9 +388,9 @@ The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results
 ### **Model-Requested Memory (Theoretical)**
 *These values represent the expected memory footprint based on empirical model data.*
 - **`Requested VRAM per Actor (MB)`**: Theoretical VRAM required for one model instance (GPU trials only). **Includes safety buffer** (1024 MB).
-- **`Requested RAM per Actor (MB)`**: Theoretical system RAM required for one model instance (CPU trials). **Includes safety buffer** (1536 MB).
-- **`Total Requested VRAM (MB)`**: The total theoretical VRAM footprint expected (`N ModelActors × Requested per Actor`).
-- **`Total Requested RAM (MB)`**: The total theoretical RAM footprint expected (`N ModelActors × Requested per Actor`).
+- **`Requested RAM per Actor (MB)`**: Theoretical system RAM required for one model instance. In CPU trials, this is the primary memory footprint; in GPU trials, this tracks the system RAM overhead for the GPU process. **Includes safety buffer** (1536 MB).
+- **`Total Requested VRAM (MB)`**: The total theoretical VRAM footprint expected (`N ModelActors × Requested per Actor + N × 128 MB overhead`).
+- **`Total Requested RAM (MB)`**: The total theoretical RAM footprint expected (`N ModelActors × Requested per Actor + N × 256 MB overhead`).
 
 ### **Actual Memory Used (PID-Isolated Absolute Values)**
 *These are absolute values for THIS specific process tree only. Unlike deltas, these will never be 0 when workers are reused.*
@@ -344,18 +415,23 @@ The overhead typically consists of:
 3. **Ray Workers**: ~50-150 MB per worker process for Python interpreter and framework imports.
 4. **TensorFlow/PyTorch Buffers**: Variable memory for gradient caching, intermediate tensors, and framework-specific optimizations.
 5. **Safety Buffer**: ~1024 MB (1 GB) for VRAM and ~1536 MB (1.5 GB) for RAM reserved for operational stability and framework overhead.
+6. **Per-Task Overheads**: ~128 MB VRAM and ~256 MB RAM per concurrent task for waveform data handling and processing.
 
 ### **Efficiency & Performance**
 - **`VRAM Utilization (%)`**: How much VRAM is actually being used relative to what was requested (`Process Tree VRAM / Total Requested VRAM × 100`). Values **>100%** indicate overhead exceeds buffer allocations; values **<100%** indicate underutilization or efficient memory sharing.
 - **`RAM Utilization (%)`**: How much RAM is actually being used relative to what was requested (`Process Tree RAM / Total Requested RAM × 100`). Similar interpretation to VRAM utilization.
 - **`Total Run time for Picker (s)`**: The wall-clock time taken to complete the workload.
-- **`Intra-parallelism Threads` / `Inter-parallelism Threads`**: TensorFlow-specific threading configurations.
+- **`Intra-parallelism Threads`**: Number of threads TensorFlow uses for individual operations.
+- **`Inter-parallelism Threads`**: Number of threads TensorFlow uses for independent operations in parallel.
 - **`Inference Actor Memory Limit (MB)`**: Legacy VRAM ceiling per shared inference actor.
 
 ### **Trial Outcome**
 - **`Trial Success`**: `1` for success, `0` for failure.
 - **`Error Message`**: Detailed exception info if the trial failed (e.g., OOM prevention details). It also contains informational notes like **`[RAY RESTART]`** if Ray was restarted before the trial to clear memory and prevent OOM.
 - **`Stations Used`**: (Legacy) List of specific station codes processed.
+
+**Note on Optimal Configuration Files:**
+The configuration finders (`OptimalGPUConfigurationFinder`, etc.) generate summary CSVs (`optimal_configurations_*.csv` and `best_overall_usecase_*.csv`). These files use the same headers as above, with the exception of the concurrency column, which is labeled as **`Number of Concurrent Station Tasks per Timechunk`** for clarity in those reports.
 
 ---
 

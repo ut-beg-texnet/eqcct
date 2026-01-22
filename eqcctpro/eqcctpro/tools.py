@@ -1064,35 +1064,48 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
         tf.config.threading.set_inter_op_parallelism_threads(int(inter_threads))
         logger.info(f"Configured Inter-op threads = {inter_threads}")
 
-    # 3) Configure fixed VRAM slices on all visible GPUs
+    # 3) Configure GPU memory on all visible GPUs
     vis_gpus = tf.config.list_physical_devices("GPU")
     if not vis_gpus:
         logger.info(f"TensorFlow: No GPUs visible; TF will proceed on CPU.")
         logger.info("")
         return {"logical_gpus": [], "physical_gpus": []}
 
-    if vram_limit_mb is None or vram_limit_mb <= 0:
-        raise ValueError("vram_limit_mb must be a positive integer when using fixed VRAM slicing.")
-
     try:
+        # CRITICAL: Enable memory growth FIRST for all GPUs
+        # This prevents TensorFlow from pre-allocating all available VRAM
+        # and allows multiple actors to coexist on the same GPU(s).
         for gpu in vis_gpus:
-            # One logical device per physical GPU, each with a hard VRAM cap
-            tf.config.set_logical_device_configuration(gpu, [tf.config.LogicalDeviceConfiguration(memory_limit=int(vram_limit_mb))])
-        # Force logical devices to materialize
-        # Logical devices are a virtual rep. of a physical hardware component (CPU/GPU) that TF creates to manage workload distribution
-        # Can have more logical devices than what you have physically, however you are constrained by the physical limitations of your hardware 
-        logical = tf.config.list_logical_devices("GPU") 
-        logger.info(
-            f"Set VRAM slicing: "
-            f"{vram_limit_mb} MB per logical GPU "
-            f"({len(logical)} logical over {len(vis_gpus)} physical)."
-        )
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logger.info(f"Enabled TensorFlow memory growth for {len(vis_gpus)} GPU(s).")
+        logger.info(f"  → This allows multiple ModelActors to share GPU memory dynamically.")
+        
+        # If a specific VRAM limit is requested, set it as a soft cap via logical device config
+        # Note: With memory growth enabled, TF will start small and grow as needed, but won't exceed the limit
+        if vram_limit_mb is not None and vram_limit_mb > 0:
+            for gpu in vis_gpus:
+                # One logical device per physical GPU, each with a soft VRAM cap
+                tf.config.set_logical_device_configuration(
+                    gpu, 
+                    [tf.config.LogicalDeviceConfiguration(memory_limit=int(vram_limit_mb))]
+                )
+            # Force logical devices to materialize
+            logical = tf.config.list_logical_devices("GPU") 
+            logger.info(
+                f"Set VRAM soft limit: {vram_limit_mb} MB per logical GPU "
+                f"({len(logical)} logical over {len(vis_gpus)} physical)."
+            )
+        else:
+            # No specific limit - TensorFlow will grow memory as needed
+            logger.info(f"No VRAM limit set. TensorFlow will allocate memory dynamically as needed.")
+            
     except RuntimeError as e:
         # Happens if any TF GPU context was already initialized
-        raise RuntimeError(
-            "Failed to set logical device configuration. "
-            "Ensure tf_environ() is called before any TensorFlow GPU ops or model creation.\n"
-            f"Original error: {e}")
+        # This is often okay if memory growth was already set
+        logger.warning(
+            f"Could not configure GPU memory (may already be configured): {e}\n"
+            "If this is a Ray actor, memory growth should be set before model loading."
+        )
 
 """
 find_optimal_configurations_cpu/gpu find at the end of the trial run throught find the: 

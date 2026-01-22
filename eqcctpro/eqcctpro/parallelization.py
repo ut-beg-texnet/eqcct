@@ -175,6 +175,102 @@ def get_eqcct_ram_mb(use_gpu=True):
     else:
         return EQCCT_CPU_RAM_MB + RAM_BUFFER_MB
 
+
+# =============================================================================
+# MEMORY AVAILABILITY FUNCTIONS
+# =============================================================================
+# These functions query available system memory to enable memory-aware actor creation.
+# Used when creating ModelActors to ensure we don't exceed physical memory limits.
+
+def get_available_vram_mb(gpu_ids=None, max_vram_mb=None, logger=None):
+    """
+    Get available VRAM in MB for the specified GPUs.
+    
+    If max_vram_mb is provided (user-defined cap), returns that value divided
+    equally among the specified GPUs (per-GPU budget). Otherwise, queries
+    the actual free VRAM from each GPU.
+    
+    Args:
+        gpu_ids: List of GPU IDs to query. If None, queries all available GPUs.
+        max_vram_mb: Optional user-defined total VRAM cap across all GPUs.
+                     If provided, this is the max budget (already divided by n_gpus externally).
+        logger: Optional logger for debug messages.
+        
+    Returns:
+        float: Available VRAM in MB (total across specified GPUs).
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        
+        if gpu_ids is None:
+            gpu_count = pynvml.nvmlDeviceGetCount()
+            gpu_ids = list(range(gpu_count))
+        
+        # If user provided a max_vram_mb cap, use that
+        if max_vram_mb is not None and max_vram_mb > 0:
+            if logger:
+                logger.info(f"Using user-defined VRAM cap: {max_vram_mb:.0f} MB total")
+            pynvml.nvmlShutdown()
+            return float(max_vram_mb)
+        
+        # Otherwise, query actual free VRAM from each GPU
+        total_free_vram_mb = 0.0
+        for gpu_id in gpu_ids:
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                free_mb = mem_info.free / (1024 * 1024)  # Convert to MB
+                total_free_vram_mb += free_mb
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Could not query VRAM for GPU {gpu_id}: {e}")
+        
+        pynvml.nvmlShutdown()
+        
+        if logger:
+            logger.info(f"Total free VRAM across GPUs {gpu_ids}: {total_free_vram_mb:.0f} MB")
+        
+        return total_free_vram_mb
+    
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to query VRAM: {e}")
+        return 0.0
+
+
+def get_available_ram_mb(ram_safety_cap=0.90, logger=None):
+    """
+    Get available RAM in MB based on system memory and safety cap.
+    
+    Args:
+        ram_safety_cap: Fraction of TOTAL system RAM that can be used (0.0-1.0).
+                        This is applied to total RAM, not just available.
+        logger: Optional logger for debug messages.
+        
+    Returns:
+        float: Usable RAM in MB (total system RAM * safety_cap).
+    """
+    try:
+        mem = psutil.virtual_memory()
+        total_ram_mb = mem.total / (1024 * 1024)
+        available_ram_mb = mem.available / (1024 * 1024)
+        
+        # Apply safety cap to TOTAL RAM (not just available)
+        # This gives a consistent budget regardless of current system state
+        usable_ram_mb = total_ram_mb * ram_safety_cap
+        
+        if logger:
+            logger.info(f"System RAM: Total={total_ram_mb:.0f} MB, Available={available_ram_mb:.0f} MB")
+            logger.info(f"Usable RAM budget: {usable_ram_mb:.0f} MB ({ram_safety_cap:.0%} of total)")
+        
+        return usable_ram_mb
+    
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to query RAM: {e}")
+        return 0.0
+
 def parse_time_range(time_string):
     """
     Parses a time range string and returns start time, end time, and time delta.
@@ -856,155 +952,220 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Use max of requested VRAM or model requirement (similar to EQCCT logic)
             model_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
             
-            # ===== OPTIMAL GPU ACTOR CREATION =====
-            # KEY INSIGHT: PyTorch/TensorFlow allocate GPU memory based on their own config,
-            # NOT Ray's fractional GPU. Each actor needs exclusive GPU access.
-            # Concurrency is achieved via the task queue, not via actor count.
+            # ===== MEMORY-AWARE GPU ACTOR CREATION =====
+            # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
+            # The constraint is: total requested VRAM must not exceed available VRAM.
+            # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
             n_gpus = len(gpu_id)
             requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            # CAP actors to 1 per GPU - this is the OPTIMAL configuration for deep learning
-            # Multiple actors per GPU causes memory conflicts since frameworks don't share VRAM
-            n_actors = min(requested_actors, n_gpus)
+            # Get available VRAM (user-defined cap via gpu_memory_limit_mb, or actual free VRAM)
+            available_vram_mb = get_available_vram_mb(
+                gpu_ids=gpu_id, 
+                max_vram_mb=gpu_memory_limit_mb,
+                logger=logger
+            )
             
-            logger.info(f"===== OPTIMAL GPU ACTOR POOL =====")
+            # Calculate max actors based on VRAM (memory constraint, not hardware count)
+            max_actors_by_vram = int(available_vram_mb / model_vram_mb) if model_vram_mb > 0 else requested_actors
+            n_actors = min(requested_actors, max(1, max_actors_by_vram))
+            
+            logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available GPUs: {n_gpus}")
-            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) (1 per GPU, optimal for deep learning)")
+            logger.info(f"Available VRAM: {available_vram_mb:.0f} MB")
+            logger.info(f"VRAM per model: {model_vram_mb:.0f} MB")
+            logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
+            logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      This achieves parallelism without GPU memory conflicts.")
-            logger.info(f"Using GPUs: {gpu_id[:n_actors]}")
+                logger.info(f"      Concurrency limited by VRAM, not hardware count.")
+            
+            # Calculate fractional GPU allocation so Ray knows these are GPU actors
+            # With n_actors sharing n_gpus, each actor gets a fraction of GPU resources
+            # This tells Ray to schedule with GPU access while allowing memory-based sharing
+            fractional_gpu = float(n_gpus) / float(n_actors) if n_actors > 0 else 1.0
+            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0 (one actor can't claim more than 1 GPU unit)
+            logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+            logger.info(f"  → This ensures Ray schedules actors with GPU access")
+            logger.info(f"  → TF/PyTorch memory growth allows dynamic VRAM sharing")
             
             model_actors = []
             for i in range(n_actors):
-                gpu_idx = gpu_id[i]  # Each actor gets its own dedicated GPU
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on GPU {gpu_idx} (dedicated, {model_vram_mb/1024:.2f}GB VRAM)...")
-                # Each actor gets 1 full GPU (not fractional) for exclusive memory access
-                actor = SeisBenchModelActor.options(num_gpus=1.0, num_cpus=0).remote(
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} ({model_vram_mb/1024:.2f}GB VRAM each)...")
+                # Use fractional GPU so Ray knows this actor needs GPU resources
+                # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
+                actor = SeisBenchModelActor.options(num_gpus=fractional_gpu).remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
-                    gpus_to_use=[gpu_idx],
+                    gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
                     use_gpu=True
                 )
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
-                    logger.error(f"Failed to create SeisBenchModelActor on GPU {gpu_idx}: {e}")
+                    logger.error(f"Failed to create SeisBenchModelActor {i+1}: {e}")
                     raise
-                logger.info(f"SeisBenchModelActor {i+1} created on GPU {gpu_idx}.")
+                logger.info(f"SeisBenchModelActor {i+1} created successfully.")
                 model_actors.append(actor)
             logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
         else:
-            # ===== OPTIMAL CPU ACTOR CREATION =====
-            # KEY INSIGHT: Each actor loads a full model copy into RAM.
-            # Creating more actors than CPUs wastes RAM and causes thrashing.
-            # Concurrency is achieved via the task queue, not via actor count.
+            # ===== MEMORY-AWARE CPU ACTOR CREATION =====
+            # KEY INSIGHT: The constraint is RAM, not CPU count.
+            # taskset already limits CPU visibility, so let Ray handle scheduling.
             n_cpus = len(ray_cpus) if ray_cpus else 1
             requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            # CAP actors to number of CPUs - this is the OPTIMAL configuration
-            # Each actor gets 1 full CPU for efficient sequential processing
-            n_actors = min(requested_actors, n_cpus)
+            # Get RAM requirement for this model
+            model_ram_mb = get_seisbench_model_ram_mb(
+                seisbench_parent_model,
+                seisbench_child_model,
+                use_gpu=False,
+                default_mb=600.0
+            )
             
-            logger.info(f"===== OPTIMAL CPU ACTOR POOL =====")
+            # Get available RAM based on system capacity
+            # Note: ram_safety_cap would need to be passed here, using 0.90 as default
+            available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
+            
+            # Calculate max actors based on RAM (memory constraint)
+            max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
+            n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            
+            logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available CPUs: {n_cpus}")
-            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) (1 per CPU, optimal for CPU inference)")
+            logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
+            logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
+            logger.info(f"Max actors by RAM: {max_actors_by_ram}")
+            logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      This achieves parallelism without RAM exhaustion or CPU thrashing.")
+                logger.info(f"      Concurrency limited by RAM, not CPU count.")
+            logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} on CPU (dedicated, 1.0 CPU)...")
-                # Each actor gets 1 full CPU for efficient processing
-                actor = SeisBenchModelActor.options(num_cpus=1.0).remote(
-                parent_model_name=seisbench_parent_model,
-                child_model_name=seisbench_child_model,
-                gpus_to_use=False,
-                use_gpu=False
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} ({model_ram_mb/1024:.2f}GB RAM each)...")
+                # NO .options() - let Ray handle scheduling
+                # taskset already limits which CPUs Ray can see
+                actor = SeisBenchModelActor.remote(
+                    parent_model_name=seisbench_parent_model,
+                    child_model_name=seisbench_child_model,
+                    gpus_to_use=False,
+                    use_gpu=False
                 )
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
-                    logger.error(f"Failed to create SeisBenchModelActor on CPU: {e}")
+                    logger.error(f"Failed to create SeisBenchModelActor {i+1}: {e}")
                     raise
-                logger.info(f"SeisBenchModelActor {i+1} created on CPU.")
+                logger.info(f"SeisBenchModelActor {i+1} created successfully.")
                 model_actors.append(actor)
             logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.")
     else:
         # Create EQCCT model actors
         if use_gpu:
-            # ===== OPTIMAL GPU ACTOR CREATION (EQCCT/TensorFlow) =====
-            # KEY INSIGHT: TensorFlow allocates GPU memory based on gpu_memory_limit_mb,
-            # NOT Ray's fractional GPU. Each actor needs exclusive GPU access.
-            # Concurrency is achieved via the task queue, not via actor count.
-            model_vram_mb = max(gpu_memory_limit_mb, 1500) if gpu_memory_limit_mb else 1500
+            # ===== MEMORY-AWARE GPU ACTOR CREATION (EQCCT/TensorFlow) =====
+            # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
+            # The constraint is: total requested VRAM must not exceed available VRAM.
+            # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
+            model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
+            model_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
             
             n_gpus = len(gpu_id)
             requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            # CAP actors to 1 per GPU - this is the OPTIMAL configuration for deep learning
-            # TensorFlow cannot share GPU memory between processes reliably
-            n_actors = min(requested_actors, n_gpus)
+            # Get available VRAM (user-defined cap via gpu_memory_limit_mb, or actual free VRAM)
+            available_vram_mb = get_available_vram_mb(
+                gpu_ids=gpu_id, 
+                max_vram_mb=gpu_memory_limit_mb,
+                logger=logger
+            )
             
-            logger.info(f"===== OPTIMAL GPU ACTOR POOL (EQCCT) =====")
+            # Calculate max actors based on VRAM (memory constraint, not hardware count)
+            max_actors_by_vram = int(available_vram_mb / model_vram_mb) if model_vram_mb > 0 else requested_actors
+            n_actors = min(requested_actors, max(1, max_actors_by_vram))
+            
+            logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available GPUs: {n_gpus}")
-            logger.info(f"Creating {n_actors} ModelActor(s) (1 per GPU, optimal for TensorFlow)")
+            logger.info(f"Available VRAM: {available_vram_mb:.0f} MB")
+            logger.info(f"VRAM per model: {model_vram_mb:.0f} MB")
+            logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
+            logger.info(f"Creating {n_actors} ModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      This achieves parallelism without GPU memory conflicts.")
-            logger.info(f"Using GPUs: {gpu_id[:n_actors]}")
+                logger.info(f"      Concurrency limited by VRAM, not hardware count.")
+            
+            # Calculate fractional GPU allocation so Ray knows these are GPU actors
+            # With n_actors sharing n_gpus, each actor gets a fraction of GPU resources
+            # This tells Ray to schedule with GPU access while allowing memory-based sharing
+            fractional_gpu = float(n_gpus) / float(n_actors) if n_actors > 0 else 1.0
+            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0 (one actor can't claim more than 1 GPU unit)
+            logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+            logger.info(f"  → This ensures Ray schedules actors with GPU access")
+            logger.info(f"  → TF memory growth allows dynamic VRAM sharing")
             
             model_actors = []
             for i in range(n_actors):
-                gpu_idx = gpu_id[i]  # Each actor gets its own dedicated GPU
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} on GPU {gpu_idx} (dedicated, {model_vram_mb/1024:.2f}GB VRAM limit)...")
-                # Each actor gets 1 full GPU (not fractional) for exclusive memory access
-                actor = ModelActor.options(num_gpus=1.0, num_cpus=0).remote(
-                    gpus_to_use=[gpu_idx], 
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} ({model_vram_mb/1024:.2f}GB VRAM each)...")
+                # Use fractional GPU so Ray knows this actor needs GPU resources
+                # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
+                # TF memory growth is enabled in tf_environ, allowing multiple actors per GPU
+                actor = ModelActor.options(num_gpus=fractional_gpu).remote(
+                    gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
                     p_model_path=p_model, 
                     s_model_path=s_model, 
-                    gpu_memory_limit_mb=model_vram_mb, 
+                    gpu_memory_limit_mb=model_vram_mb,  # Per-actor VRAM limit via TF config
                     use_gpu=True
                 )
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
-                    logger.error(f"Failed to create ModelActor on GPU {gpu_idx}: {e}")
+                    logger.error(f"Failed to create ModelActor {i+1}: {e}")
                     raise
-                logger.info(f"ModelActor {i+1} created on GPU {gpu_idx}.")
+                logger.info(f"ModelActor {i+1} created successfully.")
                 model_actors.append(actor)
                 
             logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
             logger.info(f"[ModelActor] Models successfully loaded onto GPU(s).")
         else:
-            # ===== OPTIMAL CPU ACTOR CREATION (EQCCT/TensorFlow) =====
-            # KEY INSIGHT: Each actor loads a full TensorFlow model copy into RAM.
-            # Creating more actors than CPUs wastes RAM and causes thrashing.
-            # Concurrency is achieved via the task queue, not via actor count.
+            # ===== MEMORY-AWARE CPU ACTOR CREATION (EQCCT/TensorFlow) =====
+            # KEY INSIGHT: The constraint is RAM, not CPU count.
+            # taskset already limits CPU visibility, so let Ray handle scheduling.
             n_cpus = len(ray_cpus) if ray_cpus else 1
             requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            # CAP actors to number of CPUs - this is the OPTIMAL configuration
-            # Each actor gets 1 full CPU for efficient sequential processing
-            n_actors = min(requested_actors, n_cpus)
+            # Get RAM requirement for EQCCT in CPU mode
+            model_ram_mb = get_eqcct_ram_mb(use_gpu=False)
             
-            logger.info(f"===== OPTIMAL CPU ACTOR POOL (EQCCT) =====")
+            # Get available RAM based on system capacity
+            # Note: ram_safety_cap would need to be passed here, using 0.90 as default
+            available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
+            
+            # Calculate max actors based on RAM (memory constraint)
+            max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
+            n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            
+            logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL (EQCCT) =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available CPUs: {n_cpus}")
-            logger.info(f"Creating {n_actors} ModelActor(s) (1 per CPU, optimal for TensorFlow CPU inference)")
+            logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
+            logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
+            logger.info(f"Max actors by RAM: {max_actors_by_ram}")
+            logger.info(f"Creating {n_actors} ModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      This achieves parallelism without RAM exhaustion or CPU thrashing.")
+                logger.info(f"      Concurrency limited by RAM, not CPU count.")
+            logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} on CPU (dedicated, 1.0 CPU)...")
-                # Each actor gets 1 full CPU for efficient processing
-                actor = ModelActor.options(num_cpus=1.0).remote(
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} ({model_ram_mb/1024:.2f}GB RAM each)...")
+                # NO .options() - let Ray handle scheduling
+                # taskset already limits which CPUs Ray can see
+                actor = ModelActor.remote(
                     p_model_path=p_model, 
                     s_model_path=s_model, 
                     gpu_memory_limit_mb=None, 
@@ -1013,9 +1174,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 try:
                     ray.get(actor.ready.remote())
                 except Exception as e:
-                    logger.error(f"Failed to create ModelActor on CPU: {e}")
+                    logger.error(f"Failed to create ModelActor {i+1}: {e}")
                     raise
-                logger.info(f"ModelActor {i+1} created on CPU.")
+                logger.info(f"ModelActor {i+1} created successfully.")
                 model_actors.append(actor)
             logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.") 
 
