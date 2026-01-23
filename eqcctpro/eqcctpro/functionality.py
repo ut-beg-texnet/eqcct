@@ -1523,6 +1523,7 @@ class EvaluateSystem():
                             error_msg = restart_note + f"{type(e).__name__}: {str(e)}"
                             # Still capture memory after failure
                             mem_after = get_memory_snapshot(process)
+                            vram_after = get_gpu_vram_snapshot(gpus_to_use)
                             memory_trial_data = build_memory_trial_data(
                                 mem_after=mem_after,
                                 mem_before=mem_before,
@@ -1540,9 +1541,11 @@ class EvaluateSystem():
                             self.logger.info(f"Trial {trial_num} FAILED: {error_msg}")
                             
                         # Write log entries from the queue to the file
+                        log_entry = None
                         while not log_queue.empty():
                             log_entry = log_queue.get()
-                        self.logger.info(f"{log_entry}")
+                        if log_entry is not None:
+                            self.logger.info(f"{log_entry}")
                             
                         remove_output_subdirs(self.output_dir, logger=self.logger) 
                         trial_num += 1

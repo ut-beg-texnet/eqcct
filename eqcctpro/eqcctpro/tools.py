@@ -1007,6 +1007,41 @@ def check_station_dirs(input_dir):
         return statement, station_list_f, False 
 
 
+def _setup_cuda_library_path():
+    """
+    Set up LD_LIBRARY_PATH to include NVIDIA CUDA libraries installed via pip.
+    This is required for TensorFlow to find cuDNN and other CUDA libraries.
+    Must be called BEFORE importing TensorFlow.
+    """
+    import sys as _sys
+    # Find the site-packages directory
+    for path in _sys.path:
+        if 'site-packages' in path:
+            nvidia_base = os.path.join(path, 'nvidia')
+            if os.path.isdir(nvidia_base):
+                # List of nvidia library subdirectories
+                nvidia_libs = [
+                    'cublas/lib', 'cuda_runtime/lib', 'cudnn/lib', 
+                    'cufft/lib', 'curand/lib', 'cusolver/lib', 
+                    'cusparse/lib', 'nccl/lib', 'nvjitlink/lib'
+                ]
+                lib_paths = []
+                for lib in nvidia_libs:
+                    lib_path = os.path.join(nvidia_base, lib)
+                    if os.path.isdir(lib_path):
+                        lib_paths.append(lib_path)
+                
+                if lib_paths:
+                    existing_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+                    new_paths = ':'.join(lib_paths)
+                    if existing_ld_path:
+                        os.environ['LD_LIBRARY_PATH'] = f"{new_paths}:{existing_ld_path}"
+                    else:
+                        os.environ['LD_LIBRARY_PATH'] = new_paths
+                    return True
+    return False
+
+
 """
 tf_environ sets the tensorflow environment for either an allocated CPU or GPU configuration. 
 If it is a CPU, the CUDA_DEVICE_ORDER is configured for a CPU; Intra/inter parallelism threads are also set as well
@@ -1026,6 +1061,10 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
         if not logger.handlers:
             # logger.addHandler(logging.StreamHandler())
             logger.addHandler(logging.NullHandler())
+
+    # Set up CUDA library paths BEFORE importing TensorFlow
+    # This is required for TensorFlow to find cuDNN and other CUDA libraries
+    _setup_cuda_library_path()
 
     # C++ backend verbosity (must be set before importing TF)
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")  # 0=all,1=INFO-,2=WARNING-,3=ERROR-
@@ -1048,25 +1087,43 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
 
     # 1) Now import TF (it will honor visibility)
     import tensorflow as tf
-    tf.get_logger().setLevel(logging.ERROR)
+    try:
+        tf.get_logger().setLevel(logging.ERROR)
+    except AttributeError:
+        # tf.get_logger() not available in some TF configurations
+        pass
     try:
         from absl import logging as absl_logging
         absl_logging.set_verbosity(absl_logging.ERROR)
     except Exception:
         pass
     if log_device:
-        tf.debugging.set_log_device_placement(True)
+        try:
+            tf.debugging.set_log_device_placement(True)
+        except AttributeError:
+            # tf.debugging not available in some TF configurations
+            pass
 
-    # 2) Threading (optional)
-    if intra_threads is not None:
-        tf.config.threading.set_intra_op_parallelism_threads(int(intra_threads))
-        logger.info(f"Configured Intra-op threads = {intra_threads}")
-    if inter_threads is not None:
-        tf.config.threading.set_inter_op_parallelism_threads(int(inter_threads))
-        logger.info(f"Configured Inter-op threads = {inter_threads}")
+    # 2) Threading (optional) - wrapped in try-except for TF compatibility
+    try:
+        if intra_threads is not None:
+            tf.config.threading.set_intra_op_parallelism_threads(int(intra_threads))
+            logger.info(f"Configured Intra-op threads = {intra_threads}")
+        if inter_threads is not None:
+            tf.config.threading.set_inter_op_parallelism_threads(int(inter_threads))
+            logger.info(f"Configured Inter-op threads = {inter_threads}")
+    except AttributeError:
+        # tf.config not available in some TF configurations
+        logger.warning("tf.config.threading not available, skipping thread configuration")
 
     # 3) Configure GPU memory on all visible GPUs
-    vis_gpus = tf.config.list_physical_devices("GPU")
+    try:
+        vis_gpus = tf.config.list_physical_devices("GPU")
+    except AttributeError:
+        # tf.config not available
+        logger.warning("tf.config not available, skipping GPU configuration")
+        return {"logical_gpus": [], "physical_gpus": []}
+    
     if not vis_gpus:
         logger.info(f"TensorFlow: No GPUs visible; TF will proceed on CPU.")
         logger.info("")

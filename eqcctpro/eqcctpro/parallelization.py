@@ -1646,7 +1646,11 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     # Python-side TF/absl logging
     try:
         import tensorflow as tf
-        tf.get_logger().setLevel(logging.ERROR)
+        try:
+            tf.get_logger().setLevel(logging.ERROR)
+        except AttributeError:
+            # tf.get_logger() not available in some TF configurations
+            pass
         try:
             from absl import logging as absl_logging
             absl_logging.set_verbosity(absl_logging.ERROR)

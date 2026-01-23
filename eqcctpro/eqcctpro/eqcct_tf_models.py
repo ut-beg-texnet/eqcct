@@ -1,4 +1,36 @@
 import warnings
+import os
+import sys
+
+# Set up CUDA library paths BEFORE importing TensorFlow
+# This is required for TensorFlow to find cuDNN and other CUDA libraries
+def _setup_cuda_library_path():
+    for path in sys.path:
+        if 'site-packages' in path:
+            nvidia_base = os.path.join(path, 'nvidia')
+            if os.path.isdir(nvidia_base):
+                nvidia_libs = [
+                    'cublas/lib', 'cuda_runtime/lib', 'cudnn/lib', 
+                    'cufft/lib', 'curand/lib', 'cusolver/lib', 
+                    'cusparse/lib', 'nccl/lib', 'nvjitlink/lib'
+                ]
+                lib_paths = []
+                for lib in nvidia_libs:
+                    lib_path = os.path.join(nvidia_base, lib)
+                    if os.path.isdir(lib_path):
+                        lib_paths.append(lib_path)
+                if lib_paths:
+                    existing_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+                    new_paths = ':'.join(lib_paths)
+                    if existing_ld_path:
+                        os.environ['LD_LIBRARY_PATH'] = f"{new_paths}:{existing_ld_path}"
+                    else:
+                        os.environ['LD_LIBRARY_PATH'] = new_paths
+                    return True
+    return False
+
+_setup_cuda_library_path()
+
 import absl.logging
 import numpy as np
 import tensorflow as tf 
