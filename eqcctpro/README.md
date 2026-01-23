@@ -317,17 +317,69 @@ runner = RunEQCCTPro(
 
 #### **Memory Management in Ripper Mode**
 
-Ripper mode benefits from the same automatic OOM prevention mechanisms as ModelActor mode:
+Ripper mode benefits from the same automatic OOM prevention mechanisms as ModelActor mode, plus additional runtime memory checking for both GPU and CPU modes.
 
-1. **VRAM-Aware Concurrency Limiting**: In GPU mode, ripper automatically calculates the maximum safe number of concurrent tasks based on available VRAM. If the requested concurrency exceeds what VRAM can handle, it is automatically capped to prevent OOM.
+##### **GPU Ripper Mode: VRAM-Aware Concurrency Limiting**
 
-2. **Automatic Ray Restart**: When increasing concurrency between trials, if the estimated memory footprint would exceed capacity, Ray is automatically restarted to clear GPU/RAM memory. This is the same mechanism used by ModelActor mode.
+Before each trial, ripper queries **actual free VRAM** from the GPU(s) using `pynvml`:
+```
+effective_vram = min(user_defined_pool / num_gpus, actual_free_vram)
+max_concurrent = (effective_vram × ripper_headroom) / vram_per_task
+```
 
-3. **Task-Level Cleanup**: Each task explicitly releases model memory after completion:
+This prevents OOM when:
+- User's `max_vram_mb` is for multiple GPUs but only a subset is used
+- Other processes are using GPU memory
+- Previous trials haven't fully released VRAM
+
+##### **CPU Ripper Mode: RAM-Aware Concurrency Limiting**
+
+Before each trial, ripper queries **actual available RAM** using `psutil`:
+```
+usable_ram = actual_available_ram × ripper_ram_headroom
+max_concurrent = usable_ram / ram_per_task
+```
+
+This prevents OOM when:
+- Other processes are consuming system RAM
+- Previous trials haven't fully released RAM
+- The user requests more concurrent tasks than RAM can support
+
+##### **Tunable Headroom Variables**
+
+Both headroom factors can be adjusted in `parallelization.py` (search for these variable names):
+
+| Variable | Default | Location | Mode | Description |
+|----------|---------|----------|------|-------------|
+| `ripper_headroom` | `0.85` | ~line 1011 | GPU | Fraction of effective VRAM to use |
+| `ripper_ram_headroom` | `0.80` | ~line 1061 | CPU | Fraction of available RAM to use |
+
+##### **Recommended Values and Risks**
+
+| Value Range | Use Case | Risk Level |
+|-------------|----------|------------|
+| **0.70 - 0.75** | Shared systems, other GPU/CPU-intensive processes running | Very Safe |
+| **0.80 - 0.85** | Dedicated systems with moderate background processes | Safe (Default) |
+| **0.90 - 0.95** | Dedicated systems with minimal background processes | Moderate Risk |
+| **> 0.95** | Not recommended | High Risk of OOM |
+
+**Risks of Higher Values:**
+- **GPU (VRAM)**: Memory fragmentation can cause `CUDNN_STATUS_EXECUTION_FAILED` or `DNN library is not found` errors even when theoretical VRAM is available. TensorFlow's XLA compilation can cause temporary memory spikes.
+- **CPU (RAM)**: System may become unresponsive if RAM is exhausted. Linux OOM killer may terminate processes unexpectedly. Swap usage causes severe performance degradation.
+
+**Recommendation**: Start with the defaults (`0.85` for GPU, `0.80` for CPU). If you encounter OOM errors, reduce the headroom. If tasks complete reliably, you can gradually increase to maximize throughput.
+
+##### **Other OOM Prevention Mechanisms**
+
+1. **Automatic Ray Restart**: When increasing concurrency between trials, if the estimated memory footprint would exceed capacity, Ray is automatically restarted to clear GPU/RAM memory.
+
+2. **Task-Level Cleanup**: Each task explicitly releases model memory after completion:
    - TensorFlow: `del model` + `tf.keras.backend.clear_session()`
    - PyTorch: `del model` + `torch.cuda.empty_cache()`
 
-**Note**: While Ripper mode releases memory after each task, Ray workers may be reused between tasks within a session. The automatic Ray restart ensures memory is fully cleared when needed between trials.
+3. **CSV Tracking**: The `Actual Ripper Concurrent Tasks` column shows the real concurrency used after memory limiting. Compare with `Number of Concurrent Station Tasks` (requested) to see if memory constraints reduced concurrency.
+
+**Note**: While Ripper mode releases memory after each task, Ray workers may be reused between tasks within a session. Memory fragmentation can cause some tasks to fail even when theoretical memory is available. The automatic Ray restart helps clear fragmented memory between trials.
 
 ---
 
@@ -438,6 +490,7 @@ The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results
 - **`GPUs Used`**: List of physical GPU IDs utilized (e.g., `[0, 1]`).
 - **`N ModelActors`**: The **actual** number of Ray ModelActors created for parallel inference. This may be less than the requested amount if VRAM/RAM constraints limit how many models can be loaded simultaneously.
 - **`Number of Concurrent Station Tasks`**: The **requested** concurrency level for station predictions. This is what the user asked for, but the actual number of actors created (`N ModelActors`) may be lower due to memory constraints.
+- **`Actual Ripper Concurrent Tasks`**: **(Ripper mode only)** The **actual** number of concurrent tasks used after memory-aware limiting. In GPU ripper mode, this may be lower than requested if actual free VRAM is insufficient. In CPU ripper mode, this may be lower if actual available RAM is insufficient. This column is empty for standard ModelActor mode (use `N ModelActors` instead).
 - **`Concurrent Timechunks Used`**: Number of timechunks processed in parallel.
 - **`Total Number of Timechunks`**: Number of temporal segments the data was split into.
 - **`Length of Timechunk (min)`**: Duration of a single timechunk.

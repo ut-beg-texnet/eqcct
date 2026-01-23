@@ -37,6 +37,7 @@ CANONICAL_CSV_HEADER = [
     "GPUs Used",
     "N ModelActors",
     "Number of Concurrent Station Tasks",
+    "Actual Ripper Concurrent Tasks",  # Ripper mode only: actual concurrent tasks after VRAM limiting
     # Timechunk info (CPU trials)
     "Concurrent Timechunks Used",
     "Total Number of Timechunks",

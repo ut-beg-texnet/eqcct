@@ -13,29 +13,30 @@ models_dir = os.path.join(base_dir, 'models/EQCCT')
 tmp_dir = '/lambda1a/skevofilaxc/tmp'
 
 # --- Example A: Evaluate System capability using EQCCT Model (CPU) ---
-# eval_eqcct_cpu = EvaluateSystem(
-#     eval_mode='cpu',
-#     model_type='eqcct',
-#     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'), # P Model name for EQCCT model (test_trainer_024.h5)
-#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'), # S Model name for EQCCT model (test_trainer_021.h5)
-#     input_dir=input_mseed_directory_path,
-#     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct'),
-#     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct', 'eqcctpro.log'),
-#     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct'),
-#     cpu_id_list=range(0, 20),
-#     min_cpu_amount=5,
-#     cpu_test_step_size=1,
-#     stations2use=100,
-#     starting_amount_of_stations=1,
-#     station_list_step_size=1,
-#     min_conc_stations=1,
-#     conc_station_tasks_step_size=1,
-#     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
-#     tmp_dir=tmp_dir,
-#     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00'
-# )
-# eval_eqcct_cpu.evaluate()
+eval_eqcct_cpu = EvaluateSystem(
+    eval_mode='cpu',
+    model_type='eqcct',
+    p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'), # P Model name for EQCCT model (test_trainer_024.h5)
+    s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'), # S Model name for EQCCT model (test_trainer_021.h5)
+    input_dir=input_mseed_directory_path,
+    output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct_ripper'),
+    log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct_ripper', 'eqcctpro.log'),
+    csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct_ripper'),
+    cpu_id_list=range(40, 60), # (0, 20)
+    min_cpu_amount=5,
+    cpu_test_step_size=1,
+    stations2use=100,
+    starting_amount_of_stations=1,
+    station_list_step_size=1,
+    min_conc_stations=1,
+    conc_station_tasks_step_size=1,
+    ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
+    tmp_dir=tmp_dir,
+    start_time='2024-12-15 12:00:00',
+    end_time='2024-12-15 12:01:00',
+    ripper=True
+)
+eval_eqcct_cpu.evaluate()
 
 # --- Example B: Evaluate System capability using EQCCT Model (GPU) ---
 # eval_eqcct_gpu = EvaluateSystem(
@@ -60,7 +61,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
 #     tmp_dir=tmp_dir,
 #     start_time='2024-12-15 12:00:00',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
-#     end_time='2024-12-15 12:01:00'
+#     end_time='2024-12-15 12:01:00',
+#     ripper=False
 # )
 # eval_eqcct_gpu.evaluate()
 
@@ -88,7 +90,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
 #     tmp_dir=tmp_dir,
 #     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00'
+#     end_time='2024-12-15 12:01:00',
+#     ripper=False
 # )
 # eval_phasenet_original.evaluate()
 
@@ -116,7 +119,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
 #     tmp_dir=tmp_dir,
 #     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00'
+#     end_time='2024-12-15 12:01:00',
+#     ripper=False
 # )
 # eval_phasenetlight_stead.evaluate()
 
@@ -145,7 +149,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
 #     tmp_dir=tmp_dir,
 #     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00'
+#     end_time='2024-12-15 12:01:00',
+#     ripper=False
 # )
 # eval_eqtransformer_original.evaluate()
 
@@ -173,7 +178,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
 #     tmp_dir=tmp_dir,
 #     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00'
+#     end_time='2024-12-15 12:01:00',
+#     ripper=False
 # )
 # eval_eqtransformer_original_nonconservative.evaluate()
 

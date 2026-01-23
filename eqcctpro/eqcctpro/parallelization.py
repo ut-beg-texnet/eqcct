@@ -958,7 +958,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # Calculate VRAM-aware concurrency limit for ripper mode
         # Unlike ModelActor mode, ripper tasks each load their own model
         # so we must limit concurrent tasks based on available VRAM
-        if use_gpu and total_vram_pool_mb:
+        #
+        # IMPORTANT: We query ACTUAL free VRAM at runtime because:
+        # 1. User's max_vram_mb might be for multiple GPUs, but we're only using gpu_id subset
+        # 2. Other processes may be using GPU memory
+        # 3. Previous trials may not have fully released VRAM
+        if use_gpu and gpu_id:
             # Get VRAM requirement per task
             if model_type_lower == 'seisbench':
                 vram_per_task_mb = get_seisbench_model_vram_mb(
@@ -966,11 +971,45 @@ def mseed_predictor(input_dir='downloads_mseeds',
             else:
                 vram_per_task_mb = get_eqcct_vram_mb()
             
-            # Calculate max safe concurrent tasks based on VRAM
-            # Apply 0.95 headroom factor for safety margin (same as GPU_HEADROOM_FACTOR)
-            # Note: Using literal value because Ray workers don't have access to module-level constants
-            gpu_headroom = 0.95
-            usable_vram_mb = total_vram_pool_mb * gpu_headroom
+            # Calculate per-GPU user-defined VRAM budget
+            # max_vram_mb (total_vram_pool_mb) is the total across ALL GPUs in selected_gpus
+            # so we divide by the number of GPUs to get per-GPU budget
+            num_gpus = len(gpu_id) if isinstance(gpu_id, (list, tuple)) else 1
+            user_vram_per_gpu_mb = (total_vram_pool_mb / num_gpus) if total_vram_pool_mb else float('inf')
+            
+            # Query ACTUAL free VRAM from the GPU(s) at runtime using pynvml
+            # This prevents OOM when:
+            # - User specifies pool for multiple GPUs but only uses subset
+            # - Other processes are using GPU memory
+            # - Previous trials haven't fully released VRAM
+            try:
+                import pynvml
+                pynvml.nvmlInit()
+                actual_free_vram_mb = 0
+                for gpu_idx in gpu_id:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    actual_free_vram_mb += mem_info.free / (1024 * 1024)  # Convert bytes to MB
+                pynvml.nvmlShutdown()
+                logger.info(f"RIPPER VRAM CHECK: Actual free VRAM across {num_gpus} GPU(s): {actual_free_vram_mb:.0f} MB")
+            except Exception as e:
+                logger.warning(f"Could not query GPU VRAM via pynvml: {e}. Using user-defined pool.")
+                actual_free_vram_mb = user_vram_per_gpu_mb * num_gpus  # Fallback to user pool
+            
+            # Use the MINIMUM of: user-defined per-GPU budget OR actual free VRAM
+            # This prevents OOM when user overestimates available VRAM
+            effective_vram_pool = min(
+                user_vram_per_gpu_mb * num_gpus,  # User's total budget for these GPUs
+                actual_free_vram_mb               # Actual free VRAM on these GPUs
+            )
+            
+            # Apply headroom factor for ripper mode
+            # NOTE: Ripper mode creates/destroys TensorFlow models per-task, which can cause
+            # GPU memory fragmentation. If you see "DNN library is not found" or 
+            # "CUDNN_STATUS_EXECUTION_FAILED" errors, try reducing this to 0.80-0.85.
+            # Higher values (0.95) maximize concurrency but may cause sporadic cuDNN failures.
+            ripper_headroom = 0.85
+            usable_vram_mb = effective_vram_pool * ripper_headroom
             max_safe_concurrent = max(1, int(usable_vram_mb / vram_per_task_mb))
             
             # Cap max_pending_tasks to the VRAM-safe limit
@@ -978,16 +1017,64 @@ def mseed_predictor(input_dir='downloads_mseeds',
             if requested_concurrency > max_safe_concurrent:
                 logger.warning(f"RIPPER VRAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
                              f"but VRAM only allows {max_safe_concurrent} "
-                             f"({usable_vram_mb:.0f} MB / {vram_per_task_mb:.0f} MB per task)")
+                             f"(Effective: {effective_vram_pool:.0f} MB × {ripper_headroom:.0%} / {vram_per_task_mb:.0f} MB per task)")
                 max_pending_tasks = max_safe_concurrent
             else:
                 max_pending_tasks = requested_concurrency
             
             logger.info(f"VRAM-aware concurrency: {max_pending_tasks} concurrent tasks "
-                       f"(VRAM pool: {total_vram_pool_mb:.0f} MB, per-task: {vram_per_task_mb:.0f} MB)")
+                       f"(User budget/GPU: {user_vram_per_gpu_mb:.0f} MB, Actual free: {actual_free_vram_mb:.0f} MB, "
+                       f"Effective: {effective_vram_pool:.0f} MB, per-task: {vram_per_task_mb:.0f} MB)")
         else:
-            # CPU mode or no VRAM info - use requested concurrency
-            max_pending_tasks = number_of_concurrent_station_predictions
+            # =====================================================================
+            # CPU RIPPER MODE: RAM-Aware Concurrency Limiting
+            # Similar to GPU mode, we query actual free RAM and cap concurrency
+            # to prevent OOM when many tasks load models simultaneously.
+            # =====================================================================
+            
+            # Get RAM requirement per task
+            if model_type_lower == 'seisbench':
+                ram_per_task_mb = get_seisbench_model_ram_mb(
+                    seisbench_parent_model, seisbench_child_model, use_gpu=False, logger=logger)
+            else:
+                ram_per_task_mb = get_eqcct_ram_mb(use_gpu=False)
+            
+            # Query actual free RAM using psutil
+            try:
+                import psutil
+                mem_info = psutil.virtual_memory()
+                system_ram_total_mb = mem_info.total / (1024 * 1024)
+                actual_free_ram_mb = mem_info.available / (1024 * 1024)
+                logger.info(f"RIPPER RAM CHECK: Total RAM: {system_ram_total_mb:.0f} MB, Available: {actual_free_ram_mb:.0f} MB")
+            except Exception as e:
+                logger.warning(f"Could not query system RAM: {e}. Using unlimited concurrency.")
+                max_pending_tasks = number_of_concurrent_station_predictions
+                actual_free_ram_mb = None
+            
+            if actual_free_ram_mb is not None:
+                # Apply headroom factor for CPU ripper mode
+                # NOTE: CPU ripper mode creates/destroys models per-task, which causes RAM churn.
+                # Lower values (0.70-0.80) are safer but reduce concurrency.
+                # Higher values (0.90) maximize concurrency but may cause OOM if system
+                # has other processes competing for RAM.
+                # RIPPER_RAM_HEADROOM can be adjusted in parallelization.py (search for this variable)
+                ripper_ram_headroom = 0.80
+                usable_ram_mb = actual_free_ram_mb * ripper_ram_headroom
+                max_safe_concurrent = max(1, int(usable_ram_mb / ram_per_task_mb))
+                
+                # Cap max_pending_tasks to the RAM-safe limit
+                requested_concurrency = number_of_concurrent_station_predictions
+                if requested_concurrency > max_safe_concurrent:
+                    logger.warning(f"RIPPER RAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
+                                 f"but RAM only allows {max_safe_concurrent} "
+                                 f"(Available: {actual_free_ram_mb:.0f} MB × {ripper_ram_headroom:.0%} / {ram_per_task_mb:.0f} MB per task)")
+                    max_pending_tasks = max_safe_concurrent
+                else:
+                    max_pending_tasks = requested_concurrency
+                
+                logger.info(f"RAM-aware concurrency: {max_pending_tasks} concurrent tasks "
+                           f"(Available: {actual_free_ram_mb:.0f} MB, Usable: {usable_ram_mb:.0f} MB, "
+                           f"per-task: {ram_per_task_mb:.0f} MB)")
         
         # Submit tasks to ray in a queue (old methodology)
         tasks_queue = []
@@ -1094,6 +1181,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
                 "N ModelActors": 0,  # RIPPER mode doesn't use ModelActors
                 "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
+                "Actual Ripper Concurrent Tasks": int(max_pending_tasks),  # Actual concurrent tasks after VRAM/RAM limiting
                 "Total Run time for Picker (s)": round(end_time - start_time, 6),
                 "Model Used": model_used,
                 "Trial Success": "",
