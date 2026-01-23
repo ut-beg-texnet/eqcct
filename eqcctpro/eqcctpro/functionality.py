@@ -57,7 +57,9 @@ class RunEQCCTPro():
                 model_type: str = 'eqcct',  # 'eqcct' or 'seisbench'
                 seisbench_parent_model: str = None,  # e.g., 'PhaseNet', 'EQTransformer'
                 seisbench_child_model: str = None,  # e.g., 'original', 'stead'
-                Detection_threshold: float = 0.3):  # Detection threshold for SeisBench models 
+                Detection_threshold: float = 0.3,  # Detection threshold for SeisBench models
+                # Ripper mode - uses old task-based approach instead of ModelActors
+                ripper: bool = False):  # If True, use task-based parallel_predict instead of ModelActor pool
          
         self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
         self.input_dir = input_dir
@@ -90,6 +92,9 @@ class RunEQCCTPro():
         self.seisbench_parent_model = seisbench_parent_model
         self.seisbench_child_model = seisbench_child_model
         self.Detection_threshold = Detection_threshold
+        
+        # Ripper mode - uses old task-based approach instead of ModelActors
+        self.ripper = ripper
 
         # Validate model type and parameters
         if self.model_type not in ['eqcct', 'seisbench']:
@@ -281,7 +286,8 @@ class RunEQCCTPro():
                                         number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time,
                                         intra_threads=self.intra_threads, inter_threads=self.inter_threads,
                                         model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
-                                        seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold))
+                                        seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
+                                        ripper=self.ripper))
                     break
                 
                 else: # If there are more tasks than maximum, just process them
@@ -410,7 +416,9 @@ class EvaluateSystem():
                  model_type: str = 'eqcct',  # 'eqcct' or 'seisbench'
                  seisbench_parent_model: str = None,
                  seisbench_child_model: str = None,
-                 Detection_threshold: float = 0.3): 
+                 Detection_threshold: float = 0.3,
+                 # Ripper mode - uses old task-based approach instead of ModelActors
+                 ripper: bool = False): 
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
@@ -458,6 +466,9 @@ class EvaluateSystem():
         self.seisbench_parent_model = seisbench_parent_model
         self.seisbench_child_model = seisbench_child_model
         self.Detection_threshold = Detection_threshold
+        
+        # Ripper mode - uses old task-based approach instead of ModelActors
+        self.ripper = ripper
 
         # Validate model type and parameters
         if self.model_type not in ['eqcct', 'seisbench']:
@@ -960,7 +971,8 @@ class EvaluateSystem():
                                                             number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
                                                             test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt,
                                                             model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
-                                                            seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold))
+                                                            seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
+                                                            ripper=self.ripper))
                                     
                                         break
                                 
@@ -1497,7 +1509,8 @@ class EvaluateSystem():
                                 inter_threads=self.inter_threads, 
                                 timechunk_dt=self.timechunk_dt,
                                 model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
-                                seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold
+                                seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
+                                ripper=self.ripper
                             )
                             
                             # Wait for result

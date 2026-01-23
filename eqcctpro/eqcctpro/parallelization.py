@@ -807,7 +807,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
               model_type='eqcct',
               seisbench_parent_model=None,
               seisbench_child_model=None,
-              Detection_threshold=0.3): 
+              Detection_threshold=0.3,
+              # Ripper mode - uses old task-based approach instead of ModelActors
+              ripper=False): 
     
     """ 
     
@@ -934,6 +936,178 @@ def mseed_predictor(input_dir='downloads_mseeds',
     tasks_predictor = [[f"({i+1}/{len(station_list)})", station_list[i], out_dir, args] for i in range(len(station_list))]
     
     if not tasks_predictor: return
+    
+    # =====================================================================
+    # RIPPER MODE: Use old task-based approach (model loaded per task)
+    # This bypasses ModelActors and allows more flexible GPU sharing
+    # 
+    # IMPORTANT: Unlike ModelActor mode (1 actor per GPU with round-robin),
+    # ripper mode launches concurrent tasks that each load their own model.
+    # To prevent OOM, we must limit concurrent tasks based on available VRAM.
+    # 
+    # The same automatic Ray restart mechanism applies at EvaluateSystem level
+    # for OOM prevention between trials.
+    # =====================================================================
+    if ripper:
+        logger.info(f"===== RIPPER MODE ENABLED =====")
+        logger.info(f"Using old task-based approach (model loaded per task)")
+        logger.info(f"This allows more flexible GPU memory sharing but has model loading overhead.")
+        
+        model_type_lower = model_type.lower() if model_type else 'eqcct'
+        
+        # Calculate VRAM-aware concurrency limit for ripper mode
+        # Unlike ModelActor mode, ripper tasks each load their own model
+        # so we must limit concurrent tasks based on available VRAM
+        if use_gpu and total_vram_pool_mb:
+            # Get VRAM requirement per task
+            if model_type_lower == 'seisbench':
+                vram_per_task_mb = get_seisbench_model_vram_mb(
+                    seisbench_parent_model, seisbench_child_model, logger=logger)
+            else:
+                vram_per_task_mb = get_eqcct_vram_mb()
+            
+            # Calculate max safe concurrent tasks based on VRAM
+            # Apply 0.95 headroom factor for safety margin (same as GPU_HEADROOM_FACTOR)
+            # Note: Using literal value because Ray workers don't have access to module-level constants
+            gpu_headroom = 0.95
+            usable_vram_mb = total_vram_pool_mb * gpu_headroom
+            max_safe_concurrent = max(1, int(usable_vram_mb / vram_per_task_mb))
+            
+            # Cap max_pending_tasks to the VRAM-safe limit
+            requested_concurrency = number_of_concurrent_station_predictions
+            if requested_concurrency > max_safe_concurrent:
+                logger.warning(f"RIPPER VRAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
+                             f"but VRAM only allows {max_safe_concurrent} "
+                             f"({usable_vram_mb:.0f} MB / {vram_per_task_mb:.0f} MB per task)")
+                max_pending_tasks = max_safe_concurrent
+            else:
+                max_pending_tasks = requested_concurrency
+            
+            logger.info(f"VRAM-aware concurrency: {max_pending_tasks} concurrent tasks "
+                       f"(VRAM pool: {total_vram_pool_mb:.0f} MB, per-task: {vram_per_task_mb:.0f} MB)")
+        else:
+            # CPU mode or no VRAM info - use requested concurrency
+            max_pending_tasks = number_of_concurrent_station_predictions
+        
+        # Submit tasks to ray in a queue (old methodology)
+        tasks_queue = []
+        logger.info(f"Starting EQCCTPro parallelized waveform processing (RIPPER MODE)...") 
+        logger.info("")
+        start_time = time.time() 
+        
+        if model_type_lower == 'seisbench':
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) [RIPPER] -------")
+        else:
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT [RIPPER] -------")
+
+        if timechunk_id is None:
+            cand = os.path.basename(input_dir)
+            if "_" in cand and len(cand) >= 10:
+                timechunk_id = cand
+            else:
+                raise ValueError("timechunk_id is None and could not be inferred from input_dir")
+        starttime, endtime, time_delta = parse_time_range(timechunk_id)
+
+        logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
+        logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
+
+        # Concurrent Prediction(s) Parallel Processing - RIPPER MODE
+        try: 
+            for i in range(len(tasks_predictor)):
+                while True:
+                    if len(tasks_queue) < max_pending_tasks:
+                        if model_type_lower == 'seisbench':
+                            # SeisBench ripper mode
+                            if use_gpu is False:
+                                tasks_queue.append(ripper_parallel_predict_seisbench.remote(
+                                    tasks_predictor[i], False, None,
+                                    parent_model_name=seisbench_parent_model,
+                                    child_model_name=seisbench_child_model,
+                                    Detection_threshold=Detection_threshold))
+                            else:
+                                gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_station_predictions
+                                tasks_queue.append(ripper_parallel_predict_seisbench.options(
+                                    num_gpus=gpu_allocation_per_task, num_cpus=0).remote(
+                                    tasks_predictor[i], True, gpu_memory_limit_mb,
+                                    parent_model_name=seisbench_parent_model,
+                                    child_model_name=seisbench_child_model,
+                                    Detection_threshold=Detection_threshold))
+                        else:
+                            # EQCCT ripper mode
+                            if use_gpu is False:
+                                tasks_queue.append(ripper_parallel_predict_eqcct.remote(
+                                    tasks_predictor[i], False, None))
+                            else:
+                                gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_station_predictions
+                                tasks_queue.append(ripper_parallel_predict_eqcct.options(
+                                    num_gpus=gpu_allocation_per_task, num_cpus=0).remote(
+                                    tasks_predictor[i], True, gpu_memory_limit_mb))
+                        break
+                    else:
+                        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                        for finished_task in tasks_finished:
+                            log_entry = ray.get(finished_task)
+                            logger.info(f'{log_entry}')
+
+            # After adding all the tasks to queue, process what's left
+            while tasks_queue:
+                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                for finished_task in tasks_finished:
+                    log_entry = ray.get(finished_task)
+                    logger.info(f'{log_entry}')
+            logger.info("")
+
+        except Exception as e:
+            logger.error(f"ERROR in parallel processing (RIPPER MODE) at {datetime.now()}")
+            logger.error(f"Error: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+        logger.info(f"------- Parallel Station Waveform Processing Complete [RIPPER MODE] -------")
+        end_time = time.time()
+        logger.info(f"Picks saved at {output_dir}. Process Runtime: {end_time - start_time:.2f} s")
+
+        if testing_gpu is not None: 
+            num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else int(len(list(ray_cpus)))
+            if timechunk_id:
+                starttime, endtime, time_delta = parse_time_range(timechunk_id)
+                timechunk_length_min = time_delta.total_seconds() / 60.0 if time_delta else None
+            else:
+                timechunk_length_min = None
+            if model_type_lower == 'seisbench':
+                model_used = f"{seisbench_parent_model}/{seisbench_child_model}"
+            else:
+                model_used = "eqcct"
+            
+            trial_data = {
+                "Trial Number": None,
+                "Stations Used": str(station_list),
+                "Number of Stations Used": len(station_list),
+                "Number of CPUs Allocated for Ray to Use": num_ray_cpus,
+                "Intra-parallelism Threads": intra_threads if intra_threads is not None else "",
+                "Inter-parallelism Threads": inter_threads if inter_threads is not None else "",
+                "GPUs Used": json.dumps(list(gpu_id)) if (use_gpu and gpu_id is not None) else "[]",
+                "Inference Actor Memory Limit (MB)": float(gpu_memory_limit_mb) if (use_gpu and gpu_memory_limit_mb is not None) else "",
+                "Total Waveform Analysis Timespace (min)": float(total_analysis_time.total_seconds() / 60.0) if hasattr(total_analysis_time, "total_seconds") else (float(total_analysis_time) if total_analysis_time else ""),
+                "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
+                "Concurrent Timechunks Used": int(number_of_concurrent_timechunk_predictions) if number_of_concurrent_timechunk_predictions is not None else "",
+                "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
+                "N ModelActors": 0,  # RIPPER mode doesn't use ModelActors
+                "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
+                "Total Run time for Picker (s)": round(end_time - start_time, 6),
+                "Model Used": model_used,
+                "Trial Success": "",
+                "Error Message": str(""),
+                "Comments": "[RIPPER MODE] Task-based approach (no ModelActors)",
+            }
+            append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
+            logger.info(f"Successfully saved trial data to CSV at {test_csv_filepath}")
+            
+        return "Successfully ran EQCCTPro (RIPPER MODE), exiting..."
+    
+    # =====================================================================
+    # STANDARD MODE: Use ModelActor pool (new methodology)
+    # =====================================================================
     
     # CREATE MODEL ACTOR(S) - Add this before the task loop
     logger.info(f"Creating model actor(s)...") 
@@ -1804,6 +1978,249 @@ def parallel_predict(predict_args, model_actor, gpu=False):
         end_Predicting = time.time()
         delta = (end_Predicting - start_Predicting)
         return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"
+
+    except Exception as exp:
+        return f"{pos} {station}: FAILED the prediction. {exp}"
+
+
+# =====================================================================
+# RIPPER MODE FUNCTIONS - Task-based approach (old methodology)
+# These functions load the model inside each task, then release it.
+# This allows dynamic GPU memory sharing but has model loading overhead.
+# =====================================================================
+
+@ray.remote
+def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=None):
+    """
+    RIPPER MODE: Old task-based parallel_predict for EQCCT models.
+    Each task loads the model, runs prediction, and releases it.
+    This allows more flexible GPU memory sharing than the ModelActor approach.
+    
+    Args:
+        predict_args: Tuple of (pos, station, out_dir, args)
+        gpu: Whether to use GPU
+        gpu_memory_limit_mb: VRAM limit per task in MB
+    """
+    import glob
+    import shutil
+    import csv
+    import logging
+    import sys
+    
+    # --- QUIET TF C++/Python LOGS BEFORE ANY TF IMPORT --- 
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")   # 3=ERROR
+    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # hide oneDNN banner
+    
+    if gpu is True: 
+        # Ensure TensorFlow only sees its assigned VRAM
+        import tensorflow as tf
+        gpus = tf.config.experimental.list_physical_devices('GPU')
+
+        if gpus:
+            try:
+                # Note: set_memory_growth and VirtualDeviceConfiguration are mutually exclusive
+                # Use VirtualDeviceConfiguration if memory limit is specified, otherwise use memory growth
+                if gpu_memory_limit_mb:
+                    # Set explicit memory limit via virtual device configuration
+                    tf.config.experimental.set_virtual_device_configuration(
+                        gpus[0],
+                        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)]
+                    )
+                else:
+                    # Enable memory growth to allow dynamic allocation
+                    for gpu_device in gpus:
+                        tf.config.experimental.set_memory_growth(gpu_device, True)
+            except RuntimeError as e:
+                pass  # Memory already initialized
+    else:
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")  # don't probe CUDA on CPU tasks
+
+    # Python-side TF/absl logging
+    try:
+        import tensorflow as tf
+        try:
+            tf.get_logger().setLevel(logging.ERROR)
+        except AttributeError:
+            pass
+        try:
+            from absl import logging as absl_logging
+            absl_logging.set_verbosity(absl_logging.ERROR)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
+    pos, station, out_dir, args = predict_args
+    
+    # RIPPER MODE: Load the model inside this task (old approach)
+    model = load_eqcct_model(args["p_model"], args["s_model"])
+    
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+
+    if os.path.isfile(csv_filename):
+        if args['overwrite']:
+            shutil.rmtree(save_dir)
+        else:
+            return f"{pos} {station}: Skipped (already exists - overwrite=False)."
+
+    os.makedirs(save_dir)
+    csvPr_gen = open(csv_filename, 'w')
+    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    predict_writer.writerow(['file_name', 
+                            'network',
+                            'station',
+                            'instrument_type',
+                            'station_lat',
+                            'station_lon',
+                            'station_elv',
+                            'p_arrival_time',
+                            'p_probability',
+                            's_arrival_time',
+                            's_probability'])  
+    csvPr_gen.flush()
+    
+    start_Predicting = time.time()
+    files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+    
+    try:
+        meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
+    except Exception:
+        return f"{pos} {station}: FAILED reading mSEED."
+
+    try:
+        params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+        pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+        
+        # RIPPER MODE: Use the locally loaded model directly
+        predP, predS = model.predict(pred_generator, verbose=0)
+        
+        detection_memory = []
+        prob_memory = []
+        for ix in range(len(predP)):
+            Ppicks, Pprob = _picker(args, predP[ix,:, 0])   
+            Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+
+            detection_memory, prob_memory = _output_writter_prediction(
+                meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, 
+                detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
+            )
+                                        
+        end_Predicting = time.time()
+        delta = (end_Predicting - start_Predicting)
+        
+        # Clean up model to free GPU memory
+        del model
+        try:
+            import tensorflow as tf
+            tf.keras.backend.clear_session()
+        except Exception:
+            pass
+        
+        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"
+
+    except Exception as exp:
+        return f"{pos} {station}: FAILED the prediction. {exp}"
+
+
+@ray.remote
+def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_mb=None, 
+                                       parent_model_name=None, child_model_name=None,
+                                       Detection_threshold=0.3):
+    """
+    RIPPER MODE: Old task-based parallel_predict for SeisBench models.
+    Each task loads the model, runs prediction, and releases it.
+    This allows more flexible GPU memory sharing than the ModelActor approach.
+    
+    Args:
+        predict_args: Tuple of (pos, station, out_dir, args)
+        gpu: Whether to use GPU
+        gpu_memory_limit_mb: VRAM limit per task in MB (not used for PyTorch, but kept for API compatibility)
+        parent_model_name: SeisBench parent model name (e.g., 'PhaseNet')
+        child_model_name: SeisBench child model name (e.g., 'original')
+        Detection_threshold: Detection threshold for picks
+    """
+    import glob
+    import shutil
+    import csv
+    import logging
+    import sys
+    
+    pos, station, out_dir, args = predict_args
+    
+    # RIPPER MODE: Load the SeisBench model inside this task
+    from eqcctpro.seisbench_models import load_seisbench_model, mseed2stream_3c
+    import torch
+    
+    device = "cuda" if (gpu and torch.cuda.is_available()) else "cpu"
+    model = load_seisbench_model(parent_model_name, child_model_name, device=device)
+    
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+
+    if os.path.isfile(csv_filename):
+        if args['overwrite']:
+            shutil.rmtree(save_dir)
+        else:
+            return f"{pos} {station}: Skipped (already exists - overwrite=False)."
+
+    os.makedirs(save_dir, exist_ok=True)
+    csvPr_gen = open(csv_filename, 'w')
+    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    predict_writer.writerow(['file_name', 
+                            'network',
+                            'station',
+                            'instrument_type',
+                            'station_lat',
+                            'station_lon',
+                            'station_elv',
+                            'p_arrival_time',
+                            'p_probability',
+                            's_arrival_time',
+                            's_probability'])  
+    csvPr_gen.flush()
+    
+    start_Predicting = time.time()
+    files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+    
+    try:
+        # Use mseed2stream_3c for SeisBench preprocessing
+        stream = mseed2stream_3c(args, files_list, station)
+        if stream is None:
+            return f"{pos} {station}: FAILED reading mSEED (no valid 3C stream)."
+        
+        # Run SeisBench model prediction
+        picks = model.classify(stream, 
+                              P_threshold=args.get('P_threshold', 0.3),
+                              S_threshold=args.get('S_threshold', 0.3))
+        
+        # Process picks and write to CSV
+        for pick in picks:
+            predict_writer.writerow([
+                args['input_dir'].split('/')[-1],  # file_name
+                '',  # network
+                station,  # station
+                '',  # instrument_type
+                '',  # station_lat
+                '',  # station_lon
+                '',  # station_elv
+                str(pick.peak_time) if pick.phase == 'P' else '',  # p_arrival_time
+                pick.peak_value if pick.phase == 'P' else '',  # p_probability
+                str(pick.peak_time) if pick.phase == 'S' else '',  # s_arrival_time
+                pick.peak_value if pick.phase == 'S' else ''  # s_probability
+            ])
+        csvPr_gen.flush()
+                                        
+        end_Predicting = time.time()
+        delta = (end_Predicting - start_Predicting)
+        
+        # Clean up model to free GPU memory
+        del model
+        if gpu and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s."
 
     except Exception as exp:
         return f"{pos} {station}: FAILED the prediction. {exp}"

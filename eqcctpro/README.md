@@ -273,6 +273,64 @@ Example: 2 GPUs, 50 stations to process
 
 The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to memory limits). When these differ, the `Comments` column explains the constraint (e.g., "Requested 10 actors, created 2 (VRAM limited to 8000 MB, 2756 MB/actor)").
 
+---
+
+### **Ripper Mode: Task-Based Alternative**
+
+EQCCTPro offers an alternative parallelization strategy called **Ripper Mode**, which uses the older task-based approach instead of persistent ModelActors.
+
+#### **Enabling Ripper Mode**
+```python
+# For EvaluateSystem
+eval_gpu = EvaluateSystem(
+    eval_mode='gpu',
+    model_type='eqcct',
+    # ... other parameters ...
+    ripper=True  # Enable Ripper Mode
+)
+
+# For RunEQCCTPro
+runner = RunEQCCTPro(
+    model_type='eqcct',
+    # ... other parameters ...
+    ripper=True  # Enable Ripper Mode
+)
+```
+
+#### **Comparison: ModelActor vs Ripper Mode**
+
+| Aspect | ModelActor (Default) | Ripper Mode |
+|--------|---------------------|-------------|
+| **Model Loading** | Once per actor (persistent) | Per task (load/unload each time) |
+| **Memory Management** | Actors hold memory until Ray session ends | Memory released after each task completes |
+| **GPU Scheduling** | 1 actor per physical GPU, round-robin tasks | Multiple tasks can share GPU memory dynamically |
+| **Overhead** | Lower (no repeated model loading) | Higher (model loaded per task) |
+| **VRAM Flexibility** | Fixed actor pool, constrained by `MIN_FRACTIONAL_GPU` | More dynamic memory sharing |
+| **Best For** | Production workloads, consistent throughput | Experimentation, memory-constrained environments |
+
+#### **When to Use Ripper Mode**
+
+- **Testing/Experimentation**: When you want to compare performance between approaches
+- **Memory-Constrained Systems**: When you need more flexible GPU memory sharing
+- **Variable Workloads**: When task memory requirements vary significantly
+- **Legacy Compatibility**: Matches the original EQCCTPro behavior before ModelActor optimization
+
+#### **Memory Management in Ripper Mode**
+
+Ripper mode benefits from the same automatic OOM prevention mechanisms as ModelActor mode:
+
+1. **VRAM-Aware Concurrency Limiting**: In GPU mode, ripper automatically calculates the maximum safe number of concurrent tasks based on available VRAM. If the requested concurrency exceeds what VRAM can handle, it is automatically capped to prevent OOM.
+
+2. **Automatic Ray Restart**: When increasing concurrency between trials, if the estimated memory footprint would exceed capacity, Ray is automatically restarted to clear GPU/RAM memory. This is the same mechanism used by ModelActor mode.
+
+3. **Task-Level Cleanup**: Each task explicitly releases model memory after completion:
+   - TensorFlow: `del model` + `tf.keras.backend.clear_session()`
+   - PyTorch: `del model` + `torch.cuda.empty_cache()`
+
+**Note**: While Ripper mode releases memory after each task, Ray workers may be reused between tasks within a session. The automatic Ray restart ensures memory is fully cleared when needed between trials.
+
+---
+
 ### **Example: Evaluating GPU Performance**
 ```python
 from eqcctpro import EvaluateSystem
