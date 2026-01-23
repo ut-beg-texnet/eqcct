@@ -71,6 +71,7 @@ CANONICAL_CSV_HEADER = [
     # ===== TRIAL OUTCOME =====
     "Trial Success",
     "Error Message",
+    "Comments",  # Notes on actor capping, memory constraints, etc.
     # ===== LEGACY/DEBUG (kept for compatibility) =====
     "Stations Used",
 ]

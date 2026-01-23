@@ -271,7 +271,7 @@ Example: 2 GPUs, 50 stations to process
 - Result: 2x parallelism without memory conflicts
 ```
 
-The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to hardware limits).
+The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to memory limits). When these differ, the `Comments` column explains the constraint (e.g., "Requested 10 actors, created 2 (VRAM limited to 8000 MB, 2756 MB/actor)").
 
 ### **Example: Evaluating GPU Performance**
 ```python
@@ -378,8 +378,8 @@ The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results
 - **`Number of Stations Used`**: Total number of stations processed.
 - **`Number of CPUs Allocated for Ray to Use`**: The CPU affinity limit set for the Ray cluster. If `N ModelActors` exceeds this count, actors will automatically share cores via fractional CPU allocation.
 - **`GPUs Used`**: List of physical GPU IDs utilized (e.g., `[0, 1]`).
-- **`N ModelActors`**: The total number of Ray ModelActors spawned for parallel inference.
-- **`Number of Concurrent Station Tasks`**: Concurrency level for station predictions.
+- **`N ModelActors`**: The **actual** number of Ray ModelActors created for parallel inference. This may be less than the requested amount if VRAM/RAM constraints limit how many models can be loaded simultaneously.
+- **`Number of Concurrent Station Tasks`**: The **requested** concurrency level for station predictions. This is what the user asked for, but the actual number of actors created (`N ModelActors`) may be lower due to memory constraints.
 - **`Concurrent Timechunks Used`**: Number of timechunks processed in parallel.
 - **`Total Number of Timechunks`**: Number of temporal segments the data was split into.
 - **`Length of Timechunk (min)`**: Duration of a single timechunk.
@@ -428,6 +428,7 @@ The overhead typically consists of:
 ### **Trial Outcome**
 - **`Trial Success`**: `1` for success, `0` for failure.
 - **`Error Message`**: Detailed exception info if the trial failed (e.g., OOM prevention details). It also contains informational notes like **`[RAY RESTART]`** if Ray was restarted before the trial to clear memory and prevent OOM.
+- **`Comments`**: Notes on actor capping due to memory constraints. When `N ModelActors` is less than `Number of Concurrent Station Tasks`, this column explains why (e.g., "Requested 100 actors, created 1 (VRAM limited to 2756 MB, 2756 MB/actor)"). Empty when the requested concurrency was achievable.
 - **`Stations Used`**: (Legacy) List of specific station codes processed.
 
 **Note on Optimal Configuration Files:**

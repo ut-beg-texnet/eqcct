@@ -940,6 +940,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
     model_type_lower = model_type.lower() if model_type else 'eqcct'
     model_vram_mb = None  # Defensive init; will be set in GPU branches, remains None for CPU
     
+    # Track requested vs actual actors for CSV Comments column
+    requested_concurrent_tasks = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+    actor_cap_comment = ""  # Will be populated if actors are capped due to memory constraints
+    
     if model_type_lower == 'seisbench':
         # Create SeisBench model actors
         if use_gpu:
@@ -1009,6 +1013,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 logger.info(f"SeisBenchModelActor {i+1} created successfully.")
                 model_actors.append(actor)
             logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
+            
+            # Generate comment if actors were capped
+            if len(model_actors) < requested_actors:
+                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM limited to {available_vram_mb:.0f} MB, {model_vram_mb:.0f} MB/actor)"
         else:
             # ===== MEMORY-AWARE CPU ACTOR CREATION =====
             # KEY INSIGHT: The constraint is RAM, not CPU count.
@@ -1063,6 +1071,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 logger.info(f"SeisBenchModelActor {i+1} created successfully.")
                 model_actors.append(actor)
             logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.")
+            
+            # Generate comment if actors were capped
+            if len(model_actors) < requested_actors:
+                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
     else:
         # Create EQCCT model actors
         if use_gpu:
@@ -1130,6 +1142,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 
             logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
             logger.info(f"[ModelActor] Models successfully loaded onto GPU(s).")
+            
+            # Generate comment if actors were capped
+            if len(model_actors) < requested_actors:
+                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM limited to {available_vram_mb:.0f} MB, {model_vram_mb:.0f} MB/actor)"
         else:
             # ===== MEMORY-AWARE CPU ACTOR CREATION (EQCCT/TensorFlow) =====
             # KEY INSIGHT: The constraint is RAM, not CPU count.
@@ -1178,7 +1194,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     raise
                 logger.info(f"ModelActor {i+1} created successfully.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.") 
+            logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.")
+            
+            # Generate comment if actors were capped
+            if len(model_actors) < requested_actors:
+                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
 
     # Submit tasks to ray in a queue
     tasks_queue = []
@@ -1293,12 +1313,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Total Number of Timechunks": int(total_timechunks) if total_timechunks is not None else "",
             "Concurrent Timechunks Used": int(number_of_concurrent_timechunk_predictions) if number_of_concurrent_timechunk_predictions is not None else "",
             "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
-            "N ModelActors": actual_actors,  # Actual actors created (capped to hardware)
+            "N ModelActors": actual_actors,  # Actual actors created (capped to hardware/memory)
             "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
             "Total Run time for Picker (s)": round(end_time - start_time, 6),
             "Model Used": model_used,
             "Trial Success": "",
             "Error Message": str(""),
+            "Comments": actor_cap_comment,  # Note when actors were capped due to memory constraints
         }
             
         append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)

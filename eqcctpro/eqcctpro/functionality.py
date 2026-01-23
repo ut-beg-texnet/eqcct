@@ -817,11 +817,13 @@ class EvaluateSystem():
                                 self.logger.warning(f"Recording OOM-risk trial skip for {num_stations} stations, {inv_p} tasks: {error_msg}")
                                 
                                 # Build minimal trial data for CSV recording
+                                oom_comment = f"Requested {inv_p} actors, 0 created (RAM limited to {aggregate_ram_cap_mb:.0f} MB, {ram_per_actor:.0f} MB/actor) - Trial skipped"
                                 trial_data = {
                                     "Trial Number": trial_num,
                                     "Number of Stations Used": num_stations,
                                     "Number of CPUs Allocated for Ray to Use": len(cpus_to_use),
                                     "GPUs Used": "[]",
+                                    "N ModelActors": 0,  # No actors created - OOM prevention
                                     "Inference Actor Memory Limit (MB)": "",
                                     "Number of Concurrent Station Tasks": inv_p,
                                     # Include timechunk metadata for consistency
@@ -832,6 +834,7 @@ class EvaluateSystem():
                                     "Model Used": trial_model,
                                     "Trial Success": 0,
                                     "Error Message": error_msg,
+                                    "Comments": oom_comment,
                                 }
                                 from eqcctpro.parallelization import append_trial_row
                                 append_trial_row(csv_filepath, trial_data)
@@ -841,7 +844,7 @@ class EvaluateSystem():
                                     mem_after=get_memory_snapshot(process),
                                     process=process,
                                     model_requested_ram_mb=est_ram,
-                                    n_model_actors=inv_p,
+                                    n_model_actors=0,  # No actors created - OOM prevention
                                     model_ram_per_actor_mb=model_ram_per_actor_mb,
                                     is_gpu_trial=False  # CPU trial: ModelActors use RAM
                                 )
