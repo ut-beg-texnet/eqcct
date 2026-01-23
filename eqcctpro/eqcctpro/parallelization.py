@@ -791,6 +791,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
               ray_cpus=None,
               use_gpu=False,
               gpu_memory_limit_mb=None,
+              total_vram_pool_mb=None,  # NEW: Total VRAM budget for all actors (aggregate cap)
               testing_gpu=None,
               test_csv_filepath=None,
               specific_stations=None,
@@ -954,7 +955,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 default_mb=2000.0
             )
             # Use max of requested VRAM or model requirement (similar to EQCCT logic)
-            model_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
+            # gpu_memory_limit_mb is per-actor VRAM limit, model_vram_mb is the minimum requirement
+            per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
             
             # ===== MEMORY-AWARE GPU ACTOR CREATION =====
             # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
@@ -963,43 +965,72 @@ def mseed_predictor(input_dir='downloads_mseeds',
             n_gpus = len(gpu_id)
             requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            # Get available VRAM (user-defined cap via gpu_memory_limit_mb, or actual free VRAM)
+            # Get available VRAM (total pool)
+            # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
+            # Otherwise fall back to actual free VRAM query
             available_vram_mb = get_available_vram_mb(
                 gpu_ids=gpu_id, 
-                max_vram_mb=gpu_memory_limit_mb,
+                max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
                 logger=logger
             )
             
             # Calculate max actors based on VRAM (memory constraint, not hardware count)
-            max_actors_by_vram = int(available_vram_mb / model_vram_mb) if model_vram_mb > 0 else requested_actors
+            max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
             n_actors = min(requested_actors, max(1, max_actors_by_vram))
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available GPUs: {n_gpus}")
-            logger.info(f"Available VRAM: {available_vram_mb:.0f} MB")
-            logger.info(f"VRAM per model: {model_vram_mb:.0f} MB")
+            logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
+            logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
             logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
             logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by VRAM, not hardware count.")
+                logger.info(f"      Concurrency limited by VRAM ({available_vram_mb:.0f} MB pool / {per_actor_vram_mb:.0f} MB per actor = {max_actors_by_vram} max).")
             
             # Calculate fractional GPU allocation so Ray knows these are GPU actors
             # With n_actors sharing n_gpus, each actor gets a fraction of GPU resources
             # This tells Ray to schedule with GPU access while allowing memory-based sharing
-            fractional_gpu = float(n_gpus) / float(n_actors) if n_actors > 0 else 1.0
+            # 
+            # IMPORTANT: Ray documentation recommends leaving headroom for system overhead.
+            # Quote: "Leave headroom: Use slightly less than the theoretical fraction 
+            # (for example, 0.49 instead of 0.5) to account for system overhead."
+            # 
+            # We apply two safety measures:
+            # 1. GPU_HEADROOM_FACTOR (0.95): Reserve 5% of GPU capacity for Ray/CUDA overhead
+            # 2. MIN_FRACTIONAL_GPU (0.1): Don't go below 10% per actor to avoid scheduling issues
+            # 
+            # If requested actors would result in < MIN_FRACTIONAL_GPU per actor, we cap the
+            # number of actors to what can safely fit with headroom.
+            GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
+            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor (empirically: 0.2 works, 0.166 freezes)
+            
+            # Calculate max actors that fit with minimum fractional GPU constraint
+            # Example: With 1 GPU, max_actors = int(0.95 / 0.19) = 5 actors max
+            max_actors_per_gpu_constraint = int((GPU_HEADROOM_FACTOR * n_gpus) / MIN_FRACTIONAL_GPU)
+            
+            # Apply the constraint - cap n_actors if needed
+            if n_actors > max_actors_per_gpu_constraint:
+                logger.warning(f"Capping actors from {n_actors} to {max_actors_per_gpu_constraint} per GPU "
+                             f"(min fractional GPU {MIN_FRACTIONAL_GPU} with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+                n_actors = max_actors_per_gpu_constraint
+            
+            # Calculate fractional GPU with headroom
+            fractional_gpu = (GPU_HEADROOM_FACTOR * n_gpus) / n_actors if n_actors > 0 else 1.0
             fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0 (one actor can't claim more than 1 GPU unit)
+            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places for cleaner values
+            
             logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
-            logger.info(f"  → This ensures Ray schedules actors with GPU access")
-            logger.info(f"  → TF/PyTorch memory growth allows dynamic VRAM sharing")
+            logger.info(f"  → Total GPU allocation: {n_actors} × {fractional_gpu:.3f} = {n_actors * fractional_gpu:.3f} / {n_gpus} GPUs")
+            logger.info(f"  → Headroom: {(1 - (n_actors * fractional_gpu / n_gpus)) * 100:.1f}% reserved for Ray/CUDA overhead")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} ({model_vram_mb/1024:.2f}GB VRAM each)...")
+                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
                 # Use fractional GPU so Ray knows this actor needs GPU resources
                 # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
-                actor = SeisBenchModelActor.options(num_gpus=fractional_gpu).remote(
+                actor = SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
                     gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
@@ -1016,7 +1047,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Generate comment if actors were capped
             if len(model_actors) < requested_actors:
-                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM limited to {available_vram_mb:.0f} MB, {model_vram_mb:.0f} MB/actor)"
+                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
         else:
             # ===== MEMORY-AWARE CPU ACTOR CREATION =====
             # KEY INSIGHT: The constraint is RAM, not CPU count.
@@ -1083,53 +1114,83 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # The constraint is: total requested VRAM must not exceed available VRAM.
             # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
             model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
-            model_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
+            # gpu_memory_limit_mb is per-actor VRAM limit for TF config, model_vram_mb is the minimum requirement
+            per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
             
             n_gpus = len(gpu_id)
             requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
             
-            # Get available VRAM (user-defined cap via gpu_memory_limit_mb, or actual free VRAM)
+            # Get available VRAM (total pool)
+            # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
+            # Otherwise fall back to actual free VRAM query
             available_vram_mb = get_available_vram_mb(
                 gpu_ids=gpu_id, 
-                max_vram_mb=gpu_memory_limit_mb,
+                max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
                 logger=logger
             )
             
             # Calculate max actors based on VRAM (memory constraint, not hardware count)
-            max_actors_by_vram = int(available_vram_mb / model_vram_mb) if model_vram_mb > 0 else requested_actors
+            max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
             n_actors = min(requested_actors, max(1, max_actors_by_vram))
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available GPUs: {n_gpus}")
-            logger.info(f"Available VRAM: {available_vram_mb:.0f} MB")
-            logger.info(f"VRAM per model: {model_vram_mb:.0f} MB")
+            logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
+            logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
             logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
             logger.info(f"Creating {n_actors} ModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by VRAM, not hardware count.")
+                logger.info(f"      Concurrency limited by VRAM ({available_vram_mb:.0f} MB pool / {per_actor_vram_mb:.0f} MB per actor = {max_actors_by_vram} max).")
             
             # Calculate fractional GPU allocation so Ray knows these are GPU actors
             # With n_actors sharing n_gpus, each actor gets a fraction of GPU resources
             # This tells Ray to schedule with GPU access while allowing memory-based sharing
-            fractional_gpu = float(n_gpus) / float(n_actors) if n_actors > 0 else 1.0
+            # 
+            # IMPORTANT: Ray documentation recommends leaving headroom for system overhead.
+            # Quote: "Leave headroom: Use slightly less than the theoretical fraction 
+            # (for example, 0.49 instead of 0.5) to account for system overhead."
+            # 
+            # We apply two safety measures:
+            # 1. GPU_HEADROOM_FACTOR (0.95): Reserve 5% of GPU capacity for Ray/CUDA overhead
+            # 2. MIN_FRACTIONAL_GPU (0.1): Don't go below 10% per actor to avoid scheduling issues
+            # 
+            # If requested actors would result in < MIN_FRACTIONAL_GPU per actor, we cap the
+            # number of actors to what can safely fit with headroom.
+            GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
+            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor (empirically: 0.2 works, 0.166 freezes)
+            
+            # Calculate max actors that fit with minimum fractional GPU constraint
+            # Example: With 1 GPU, max_actors = int(0.95 / 0.19) = 5 actors max
+            max_actors_per_gpu_constraint = int((GPU_HEADROOM_FACTOR * n_gpus) / MIN_FRACTIONAL_GPU)
+            
+            # Apply the constraint - cap n_actors if needed
+            if n_actors > max_actors_per_gpu_constraint:
+                logger.warning(f"Capping actors from {n_actors} to {max_actors_per_gpu_constraint} per GPU "
+                             f"(min fractional GPU {MIN_FRACTIONAL_GPU} with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+                n_actors = max_actors_per_gpu_constraint
+            
+            # Calculate fractional GPU with headroom
+            fractional_gpu = (GPU_HEADROOM_FACTOR * n_gpus) / n_actors if n_actors > 0 else 1.0
             fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0 (one actor can't claim more than 1 GPU unit)
+            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places for cleaner values
+            
             logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
-            logger.info(f"  → This ensures Ray schedules actors with GPU access")
-            logger.info(f"  → TF memory growth allows dynamic VRAM sharing")
+            logger.info(f"  → Total GPU allocation: {n_actors} × {fractional_gpu:.3f} = {n_actors * fractional_gpu:.3f} / {n_gpus} GPUs")
+            logger.info(f"  → Headroom: {(1 - (n_actors * fractional_gpu / n_gpus)) * 100:.1f}% reserved for Ray/CUDA overhead")
             
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} ({model_vram_mb/1024:.2f}GB VRAM each)...")
+                logger.info(f"Creating ModelActor {i+1}/{n_actors} ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
                 # Use fractional GPU so Ray knows this actor needs GPU resources
                 # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
                 # TF memory growth is enabled in tf_environ, allowing multiple actors per GPU
-                actor = ModelActor.options(num_gpus=fractional_gpu).remote(
+                actor = ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
                     gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
                     p_model_path=p_model, 
                     s_model_path=s_model, 
-                    gpu_memory_limit_mb=model_vram_mb,  # Per-actor VRAM limit via TF config
+                    gpu_memory_limit_mb=per_actor_vram_mb,  # Per-actor VRAM limit via TF config
                     use_gpu=True
                 )
                 try:
@@ -1145,7 +1206,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Generate comment if actors were capped
             if len(model_actors) < requested_actors:
-                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM limited to {available_vram_mb:.0f} MB, {model_vram_mb:.0f} MB/actor)"
+                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
         else:
             # ===== MEMORY-AWARE CPU ACTOR CREATION (EQCCT/TensorFlow) =====
             # KEY INSIGHT: The constraint is RAM, not CPU count.

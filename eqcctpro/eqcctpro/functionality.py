@@ -1326,22 +1326,25 @@ class EvaluateSystem():
                             self.logger.warning(f"Recording OOM-risk trial skip for {stations} stations, {inv_p} tasks: {error_msg}")
                             
                             # Build minimal trial data for CSV recording
+                            oom_comment = f"Requested {inv_p} actors, 0 created (VRAM limited to {aggregate_vram_cap_mb:.0f} MB, {model_vram_per_actor_mb:.0f} MB/actor) - Trial skipped"
                             trial_data = {
                                 "Trial Number": trial_num,
                                 "Number of Stations Used": stations,
                                 "Number of CPUs Allocated for Ray to Use": len(cpus_to_use),
                                 "GPUs Used": json.dumps(list(gpus_to_use)),
+                                "N ModelActors": 0,  # No actors created - OOM prevention
                                 "Inference Actor Memory Limit (MB)": int(round(model_vram_per_actor_mb)),
                                 "Number of Concurrent Station Tasks": inv_p,
                                 # Include timechunk metadata for consistency
                                 "Concurrent Timechunks Used": getattr(self, 'number_of_concurrent_timechunk_predictions', 1),
                                 "Total Number of Timechunks": 1, 
                                 "Length of Timechunk (min)": getattr(self, 'timechunk_dt', 1.0),
-                                    "Total Waveform Analysis Timespace (min)": float(getattr(self, 'timechunk_dt', 1.0)),
-                                    "Model Used": trial_model,
-                                    "Trial Success": 0,
-                                    "Error Message": error_msg,
-                                }
+                                "Total Waveform Analysis Timespace (min)": float(getattr(self, 'timechunk_dt', 1.0)),
+                                "Model Used": trial_model,
+                                "Trial Success": 0,
+                                "Error Message": error_msg,
+                                "Comments": oom_comment,
+                            }
                             from eqcctpro.parallelization import append_trial_row
                             append_trial_row(csv_filepath, trial_data)
                             
@@ -1352,7 +1355,7 @@ class EvaluateSystem():
                                 gpu_ids=list(gpus_to_use),
                                 model_requested_vram_mb=est_vram,
                                 model_requested_ram_mb=est_ram,
-                                n_model_actors=inv_p,
+                                n_model_actors=0,  # No actors created - OOM prevention
                                 model_vram_per_actor_mb=model_vram_per_actor_mb,
                                 model_ram_per_actor_mb=model_ram_per_actor_mb,
                                 is_gpu_trial=True  # GPU trial: ModelActors use VRAM
@@ -1480,7 +1483,8 @@ class EvaluateSystem():
                                 ray_cpus=cpus_to_use, 
                                 use_gpu=self.use_gpu, 
                                 gpu_id=gpus_to_use, 
-                                gpu_memory_limit_mb=gpu_memory_limit_mb, 
+                                gpu_memory_limit_mb=gpu_memory_limit_mb,  # Per-actor VRAM limit
+                                total_vram_pool_mb=aggregate_vram_cap_mb,  # Total VRAM budget for all actors
                                 stations2use=stations, 
                                 timechunk_id=mseed_timechunk_dir_name, 
                                 waveform_overlap=self.waveform_overlap, 

@@ -404,8 +404,9 @@ def build_memory_trial_data(
     """
     trial_memory_data = {}
     
-    # ===== N ModelActors =====
-    trial_memory_data["N ModelActors"] = n_model_actors if n_model_actors is not None else ""
+    # NOTE: N ModelActors is NOT set here - it's already correctly set by append_trial_row
+    # in parallelization.py with the ACTUAL actor count (which may be less than requested
+    # due to VRAM/RAM constraints). Setting it here would overwrite the correct value.
     
     # ===== MODEL-REQUESTED MEMORY (Theoretical) =====
     # For GPU trials: ModelActors load onto VRAM, but Ray workers still use RAM
