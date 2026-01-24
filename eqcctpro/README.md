@@ -371,15 +371,17 @@ Both headroom factors can be adjusted in `parallelization.py` (search for these 
 
 ##### **Other OOM Prevention Mechanisms**
 
-1. **Automatic Ray Restart**: When increasing concurrency between trials, if the estimated memory footprint would exceed capacity, Ray is automatically restarted to clear GPU/RAM memory.
+1. **Per-Trial Ray Restart (Ripper Mode Only)**: In ripper mode, Ray is **restarted at the start of every trial** to ensure a completely fresh GPU/RAM state. This eliminates memory fragmentation issues that can accumulate when Ray workers are reused between trials. This is the primary mechanism that prevents OOM in ripper mode.
 
-2. **Task-Level Cleanup**: Each task explicitly releases model memory after completion:
+2. **Automatic Ray Restart (Fallback)**: When increasing concurrency between trials, if the estimated memory footprint would exceed capacity, Ray is automatically restarted to clear GPU/RAM memory. This applies to both standard ModelActor mode and ripper mode as an additional safety mechanism.
+
+3. **Task-Level Cleanup**: Each task explicitly releases model memory after completion:
    - TensorFlow: `del model` + `tf.keras.backend.clear_session()`
    - PyTorch: `del model` + `torch.cuda.empty_cache()`
 
-3. **CSV Tracking**: The `Actual Ripper Concurrent Tasks` column shows the real concurrency used after memory limiting. Compare with `Number of Concurrent Station Tasks` (requested) to see if memory constraints reduced concurrency.
+4. **CSV Tracking**: The `Actual Ripper Concurrent Tasks` column shows the real concurrency used after memory limiting. Compare with `Number of Concurrent Station Tasks` (requested) to see if memory constraints reduced concurrency.
 
-**Note**: While Ripper mode releases memory after each task, Ray workers may be reused between tasks within a session. Memory fragmentation can cause some tasks to fail even when theoretical memory is available. The automatic Ray restart helps clear fragmented memory between trials.
+**Note**: The per-trial Ray restart in ripper mode adds ~1-2 seconds overhead per trial but ensures reliable execution by preventing memory fragmentation. This is the recommended approach for maximum stability when running many consecutive trials.
 
 ---
 
@@ -488,7 +490,7 @@ The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results
 - **`Number of Stations Used`**: Total number of stations processed.
 - **`Number of CPUs Allocated for Ray to Use`**: The CPU affinity limit set for the Ray cluster. If `N ModelActors` exceeds this count, actors will automatically share cores via fractional CPU allocation.
 - **`GPUs Used`**: List of physical GPU IDs utilized (e.g., `[0, 1]`).
-- **`N ModelActors`**: The **actual** number of Ray ModelActors created for parallel inference. This may be less than the requested amount if VRAM/RAM constraints limit how many models can be loaded simultaneously.
+- **`N ModelActors`**: The **actual** number of Ray ModelActors created for parallel inference. This may be less than the requested amount if VRAM/RAM constraints limit how many models can be loaded simultaneously. Will be set to 0 if not using ModelActor mode (IE. Ripper Mode).
 - **`Number of Concurrent Station Tasks`**: The **requested** concurrency level for station predictions. This is what the user asked for, but the actual number of actors created (`N ModelActors`) may be lower due to memory constraints.
 - **`Actual Ripper Concurrent Tasks`**: **(Ripper mode only)** The **actual** number of concurrent tasks used after memory-aware limiting. In GPU ripper mode, this may be lower than requested if actual free VRAM is insufficient. In CPU ripper mode, this may be lower if actual available RAM is insufficient. This column is empty for standard ModelActor mode (use `N ModelActors` instead).
 - **`Concurrent Timechunks Used`**: Number of timechunks processed in parallel.

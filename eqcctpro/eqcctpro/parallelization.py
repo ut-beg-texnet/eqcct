@@ -1039,9 +1039,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
             else:
                 ram_per_task_mb = get_eqcct_ram_mb(use_gpu=False)
             
-            # Query actual free RAM using psutil
+            # Query actual free RAM using psutil (already imported at module level)
             try:
-                import psutil
                 mem_info = psutil.virtual_memory()
                 system_ram_total_mb = mem_info.total / (1024 * 1024)
                 actual_free_ram_mb = mem_info.available / (1024 * 1024)

@@ -882,6 +882,34 @@ class EvaluateSystem():
                             continue  # All concurrency values already tested
                         for num_concurrent_predictions in new_concurrent_values:
                             tested_concurrency.add(num_concurrent_predictions)
+                            
+                            # ===== RIPPER MODE: Fresh Ray instance per trial =====
+                            # Ripper mode benefits from a clean RAM state at each trial start
+                            # This ensures no memory fragmentation from previous trials affects the current one
+                            if self.ripper:
+                                self.logger.info(f"")
+                                self.logger.info(f"===== RIPPER MODE: Restarting Ray for fresh RAM state =====")
+                                
+                                # Stop the log drain thread gracefully
+                                self.log_queue.put(None)  # Sentinel to stop the drain thread
+                                time.sleep(0.5)  # Give thread time to finish
+                                
+                                # Shutdown and reinitialize Ray
+                                ray.shutdown()
+                                time.sleep(1.0)  # Allow RAM to be fully released
+                                
+                                # Reinitialize Ray with the same configuration (CPU mode)
+                                ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), 
+                                        logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
+                                self.log_queue = Queue()
+                                self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
+                                self._log_thread.start()
+                                
+                                # Reset the high water mark since we cleared RAM
+                                actors_high_water_mark = 0
+                                self.logger.info(f"Ray restarted. RAM cleared for ripper trial.")
+                                self.logger.info(f"=============================================")
+                            
                             key = self._trial_key(
                                 num_cpus=len(cpus_to_use),
                                 stations=num_stations,
@@ -1391,6 +1419,33 @@ class EvaluateSystem():
                     self.logger.info(f"Testing N ModelActors (concurrent predictions): {valid_predictions}")
                     
                     for predictions in valid_predictions:
+                        # ===== RIPPER MODE: Fresh Ray instance per trial =====
+                        # Ripper mode benefits from a clean GPU state at each trial start
+                        # This ensures no memory fragmentation from previous trials affects the current one
+                        if self.ripper:
+                            self.logger.info(f"")
+                            self.logger.info(f"===== RIPPER MODE: Restarting Ray for fresh GPU state =====")
+                            
+                            # Stop the log drain thread gracefully
+                            self.log_queue.put(None)  # Sentinel to stop the drain thread
+                            time.sleep(0.5)  # Give thread time to finish
+                            
+                            # Shutdown and reinitialize Ray
+                            ray.shutdown()
+                            time.sleep(1.0)  # Allow GPU memory to be fully released
+                            
+                            # Reinitialize Ray with the same configuration
+                            ray.init(ignore_reinit_error=True, num_gpus=len(gpus_to_use), num_cpus=len(cpus_to_use), 
+                                    logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
+                            self.log_queue = Queue()
+                            self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
+                            self._log_thread.start()
+                            
+                            # Reset the high water mark since we cleared GPU memory
+                            actors_high_water_mark = 0
+                            self.logger.info(f"Ray restarted. GPU memory cleared for ripper trial.")
+                            self.logger.info(f"=================================================")
+                        
                         # ===== CALCULATE REQUESTED MEMORY FOR THIS TRIAL =====
                         # N ModelActors = predictions (each concurrent task gets its own ModelActor)
                         n_model_actors = predictions
