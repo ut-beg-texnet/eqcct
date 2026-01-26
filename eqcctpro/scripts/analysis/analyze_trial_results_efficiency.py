@@ -266,9 +266,10 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     log("\n--- Analysis Formulas ---")
     log(f"1. Throughput (Stations/s) = ['{station_col}'] / ['{runtime_col}']")
     log("2. Gain % (Diminishing Returns) = ((Current Throughput - Previous Throughput) / Previous Throughput) * 100")
-    log("3. Resource Cost Score = CPUs + (GPUs * 10)")
-    log("4. RAM Overhead = Process Tree RAM - Total Requested RAM")
-    log("5. RAM Utilization = (Process Tree RAM / Total Requested RAM) * 100")
+    log(f"3. Effective Concurrency = {'N ModelActors (Actual Actors spawned)' if execution_mode == 'modelactor' else 'Number of Concurrent Station Tasks (Requested Concurrency)'}")
+    log("4. Resource Cost Score = CPUs + (GPUs * 10)")
+    log("5. RAM Overhead = Process Tree RAM - Total Requested RAM")
+    log("6. RAM Utilization = (Process Tree RAM / Total Requested RAM) * 100")
 
     # =========================================================================
     # MEMORY ANALYSIS: REQUESTED vs ACTUAL
@@ -341,20 +342,17 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     log(f"\nCorrelation with Runtime (negative = faster with more):")
     log(f"  1. Number of Stations:           {station_impact:+.3f} (expected: positive)")
     log(f"  2. Number of CPUs:               {cpu_impact:+.3f}")
-    log(f"  3. Concurrent Tasks:             {task_impact:+.3f}")
-    log(f"  4. Effective Concurrency:        {concurrency_impact:+.3f}")
+    log(f"  3. Effective Concurrency:        {concurrency_impact:+.3f}")
     
-    if execution_mode == 'modelactor':
-        actor_impact = calculate_impact(actor_col)
-        log(f"  5. N ModelActors:                {actor_impact:+.3f}")
-    elif execution_mode == 'ripper':
+    # Optional mode-specific impacts
+    if execution_mode == 'ripper':
         if ripper_task_col in df_success.columns:
             ripper_impact = calculate_impact(ripper_task_col)
-            log(f"  5. Actual Ripper Tasks:          {ripper_impact:+.3f}")
+            log(f"  4. Actual Ripper Tasks:          {ripper_impact:+.3f}")
     
     if is_gpu_trial:
         gpu_impact = calculate_impact('GPU Count')
-        log(f"  6. GPU Count:                    {gpu_impact:+.3f}")
+        log(f"  5. GPU Count:                    {gpu_impact:+.3f}")
     
     log("\n  Interpretation:")
     log("  - Negative correlation: More of this resource = faster runtime")
@@ -467,10 +465,19 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     log("CORRELATION MATRIX")
     log("-"*70)
     
-    corr_cols = [cpu_col, 'GPU Count', task_col, 'Effective Concurrency', station_col, runtime_col, 
+    # Select columns for correlation matrix
+    corr_cols = [cpu_col, 'Effective Concurrency', station_col, runtime_col, 
                  'Throughput (Stations/s)', actual_ram_col]
-    if is_gpu_trial and actual_vram_col in df_success.columns:
-        corr_cols.append(actual_vram_col)
+    
+    # In ripper mode, 'Effective Concurrency' is the same as task_col.
+    # In modelactor mode, we specifically want to exclude task_col (requested) 
+    # and only use Effective Concurrency (actual actors spawned).
+    
+    if is_gpu_trial:
+        if 'GPU Count' in df_success.columns:
+            corr_cols.append('GPU Count')
+        if actual_vram_col in df_success.columns:
+            corr_cols.append(actual_vram_col)
     
     corr_cols = [c for c in corr_cols if c in df_success.columns]
     corr_matrix = df_success[corr_cols].corr()
@@ -585,25 +592,6 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
         plt.savefig(plot_path, dpi=150)
         plt.close()
         log(f"Requested vs Actual RAM plot saved to {plot_path}")
-
-    # 4. Throughput vs Concurrency (boxplot)
-    plt.figure(figsize=(10, 6))
-    conc_values = sorted(df_success['Effective Concurrency'].dropna().unique())
-    data_for_boxplot = [df_success[df_success['Effective Concurrency'] == c]['Throughput (Stations/s)'].dropna() 
-                       for c in conc_values]
-    plt.boxplot(data_for_boxplot, labels=[int(c) for c in conc_values])
-    xlabel = 'N ModelActors' if execution_mode == 'modelactor' else 'Concurrent Tasks'
-    plt.xlabel(xlabel)
-    plt.ylabel('Throughput (Stations/s)')
-    plt.title(f'Throughput Distribution by Concurrency\n{model_name} ({trial_type}, {execution_mode.upper()})')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    
-    plot_name = f"throughput_by_concurrency_boxplot_{execution_mode}.png"
-    plot_path = os.path.join(output_dir, plot_name) if output_dir else plot_name
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-    log(f"Throughput by concurrency boxplot saved to {plot_path}")
 
     # =========================================================================
     # AGGREGATED STATISTICS

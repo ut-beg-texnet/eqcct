@@ -528,21 +528,6 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             fig.write_html(output_file)
             print(f"Saved: {output_file}")
 
-    # 5. Throughput by Concurrency (Box Plot)
-    fig = px.box(
-        df,
-        x='Effective Concurrency',
-        y='Throughput (Stations/s)',
-        title=f"[{model_name}] Throughput Distribution by Concurrency",
-        labels={
-            'Effective Concurrency': f'{"N ModelActors" if execution_mode == "modelactor" else "Concurrent Tasks"}',
-            'Throughput (Stations/s)': 'Throughput (Stations/s)'
-        }
-    )
-    output_file = os.path.join(output_dir, f"throughput_boxplot_{execution_mode}.html")
-    fig.write_html(output_file)
-    print(f"Saved: {output_file}")
-
     print(f"\nVisualization complete! All files saved to: {output_dir}/")
 
 

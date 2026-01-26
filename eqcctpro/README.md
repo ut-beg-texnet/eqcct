@@ -417,7 +417,39 @@ eval_gpu.evaluate()
 
 ---
 
-# **3. Finding Optimal Configurations**
+# **3. Efficiency and Performance Analysis**
+
+The `analyze_trial_results_efficiency.py` script provides deep insights into your benchmarking results, including throughput gains, memory utilization, and comparative performance between ModelActor and Ripper modes.
+
+### **Basic Usage (Single CSV)**
+```sh
+python scripts/analysis/analyze_trial_results_efficiency.py /path/to/results/cpu_test_results.csv --output_dir analysis/
+```
+*   **`--desired_runtime`**: (Optional) Adds a red dashed horizontal line to the runtime plot at the specified seconds (e.g., `--desired_runtime 30`).
+
+### **Batch Analysis**
+Analyze all result subdirectories within a results folder simultaneously to generate a global summary.
+```sh
+python scripts/analysis/analyze_trial_results_efficiency.py --batch --results_root results/csv/ --output_dir batch_analysis/
+```
+
+### **Mode Comparison**
+Compare the performance of **ModelActor** vs. **Ripper** mode side-by-side for a specific model and hardware type.
+```sh
+python scripts/analysis/analyze_trial_results_efficiency.py --compare --model eqcct --trial_type cpu --results_root results/csv/
+```
+
+### **Generated Artifacts**
+The script generates the following in your output directory:
+1.  **`efficiency_summary_*.txt`**: A comprehensive text report with throughput formulas, memory usage summaries, and performance lever correlations.
+2.  **`correlation_matrix_*.png`**: Visualizes how resources (CPUs, GPUs, Concurrency) correlate with runtime and memory.
+3.  **`runtime_vs_stations_by_concurrency_*.png`**: Scatter plot showing runtime scaling across workload sizes, colored by actor/task count.
+4.  **`requested_vs_actual_ram_*.png`**: Analyzes theoretical vs. actual memory footprints.
+5.  **`efficiency_analysis_results_*.csv`**: A processed version of your trial data with additional calculated metrics like Throughput/CPU.
+
+---
+
+# **4. Finding Optimal Configurations**
 
 Once the evaluation is complete, use the configuration finders to extract the best settings. Results are now automatically grouped by the model used during testing.
 
@@ -439,7 +471,7 @@ There are more examples on how to use EQCCTPro using different SeisBench and EQC
 
 ---
 
-# **4. Resource Requirement Calibration**
+# **5. Resource Requirement Calibration**
 
 EQCCTPro relies on accurate memory footprint estimates to perform memory-aware parallelization and prevent Out-Of-Memory (OOM) errors. These estimates are stored as lookup tables in `eqcctpro/parallelization.py`.
 
@@ -531,6 +563,9 @@ The overhead typically consists of:
 6. **Per-Task Overheads**: ~128 MB VRAM and ~256 MB RAM per concurrent task for waveform data handling and processing.
 
 ### **Efficiency & Performance**
+- **`Effective Concurrency`**: A unified metric representing the degree of parallelism used in the trial. 
+  - In **ModelActor mode**, this equals `N ModelActors` (the number of persistent models loaded).
+  - In **Ripper mode**, this equals `Number of Concurrent Station Tasks` (the number of simultaneous tasks requested).
 - **`VRAM Utilization (%)`**: How much VRAM is actually being used relative to what was requested (`Process Tree VRAM / Total Requested VRAM × 100`). Values **>100%** indicate overhead exceeds buffer allocations; values **<100%** indicate underutilization or efficient memory sharing.
 - **`RAM Utilization (%)`**: How much RAM is actually being used relative to what was requested (`Process Tree RAM / Total Requested RAM × 100`). Similar interpretation to VRAM utilization.
 - **`Total Run time for Picker (s)`**: The wall-clock time taken to complete the workload.
