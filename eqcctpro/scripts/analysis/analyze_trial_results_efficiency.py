@@ -214,12 +214,7 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
                 df_success[col] = df_success[col].fillna(0)
 
     # Create unified concurrency column for analysis
-    if execution_mode == 'ripper':
-        # For Ripper mode, use task count as the main concurrency metric
-        df_success['Effective Concurrency'] = df_success[task_col].fillna(1)
-    else:
-        # For ModelActor mode, use actor count
-        df_success['Effective Concurrency'] = df_success[actor_col].fillna(1)
+    df_success['Effective Concurrency'] = df_success[concurrency_col].fillna(1)
 
     # =========================================================================
     # DERIVED METRICS
@@ -266,10 +261,18 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     log("\n--- Analysis Formulas ---")
     log(f"1. Throughput (Stations/s) = ['{station_col}'] / ['{runtime_col}']")
     log("2. Gain % (Diminishing Returns) = ((Current Throughput - Previous Throughput) / Previous Throughput) * 100")
-    log(f"3. Effective Concurrency = {'N ModelActors (Actual Actors spawned)' if execution_mode == 'modelactor' else 'Number of Concurrent Station Tasks (Requested Concurrency)'}")
+    log(f"3. Effective Concurrency = ['{concurrency_col}']")
+    log(f"   (Actual actors spawned for ModelActor mode, or actual/requested tasks for Ripper mode)")
     log("4. Resource Cost Score = CPUs + (GPUs * 10)")
     log("5. RAM Overhead = Process Tree RAM - Total Requested RAM")
     log("6. RAM Utilization = (Process Tree RAM / Total Requested RAM) * 100")
+
+    log("\n--- Interpretation Guide ---")
+    log(f"A. Correlation Matrix (correlation_matrix_{execution_mode}.png):")
+    log(f"   - Values range from -1.0 to +1.0.")
+    log(f"   - Positive Correlation (+): As the resource increases, runtime INCREASES (e.g., more stations = more work).")
+    log(f"   - Negative Correlation (-): As the resource increases, runtime DECREASES (e.g., more CPUs = faster processing).")
+    log(f"   - Values near +/- 1.0 indicate strong relationships; near 0.0 indicate no relationship.")
 
     # =========================================================================
     # MEMORY ANALYSIS: REQUESTED vs ACTUAL
@@ -782,7 +785,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None):
     print(f"\nComparison plot saved to {plot_path}")
 
 
-def batch_analyze(results_root, output_dir=None):
+def batch_analyze(results_root, output_dir=None, desired_runtime=None):
     """
     Batch analyze all result directories in the results root.
     """
@@ -824,7 +827,7 @@ def batch_analyze(results_root, output_dir=None):
         analysis_output = os.path.join(output_dir, result_dir) if output_dir else result_dir + '_analysis'
         
         print(f"\nAnalyzing: {result_dir}")
-        df = analyze_efficiency(csv_path, analysis_output, verbose=False, desired_runtime=None)
+        df = analyze_efficiency(csv_path, analysis_output, verbose=False, desired_runtime=desired_runtime)
         
         if df is not None:
             # Collect summary info
@@ -910,8 +913,8 @@ Examples:
     # Single file mode
     parser.add_argument('csv_path', type=str, nargs='?', default=None,
                        help='Path to the results CSV file (for single file analysis)')
-    parser.add_argument('--output_dir', type=str, default=None, 
-                       help='Directory to save results (default: current directory)')
+    parser.add_argument('--output_dir', type=str, default='analysis_results', 
+                       help='Directory to save results (default: analysis_results/)')
     parser.add_argument('--desired_runtime', type=float, default=None,
                        help='Add a desired runtime horizontal line (s) to the plot')
     
@@ -933,7 +936,7 @@ Examples:
     
     if args.batch:
         # Batch analysis mode
-        batch_analyze(args.results_root, args.output_dir)
+        batch_analyze(args.results_root, args.output_dir, desired_runtime=args.desired_runtime)
     elif args.compare:
         # Comparison mode
         if not args.model or not args.trial_type:

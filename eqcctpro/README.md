@@ -563,9 +563,9 @@ The overhead typically consists of:
 6. **Per-Task Overheads**: ~128 MB VRAM and ~256 MB RAM per concurrent task for waveform data handling and processing.
 
 ### **Efficiency & Performance**
-- **`Effective Concurrency`**: A unified metric representing the degree of parallelism used in the trial. 
-  - In **ModelActor mode**, this equals `N ModelActors` (the number of persistent models loaded).
-  - In **Ripper mode**, this equals `Number of Concurrent Station Tasks` (the number of simultaneous tasks requested).
+      - **`Effective Concurrency`**: A unified metric representing the degree of parallelism used in the trial. 
+        - In **ModelActor mode**, this equals `N ModelActors` (the number of persistent models loaded).
+        - In **Ripper mode**, this equals either `Actual Ripper Concurrent Tasks` (if available) or `Number of Concurrent Station Tasks` (the number of simultaneous tasks requested).
 - **`VRAM Utilization (%)`**: How much VRAM is actually being used relative to what was requested (`Process Tree VRAM / Total Requested VRAM × 100`). Values **>100%** indicate overhead exceeds buffer allocations; values **<100%** indicate underutilization or efficient memory sharing.
 - **`RAM Utilization (%)`**: How much RAM is actually being used relative to what was requested (`Process Tree RAM / Total Requested RAM × 100`). Similar interpretation to VRAM utilization.
 - **`Total Run time for Picker (s)`**: The wall-clock time taken to complete the workload.
