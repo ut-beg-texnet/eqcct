@@ -1267,12 +1267,19 @@ def mseed_predictor(input_dir='downloads_mseeds',
             #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
             # 
             GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
-            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor
+            
+            # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
+            # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
+            # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
+            vram_per_single_gpu = available_vram_mb / n_gpus
+            # Calculate the fraction of GPU VRAM this model actually needs
+            # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
+            MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
             
             # Calculate how many actors might need to share a single GPU (worst case)
             actors_per_gpu = math.ceil(n_actors / n_gpus)
             
-            # Calculate max actors per GPU based on minimum fractional constraint
+            # Calculate max actors per GPU based on model-specific fractional constraint
             max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
             
             # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
@@ -1281,7 +1288,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 n_actors = max_actors_per_single_gpu * n_gpus
                 actors_per_gpu = max_actors_per_single_gpu
                 logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
-                             f"(min fractional GPU {MIN_FRACTIONAL_GPU} with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+                             f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
             
             # Calculate fractional GPU based on worst-case actors per GPU
             # This ensures all actors can be placed even if unevenly distributed
@@ -1290,6 +1297,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
             
             logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+            logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
             logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
             logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
             logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
@@ -1430,12 +1438,19 @@ def mseed_predictor(input_dir='downloads_mseeds',
             #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
             # 
             GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
-            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor
+            
+            # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
+            # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
+            # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
+            vram_per_single_gpu = available_vram_mb / n_gpus
+            # Calculate the fraction of GPU VRAM this model actually needs
+            # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
+            MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
             
             # Calculate how many actors might need to share a single GPU (worst case)
             actors_per_gpu = math.ceil(n_actors / n_gpus)
             
-            # Calculate max actors per GPU based on minimum fractional constraint
+            # Calculate max actors per GPU based on model-specific fractional constraint
             max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
             
             # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
@@ -1444,7 +1459,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 n_actors = max_actors_per_single_gpu * n_gpus
                 actors_per_gpu = max_actors_per_single_gpu
                 logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
-                             f"(min fractional GPU {MIN_FRACTIONAL_GPU} with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+                             f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
             
             # Calculate fractional GPU based on worst-case actors per GPU
             # This ensures all actors can be placed even if unevenly distributed
@@ -1453,6 +1468,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
             
             logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+            logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
             logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
             logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
             logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
@@ -2252,36 +2268,21 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     
     pos, station, out_dir, args = predict_args
     
-    # --- PyTorch multiprocessing safety settings ---
-    # Prevent potential deadlocks in Ray workers with PyTorch
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512")
-    
-    # RIPPER MODE: Load the SeisBench model DIRECTLY to avoid network calls
-    # The SeisBenchModels wrapper class calls list_pretrained() in __init__
-    # which can hang in Ray workers due to network timeouts
-    from eqcctpro.seisbench_models import mseed2stream_3c
-    import seisbench.models as sbm
+    # RIPPER MODE: Load the SeisBench model inside this task using SeisBenchModels class
+    from eqcctpro.seisbench_models import SeisBenchModels, mseed2stream_3c
     import torch
-    
-    # Set PyTorch threading to avoid deadlocks in multiprocessing
-    torch.set_num_threads(1)
     
     device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
     
-    # Direct load without validation (bypasses list_pretrained() network call)
-    try:
-        model_class = getattr(sbm, parent_model_name)
-        model = model_class.from_pretrained(child_model_name)
-    except Exception as e:
-        return f"{pos} {station}: FAILED to load model {parent_model_name}/{child_model_name}: {e}"
+    # Create and load the model
+    model_wrapper = SeisBenchModels(parent_model_name, child_model_name)
+    model_wrapper.load_model()
     
     # Move model to device if using GPU
     if gpu and torch.cuda.is_available():
         try:
-            if hasattr(model, 'to'):
-                model.to(device)
+            if hasattr(model_wrapper.model, 'to'):
+                model_wrapper.model.to(device)
         except Exception:
             pass
     
@@ -2322,13 +2323,13 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         
         stream, freqmin, freqmax = result
         
-        # Run SeisBench model prediction using model.classify() directly
+        # Run SeisBench model prediction using the model wrapper's classify method
         # IMPORTANT: strict=False and flexible_horizontal_components=True are needed
         # to handle streams that don't perfectly match expected channel names
-        classify_output = model.classify(stream, 
+        classify_output = model_wrapper.classify(stream, 
                               P_threshold=args.get('P_threshold', 0.3),
                               S_threshold=args.get('S_threshold', 0.3),
-                              detection_threshold=Detection_threshold,
+                              Detection_threshold=Detection_threshold,
                               strict=False,
                               flexible_horizontal_components=True)
         
@@ -2362,7 +2363,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         delta = (end_Predicting - start_Predicting)
         
         # Clean up model to free GPU memory
-        del model
+        del model_wrapper
         if gpu and torch.cuda.is_available():
             torch.cuda.empty_cache()
         
