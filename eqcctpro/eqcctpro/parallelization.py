@@ -1251,40 +1251,48 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 logger.info(f"      Concurrency limited by VRAM ({available_vram_mb:.0f} MB pool / {per_actor_vram_mb:.0f} MB per actor = {max_actors_by_vram} max).")
             
             # Calculate fractional GPU allocation so Ray knows these are GPU actors
-            # With n_actors sharing n_gpus, each actor gets a fraction of GPU resources
-            # This tells Ray to schedule with GPU access while allowing memory-based sharing
             # 
-            # IMPORTANT: Ray documentation recommends leaving headroom for system overhead.
-            # Quote: "Leave headroom: Use slightly less than the theoretical fraction 
-            # (for example, 0.49 instead of 0.5) to account for system overhead."
+            # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
+            # When n_actors > n_gpus, multiple actors must share one GPU.
             # 
-            # We apply two safety measures:
-            # 1. GPU_HEADROOM_FACTOR (0.95): Reserve 5% of GPU capacity for Ray/CUDA overhead
-            # 2. MIN_FRACTIONAL_GPU (0.1): Don't go below 10% per actor to avoid scheduling issues
+            # Example of the BUG we're fixing:
+            #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
+            #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
+            #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
             # 
-            # If requested actors would result in < MIN_FRACTIONAL_GPU per actor, we cap the
-            # number of actors to what can safely fit with headroom.
+            # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
+            # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
+            #   - actors_per_gpu = ceil(3/2) = 2
+            #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
+            #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
+            # 
             GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
-            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor (empirically: 0.2 works, 0.166 freezes)
+            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor
             
-            # Calculate max actors that fit with minimum fractional GPU constraint
-            # Example: With 1 GPU, max_actors = int(0.95 / 0.19) = 5 actors max
-            max_actors_per_gpu_constraint = int((GPU_HEADROOM_FACTOR * n_gpus) / MIN_FRACTIONAL_GPU)
+            # Calculate how many actors might need to share a single GPU (worst case)
+            actors_per_gpu = math.ceil(n_actors / n_gpus)
             
-            # Apply the constraint - cap n_actors if needed
-            if n_actors > max_actors_per_gpu_constraint:
-                logger.warning(f"Capping actors from {n_actors} to {max_actors_per_gpu_constraint} per GPU "
+            # Calculate max actors per GPU based on minimum fractional constraint
+            max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
+            
+            # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
+            if actors_per_gpu > max_actors_per_single_gpu:
+                # Reduce n_actors so that actors_per_gpu fits
+                n_actors = max_actors_per_single_gpu * n_gpus
+                actors_per_gpu = max_actors_per_single_gpu
+                logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
                              f"(min fractional GPU {MIN_FRACTIONAL_GPU} with {GPU_HEADROOM_FACTOR:.0%} headroom)")
-                n_actors = max_actors_per_gpu_constraint
             
-            # Calculate fractional GPU with headroom
-            fractional_gpu = (GPU_HEADROOM_FACTOR * n_gpus) / n_actors if n_actors > 0 else 1.0
-            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0 (one actor can't claim more than 1 GPU unit)
-            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places for cleaner values
+            # Calculate fractional GPU based on worst-case actors per GPU
+            # This ensures all actors can be placed even if unevenly distributed
+            fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
+            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
+            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
             
             logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
-            logger.info(f"  → Total GPU allocation: {n_actors} × {fractional_gpu:.3f} = {n_actors * fractional_gpu:.3f} / {n_gpus} GPUs")
-            logger.info(f"  → Headroom: {(1 - (n_actors * fractional_gpu / n_gpus)) * 100:.1f}% reserved for Ray/CUDA overhead")
+            logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
+            logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
+            logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
             
             model_actors = []
             for i in range(n_actors):
@@ -1406,40 +1414,48 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 logger.info(f"      Concurrency limited by VRAM ({available_vram_mb:.0f} MB pool / {per_actor_vram_mb:.0f} MB per actor = {max_actors_by_vram} max).")
             
             # Calculate fractional GPU allocation so Ray knows these are GPU actors
-            # With n_actors sharing n_gpus, each actor gets a fraction of GPU resources
-            # This tells Ray to schedule with GPU access while allowing memory-based sharing
             # 
-            # IMPORTANT: Ray documentation recommends leaving headroom for system overhead.
-            # Quote: "Leave headroom: Use slightly less than the theoretical fraction 
-            # (for example, 0.49 instead of 0.5) to account for system overhead."
+            # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
+            # When n_actors > n_gpus, multiple actors must share one GPU.
             # 
-            # We apply two safety measures:
-            # 1. GPU_HEADROOM_FACTOR (0.95): Reserve 5% of GPU capacity for Ray/CUDA overhead
-            # 2. MIN_FRACTIONAL_GPU (0.1): Don't go below 10% per actor to avoid scheduling issues
+            # Example of the BUG we're fixing:
+            #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
+            #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
+            #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
             # 
-            # If requested actors would result in < MIN_FRACTIONAL_GPU per actor, we cap the
-            # number of actors to what can safely fit with headroom.
+            # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
+            # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
+            #   - actors_per_gpu = ceil(3/2) = 2
+            #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
+            #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
+            # 
             GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
-            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor (empirically: 0.2 works, 0.166 freezes)
+            MIN_FRACTIONAL_GPU = 0.18   # Minimum GPU fraction per actor
             
-            # Calculate max actors that fit with minimum fractional GPU constraint
-            # Example: With 1 GPU, max_actors = int(0.95 / 0.19) = 5 actors max
-            max_actors_per_gpu_constraint = int((GPU_HEADROOM_FACTOR * n_gpus) / MIN_FRACTIONAL_GPU)
+            # Calculate how many actors might need to share a single GPU (worst case)
+            actors_per_gpu = math.ceil(n_actors / n_gpus)
             
-            # Apply the constraint - cap n_actors if needed
-            if n_actors > max_actors_per_gpu_constraint:
-                logger.warning(f"Capping actors from {n_actors} to {max_actors_per_gpu_constraint} per GPU "
+            # Calculate max actors per GPU based on minimum fractional constraint
+            max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
+            
+            # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
+            if actors_per_gpu > max_actors_per_single_gpu:
+                # Reduce n_actors so that actors_per_gpu fits
+                n_actors = max_actors_per_single_gpu * n_gpus
+                actors_per_gpu = max_actors_per_single_gpu
+                logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
                              f"(min fractional GPU {MIN_FRACTIONAL_GPU} with {GPU_HEADROOM_FACTOR:.0%} headroom)")
-                n_actors = max_actors_per_gpu_constraint
             
-            # Calculate fractional GPU with headroom
-            fractional_gpu = (GPU_HEADROOM_FACTOR * n_gpus) / n_actors if n_actors > 0 else 1.0
-            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0 (one actor can't claim more than 1 GPU unit)
-            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places for cleaner values
+            # Calculate fractional GPU based on worst-case actors per GPU
+            # This ensures all actors can be placed even if unevenly distributed
+            fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
+            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
+            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
             
             logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
-            logger.info(f"  → Total GPU allocation: {n_actors} × {fractional_gpu:.3f} = {n_actors * fractional_gpu:.3f} / {n_gpus} GPUs")
-            logger.info(f"  → Headroom: {(1 - (n_actors * fractional_gpu / n_gpus)) * 100:.1f}% reserved for Ray/CUDA overhead")
+            logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
+            logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
+            logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
             
             model_actors = []
             for i in range(n_actors):
@@ -2236,12 +2252,38 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     
     pos, station, out_dir, args = predict_args
     
-    # RIPPER MODE: Load the SeisBench model inside this task
-    from eqcctpro.seisbench_models import load_seisbench_model, mseed2stream_3c
+    # --- PyTorch multiprocessing safety settings ---
+    # Prevent potential deadlocks in Ray workers with PyTorch
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512")
+    
+    # RIPPER MODE: Load the SeisBench model DIRECTLY to avoid network calls
+    # The SeisBenchModels wrapper class calls list_pretrained() in __init__
+    # which can hang in Ray workers due to network timeouts
+    from eqcctpro.seisbench_models import mseed2stream_3c
+    import seisbench.models as sbm
     import torch
     
-    device = "cuda" if (gpu and torch.cuda.is_available()) else "cpu"
-    model = load_seisbench_model(parent_model_name, child_model_name, device=device)
+    # Set PyTorch threading to avoid deadlocks in multiprocessing
+    torch.set_num_threads(1)
+    
+    device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
+    
+    # Direct load without validation (bypasses list_pretrained() network call)
+    try:
+        model_class = getattr(sbm, parent_model_name)
+        model = model_class.from_pretrained(child_model_name)
+    except Exception as e:
+        return f"{pos} {station}: FAILED to load model {parent_model_name}/{child_model_name}: {e}"
+    
+    # Move model to device if using GPU
+    if gpu and torch.cuda.is_available():
+        try:
+            if hasattr(model, 'to'):
+                model.to(device)
+        except Exception:
+            pass
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
@@ -2272,32 +2314,49 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
     
     try:
-        # Use mseed2stream_3c for SeisBench preprocessing
-        stream = mseed2stream_3c(args, files_list, station)
-        if stream is None:
+        # Use mseed2stream_3c for SeisBench preprocessing - returns (stream, freqmin, freqmax)
+        result = mseed2stream_3c(args, files_list, station)
+        if result is None:
+            csvPr_gen.close()
             return f"{pos} {station}: FAILED reading mSEED (no valid 3C stream)."
         
-        # Run SeisBench model prediction
-        picks = model.classify(stream, 
+        stream, freqmin, freqmax = result
+        
+        # Run SeisBench model prediction using model.classify() directly
+        # IMPORTANT: strict=False and flexible_horizontal_components=True are needed
+        # to handle streams that don't perfectly match expected channel names
+        classify_output = model.classify(stream, 
                               P_threshold=args.get('P_threshold', 0.3),
-                              S_threshold=args.get('S_threshold', 0.3))
+                              S_threshold=args.get('S_threshold', 0.3),
+                              detection_threshold=Detection_threshold,
+                              strict=False,
+                              flexible_horizontal_components=True)
+        
+        # Extract picks from ClassifyOutput
+        picks = classify_output.picks if hasattr(classify_output, 'picks') else []
         
         # Process picks and write to CSV
         for pick in picks:
-            predict_writer.writerow([
-                args['input_dir'].split('/')[-1],  # file_name
-                '',  # network
-                station,  # station
-                '',  # instrument_type
-                '',  # station_lat
-                '',  # station_lon
-                '',  # station_elv
-                str(pick.peak_time) if pick.phase == 'P' else '',  # p_arrival_time
-                pick.peak_value if pick.phase == 'P' else '',  # p_probability
-                str(pick.peak_time) if pick.phase == 'S' else '',  # s_arrival_time
-                pick.peak_value if pick.phase == 'S' else ''  # s_probability
-            ])
+            pick_time = getattr(pick, 'peak_time', getattr(pick, 'start_time', getattr(pick, 'time', None)))
+            pick_prob = getattr(pick, 'peak_value', getattr(pick, 'score', getattr(pick, 'value', 0.0)))
+            pick_phase = getattr(pick, 'phase', 'P').upper()
+            
+            if pick_time is not None:
+                predict_writer.writerow([
+                    args['input_dir'].split('/')[-1],  # file_name
+                    '',  # network
+                    station,  # station
+                    '',  # instrument_type
+                    '',  # station_lat
+                    '',  # station_lon
+                    '',  # station_elv
+                    str(pick_time) if pick_phase == 'P' else '',  # p_arrival_time
+                    f"{pick_prob:.6f}" if pick_phase == 'P' else '',  # p_probability
+                    str(pick_time) if pick_phase == 'S' else '',  # s_arrival_time
+                    f"{pick_prob:.6f}" if pick_phase == 'S' else ''  # s_probability
+                ])
         csvPr_gen.flush()
+        csvPr_gen.close()
                                         
         end_Predicting = time.time()
         delta = (end_Predicting - start_Predicting)
@@ -2307,7 +2366,9 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         if gpu and torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s."
+        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
 
     except Exception as exp:
+        if 'csvPr_gen' in locals():
+            csvPr_gen.close()
         return f"{pos} {station}: FAILED the prediction. {exp}"
