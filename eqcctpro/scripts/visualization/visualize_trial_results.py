@@ -126,7 +126,7 @@ def get_concurrency_column(df, execution_mode):
 
 
 def visualize_trials(csv_path, model_name=None, output_dir="visualizations", 
-                     filter_threshold=None, success_only=True):
+                     filter_threshold=None, success_only=True, desired_runtime=None):
     """
     Reads trial results from a CSV and creates interactive Plotly 3D scatter plots.
     Automatically detects CPU vs GPU trials and ModelActor vs Ripper execution mode.
@@ -143,10 +143,21 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         If provided, creates additional filtered plots for runtime <= threshold.
     success_only : bool
         If True, only visualize successful trials.
+    desired_runtime : float, optional
+        If provided, adds a dashed red horizontal line to the 2D runtime plot.
     """
     if not os.path.exists(csv_path):
-        print(f"Error: CSV file not found at {csv_path}")
+        print(f"Error: Path not found at {csv_path}")
         return
+
+    # If csv_path is a directory, try to find the test results CSV inside it
+    if os.path.isdir(csv_path):
+        csv_files = glob.glob(os.path.join(csv_path, '*_test_results.csv'))
+        if not csv_files:
+            print(f"Error: No '*_test_results.csv' file found in directory {csv_path}")
+            return
+        csv_path = csv_files[0]
+        print(f"Detected CSV file in directory: {csv_path}")
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -208,10 +219,13 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
     # Create unified concurrency column
-    if execution_mode == 'ripper':
-        df['Effective Concurrency'] = df[task_col].fillna(1)
-    else:
-        df['Effective Concurrency'] = df[actor_col].fillna(1)
+    df['Effective Concurrency'] = df[concurrency_col].fillna(1)
+    
+    # Calculate CPU step size for plotting
+    cpu_vals = sorted(df[cpu_col].unique())
+    cpu_step = 1
+    if len(cpu_vals) > 1:
+        cpu_step = min(np.diff(cpu_vals))
     
     # Define required columns
     required_cols = [cpu_col, task_col, runtime_col, station_col, actual_ram_col]
@@ -306,20 +320,12 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             })
             print(f"Creating filtered dataset with runtime <= {filter_threshold}s: {len(filtered_df)} trials")
 
+    # Determine colorbar title based on execution mode
+    cbar_title = "N Model Actors" if execution_mode == "modelactor" else "Concurrent Tasks"
+
     # =========================================================================
     # GENERATE 3D SCATTER PLOTS
     # =========================================================================
-    # Determine grouping column based on execution mode
-    if execution_mode == 'ripper':
-        group_col = 'Effective Concurrency'
-        group_label = 'Tasks'
-    elif is_gpu_trial:
-        group_col = 'GPU Count'
-        group_label = 'GPUs'
-    else:
-        group_col = 'Effective Concurrency'
-        group_label = 'Actors'
-
     for dataset in datasets:
         curr_df = dataset['df']
         if curr_df.empty:
@@ -337,41 +343,50 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 
             fig = go.Figure()
 
-            unique_groups = sorted(curr_df[group_col].dropna().unique())
-            for g_val in unique_groups:
-                subset = curr_df[curr_df[group_col] == g_val]
-                
-                fig.add_trace(go.Scatter3d(
-                    x=subset[cpu_col],
-                    y=subset[task_col],
-                    z=subset[config['z_col']],
-                    mode='markers',
-                    marker=dict(
-                        size=6,
-                        color=subset[station_col],
-                        colorscale='Turbo',
-                        colorbar=dict(title="Stations"),
-                        cmin=curr_df[station_col].min(),
-                        cmax=curr_df[station_col].max(),
-                        opacity=0.7,
-                        symbol=symbol_map.get(int(g_val) if not pd.isna(g_val) else 0, 'circle')
+            # Set Z-axis dtick
+            z_dtick = None
+            if config['z_col'] == actual_ram_col:
+                z_dtick = 10000
+
+            # Add a single trace for all data points to have a clean colorbar
+            fig.add_trace(go.Scatter3d(
+                x=curr_df[cpu_col],
+                y=curr_df[station_col],
+                z=curr_df[config['z_col']],
+                mode='markers',
+                marker=dict(
+                    size=6,
+                    color=curr_df['Effective Concurrency'],
+                    colorscale='Turbo',
+                    colorbar=dict(
+                        title=cbar_title,
+                        dtick=10
                     ),
-                    name=f'{int(g_val)} {group_label}',
-                    hovertemplate=(
-                        f"<b>{int(g_val)} {group_label}</b><br>"
-                        f"CPUs: %{{x}}<br>"
-                        f"Concurrent Tasks: %{{y}}<br>"
-                        f"{config['z_label']}: %{{z:.2f}}<br>"
-                        f"Stations: %{{marker.color}}<br>"
-                        "<extra></extra>"
-                    )
-                ))
+                    cmin=curr_df['Effective Concurrency'].min(),
+                    cmax=curr_df['Effective Concurrency'].max(),
+                    opacity=0.8,
+                    symbol='circle',
+                    line=dict(width=0)
+                ),
+                name='Trials',
+                hovertemplate=(
+                    "<b>Trial Details</b><br>"
+                    "Total Number of Stations to Process: %{y}<br>"
+                    "CPUs: %{x}<br>"
+                    "Concurrent Tasks Requested: %{customdata[0]}<br>"
+                    "Number of ModelActor's Created: %{customdata[1]}<br>"
+                    "Runtime (s): %{customdata[3]:.2f}<br>"
+                    "Process Tree RAM (MB): %{customdata[2]:.2f}<br>"
+                    "<extra></extra>"
+                ),
+                customdata=curr_df[[task_col, actor_col, actual_ram_col, runtime_col]].values
+            ))
 
             # Add threshold lines for runtime plots
             if config['z_col'] == runtime_col and dataset['apply_threshold'] and filter_threshold:
                 threshold_val = filter_threshold * 0.5
                 x_max = curr_df[cpu_col].max()
-                y_max = curr_df[task_col].max()
+                y_max = curr_df[station_col].max()
                 
                 fig.add_trace(go.Scatter3d(
                     x=[0, x_max], y=[y_max, y_max], z=[threshold_val, threshold_val],
@@ -388,7 +403,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 ))
 
             x_range = [0, curr_df[cpu_col].max() * 1.1]
-            y_range = [0, curr_df[task_col].max() * 1.1]
+            y_range = [0, curr_df[station_col].max() * 1.1]
             
             fig.update_layout(
                 title=dict(
@@ -397,19 +412,14 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     xanchor='center'
                 ),
                 scene=dict(
-                    xaxis=dict(title='CPUs Allocated', range=x_range),
-                    yaxis=dict(title='Concurrent Tasks', range=y_range),
-                    zaxis=dict(title=config['z_label']),
+                    xaxis=dict(title='CPUs Allocated', range=x_range, dtick=cpu_step),
+                    yaxis=dict(title='Total Number of Stations to Process', range=y_range, dtick=10),
+                    zaxis=dict(title=config['z_label'], dtick=z_dtick),
                     aspectmode='manual',
                     aspectratio=dict(x=1, y=1, z=0.8)
                 ),
                 margin=dict(l=0, r=0, b=0, t=60),
-                legend=dict(
-                    title=f"{group_label} Count",
-                    x=0.85,
-                    y=0.95,
-                    bgcolor='rgba(255,255,255,0.8)'
-                )
+                showlegend=False if not (config['z_col'] == runtime_col and dataset['apply_threshold']) else True
             )
 
             output_file = os.path.join(output_dir, f"{config['file_name']}{mode_suffix}{dataset['suffix']}.html")
@@ -420,6 +430,15 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     # ADDITIONAL 2D VISUALIZATIONS
     # =========================================================================
     
+    # Common coloraxis settings
+    coloraxes_dict = dict(
+        colorbar=dict(
+            title=cbar_title,
+            dtick=10
+        ),
+        colorscale='Turbo'
+    )
+
     # 1. Runtime vs Stations (2D scatter with concurrency coloring)
     fig = px.scatter(
         df, 
@@ -427,19 +446,45 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         y=runtime_col,
         color='Effective Concurrency',
         size=cpu_col,
-        hover_data=[cpu_col, task_col, actual_ram_col],
-        title=f"[{model_name}] Runtime vs Workload Size",
-        labels={
-            station_col: 'Number of Stations',
-            runtime_col: 'Runtime (s)',
-            'Effective Concurrency': f'{"Actors" if execution_mode == "modelactor" else "Tasks"}',
-            cpu_col: 'CPUs'
-        },
-        color_continuous_scale='Viridis'
+        title=f"[{model_name}] Runtime vs Workload Size"
     )
+    fig.update_coloraxes(**coloraxes_dict)
+    fig.update_traces(
+        marker=dict(line=dict(width=0)),
+        hovertemplate=(
+            "<b>Trial Details</b><br>"
+            "Total Number of Stations to Process: %{x}<br>"
+            "CPUs: %{marker.size}<br>"
+            "Concurrent Tasks Requested: %{customdata[0]}<br>"
+            "Number of ModelActor's Created: %{customdata[1]}<br>"
+            "Runtime (s): %{y:.2f}<br>"
+            "Process Tree RAM (MB): %{customdata[2]:.2f}<br>"
+            "<extra></extra>"
+        ),
+        customdata=df[[task_col, actor_col, actual_ram_col]].values
+    )
+
+    if desired_runtime is not None:
+        x_min = df[station_col].min()
+        x_max = df[station_col].max()
+        fig.add_trace(go.Scatter(
+            x=[x_min, x_max],
+            y=[desired_runtime, desired_runtime],
+            mode='lines',
+            line=dict(color='red', dash='dash', width=2),
+            name=f'Desired Runtime ({desired_runtime} s)'
+        ))
+
     fig.update_layout(
-        xaxis_title='Number of Stations',
-        yaxis_title='Runtime (s)'
+        xaxis=dict(title='Total Number of Stations to Process', dtick=10),
+        yaxis=dict(title='Runtime (s)'),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
     )
     output_file = os.path.join(output_dir, f"runtime_vs_stations_2d_{execution_mode}.html")
     fig.write_html(output_file)
@@ -447,7 +492,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
 
     # 2. Memory Efficiency: Requested vs Actual RAM
     if total_req_ram_col in df.columns and actual_ram_col in df.columns:
-        valid_mem = df[[total_req_ram_col, actual_ram_col, 'Effective Concurrency', station_col]].dropna()
+        valid_mem = df[[total_req_ram_col, actual_ram_col, 'Effective Concurrency', station_col, cpu_col, task_col, actor_col, runtime_col]].dropna()
         if len(valid_mem) > 0:
             fig = px.scatter(
                 valid_mem,
@@ -455,22 +500,41 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 y=actual_ram_col,
                 color='Effective Concurrency',
                 size=station_col,
-                hover_data=[station_col],
-                title=f"[{model_name}] Requested vs Actual RAM",
-                labels={
-                    total_req_ram_col: 'Total Requested RAM (MB)',
-                    actual_ram_col: 'Process Tree RAM (MB)',
-                    'Effective Concurrency': f'{"Actors" if execution_mode == "modelactor" else "Tasks"}'
-                },
-                color_continuous_scale='Plasma'
+                title=f"[{model_name}] Requested vs Actual RAM"
+            )
+            fig.update_coloraxes(**coloraxes_dict)
+            fig.update_traces(
+                marker=dict(line=dict(width=0)),
+                hovertemplate=(
+                    "<b>Trial Details</b><br>"
+                    "Total Number of Stations to Process: %{marker.size}<br>"
+                    "CPUs: %{customdata[0]}<br>"
+                    "Concurrent Tasks Requested: %{customdata[1]}<br>"
+                    "Number of ModelActor's Created: %{customdata[2]}<br>"
+                    "Runtime (s): %{customdata[3]:.2f}<br>"
+                    "Process Tree RAM (MB): %{y:.2f}<br>"
+                    "<extra></extra>"
+                ),
+                customdata=valid_mem[[cpu_col, task_col, actor_col, runtime_col]].values
             )
             max_val = max(valid_mem[total_req_ram_col].max(), valid_mem[actual_ram_col].max())
             fig.add_trace(go.Scatter(
                 x=[0, max_val], y=[0, max_val],
                 mode='lines',
                 line=dict(color='red', dash='dash'),
-                name='1:1 (Perfect Prediction)'
+                name='Estimated Prediction RAM Cost'
             ))
+            fig.update_layout(
+                xaxis=dict(title='Total Requested RAM (MB)'),
+                yaxis=dict(title='Process Tree RAM (MB)'),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
             output_file = os.path.join(output_dir, f"requested_vs_actual_ram_2d_{execution_mode}.html")
             fig.write_html(output_file)
             print(f"Saved: {output_file}")
@@ -482,16 +546,36 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         df,
         x=task_col,
         y='Throughput (Stations/s)',
-        color=cpu_col,
+        color='Effective Concurrency',
         size=station_col,
-        hover_data=[runtime_col, 'Effective Concurrency'],
-        title=f"[{model_name}] Throughput vs Concurrency",
-        labels={
-            task_col: 'Concurrent Tasks',
-            'Throughput (Stations/s)': 'Throughput (Stations/s)',
-            cpu_col: 'CPUs Allocated'
-        },
-        color_continuous_scale='Turbo'
+        title=f"[{model_name}] Throughput vs Concurrency"
+    )
+    fig.update_coloraxes(**coloraxes_dict)
+    fig.update_traces(
+        marker=dict(line=dict(width=0)),
+        hovertemplate=(
+            "<b>Trial Details</b><br>"
+            "Total Number of Stations to Process: %{marker.size}<br>"
+            "CPUs: %{customdata[0]}<br>"
+            "Concurrent Tasks Requested: %{x}<br>"
+            "Number of ModelActor's Created: %{customdata[1]}<br>"
+            "Runtime (s): %{customdata[2]:.2f}<br>"
+            "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
+            "Throughput (Stations/s): %{y:.3f}<br>"
+            "<extra></extra>"
+        ),
+        customdata=df[[cpu_col, actor_col, runtime_col, actual_ram_col]].values
+    )
+    fig.update_layout(
+        xaxis=dict(title='Concurrent Tasks Requested'),
+        yaxis=dict(title='Throughput (Stations/s)'),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
     )
     output_file = os.path.join(output_dir, f"throughput_vs_concurrency_2d_{execution_mode}.html")
     fig.write_html(output_file)
@@ -499,7 +583,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
 
     # 4. GPU-specific: VRAM requested vs actual
     if is_gpu_trial and total_req_vram_col in df.columns and actual_vram_col in df.columns:
-        valid_vram = df[[total_req_vram_col, actual_vram_col, 'GPU Count', station_col]].dropna()
+        valid_vram = df[[total_req_vram_col, actual_vram_col, 'Effective Concurrency', station_col, cpu_col, task_col, actor_col, runtime_col]].dropna()
         valid_vram = valid_vram[valid_vram[actual_vram_col] > 0]
         
         if len(valid_vram) > 0:
@@ -507,23 +591,43 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 valid_vram,
                 x=total_req_vram_col,
                 y=actual_vram_col,
-                color='GPU Count',
+                color='Effective Concurrency',
                 size=station_col,
-                title=f"[{model_name}] Requested vs Actual VRAM",
-                labels={
-                    total_req_vram_col: 'Total Requested VRAM (MB)',
-                    actual_vram_col: 'Process Tree VRAM (MB)',
-                    'GPU Count': 'GPU Count'
-                },
-                color_continuous_scale='Plasma'
+                title=f"[{model_name}] Requested vs Actual VRAM"
+            )
+            fig.update_coloraxes(**coloraxes_dict)
+            fig.update_traces(
+                marker=dict(line=dict(width=0)),
+                hovertemplate=(
+                    "<b>Trial Details</b><br>"
+                    "Total Number of Stations to Process: %{marker.size}<br>"
+                    "CPUs: %{customdata[0]}<br>"
+                    "Concurrent Tasks Requested: %{customdata[1]}<br>"
+                    "Number of ModelActor's Created: %{customdata[2]}<br>"
+                    "Runtime (s): %{customdata[3]:.2f}<br>"
+                    "Process Tree VRAM (MB): %{y:.2f}<br>"
+                    "<extra></extra>"
+                ),
+                customdata=valid_vram[[cpu_col, task_col, actor_col, runtime_col]].values
             )
             max_val = max(valid_vram[total_req_vram_col].max(), valid_vram[actual_vram_col].max())
             fig.add_trace(go.Scatter(
                 x=[0, max_val], y=[0, max_val],
                 mode='lines',
                 line=dict(color='red', dash='dash'),
-                name='1:1 (Perfect Prediction)'
+                name='Estimated Prediction VRAM Cost'
             ))
+            fig.update_layout(
+                xaxis=dict(title='Total Requested VRAM (MB)'),
+                yaxis=dict(title='Process Tree VRAM (MB)'),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
             output_file = os.path.join(output_dir, f"requested_vs_actual_vram_2d_{execution_mode}.html")
             fig.write_html(output_file)
             print(f"Saved: {output_file}")
@@ -625,23 +729,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
-    # 3. Throughput Box Plot by Concurrent Tasks
-    fig = px.box(
-        df_combined,
-        x=task_col,
-        y='Throughput (Stations/s)',
-        color='Execution Mode',
-        title=f"[{model_name} - {trial_type}] Throughput by Concurrency: ModelActor vs Ripper",
-        labels={
-            task_col: 'Concurrent Tasks',
-            'Throughput (Stations/s)': 'Throughput (Stations/s)'
-        }
-    )
-    output_file = os.path.join(output_dir, f"comparison_throughput_by_tasks_{model_name}_{trial_type.lower()}.html")
-    fig.write_html(output_file)
-    print(f"Saved: {output_file}")
-    
-    # 4. RAM Usage Comparison
+    # 3. RAM Usage Comparison
     fig = px.box(
         df_combined,
         x='Execution Mode',
@@ -686,19 +774,35 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         subplot_titles=['ModelActor', 'Ripper']
     )
     
+    # Calculate shared color scale limits
+    conc_min = min(df_ma['N ModelActors'].min(), df_rp['Number of Concurrent Station Tasks'].min())
+    conc_max = max(df_ma['N ModelActors'].max(), df_rp['Number of Concurrent Station Tasks'].max())
+
     fig.add_trace(
         go.Scatter3d(
             x=df_ma[cpu_col],
-            y=df_ma[task_col],
+            y=df_ma[station_col],
             z=df_ma[runtime_col],
             mode='markers',
             marker=dict(
                 size=5,
-                color=df_ma[station_col],
+                color=df_ma[actor_col],
                 colorscale='Turbo',
-                opacity=0.7
+                colorbar=dict(title="Effective Concurrency", dtick=10),
+                cmin=conc_min,
+                cmax=conc_max,
+                opacity=0.8,
+                line=dict(color='black', width=0.5)
             ),
-            name='ModelActor'
+            name='ModelActor',
+            hovertemplate=(
+                "<b>ModelActor</b><br>"
+                "Actors: %{marker.color}<br>"
+                "CPUs: %{x}<br>"
+                "Stations: %{y}<br>"
+                "Runtime: %{z:.2f}s<br>"
+                "<extra></extra>"
+            )
         ),
         row=1, col=1
     )
@@ -706,16 +810,27 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.add_trace(
         go.Scatter3d(
             x=df_rp[cpu_col],
-            y=df_rp[task_col],
+            y=df_rp[station_col],
             z=df_rp[runtime_col],
             mode='markers',
             marker=dict(
                 size=5,
-                color=df_rp[station_col],
+                color=df_rp[task_col],
                 colorscale='Turbo',
-                opacity=0.7
+                cmin=conc_min,
+                cmax=conc_max,
+                opacity=0.8,
+                line=dict(color='black', width=0.5)
             ),
-            name='Ripper'
+            name='Ripper',
+            hovertemplate=(
+                "<b>Ripper</b><br>"
+                "Tasks: %{marker.color}<br>"
+                "CPUs: %{x}<br>"
+                "Stations: %{y}<br>"
+                "Runtime: %{z:.2f}s<br>"
+                "<extra></extra>"
+            )
         ),
         row=1, col=2
     )
@@ -723,13 +838,13 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.update_layout(
         title=f"[{model_name} - {trial_type}] 3D Runtime Comparison",
         scene=dict(
-            xaxis_title='CPUs',
-            yaxis_title='Concurrent Tasks',
+            xaxis=dict(title='CPUs Allocated', dtick=1),
+            yaxis=dict(title='Total Number of Stations to Process', dtick=10),
             zaxis_title='Runtime (s)'
         ),
         scene2=dict(
-            xaxis_title='CPUs',
-            yaxis_title='Concurrent Tasks',
+            xaxis=dict(title='CPUs Allocated', dtick=1),
+            yaxis=dict(title='Total Number of Stations to Process', dtick=10),
             zaxis_title='Runtime (s)'
         )
     )
@@ -792,7 +907,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     print(f"\nComparison visualization complete! Files saved to: {output_dir}/")
 
 
-def batch_visualize(results_root, output_dir="visualizations"):
+def batch_visualize(results_root, output_dir="visualizations", desired_runtime=None):
     """
     Batch visualize all result directories.
     """
@@ -833,7 +948,7 @@ def batch_visualize(results_root, output_dir="visualizations"):
         vis_output = os.path.join(output_dir, result_dir)
         
         print(f"\nVisualizing: {result_dir}")
-        visualize_trials(csv_path, output_dir=vis_output)
+        visualize_trials(csv_path, output_dir=vis_output, desired_runtime=desired_runtime)
     
     print(f"\n{'='*70}")
     print(f"Batch visualization complete! All files saved to: {output_dir}/")
@@ -900,6 +1015,8 @@ Examples:
                        help='Runtime threshold in seconds for filtered plots (e.g., 60)')
     parser.add_argument('--include-failed', action='store_true',
                        help='Include failed trials in visualization (default: success only)')
+    parser.add_argument('--desired_runtime', type=float, default=None,
+                       help='Add a desired runtime horizontal line (s) to the 2D runtime plot')
     
     # Batch mode
     parser.add_argument('--batch', action='store_true',
@@ -917,7 +1034,7 @@ Examples:
     
     if args.batch:
         # Batch visualization mode
-        batch_visualize(args.results_root, args.output_dir)
+        batch_visualize(args.results_root, args.output_dir, desired_runtime=args.desired_runtime)
     elif args.compare:
         # Comparison mode
         if not args.model or not args.trial_type:
@@ -940,7 +1057,8 @@ Examples:
             model_name=args.model, 
             output_dir=args.output_dir,
             filter_threshold=args.threshold,
-            success_only=not args.include_failed
+            success_only=not args.include_failed,
+            desired_runtime=args.desired_runtime
         )
     else:
         parser.print_help()
