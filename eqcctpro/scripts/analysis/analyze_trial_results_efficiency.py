@@ -532,7 +532,7 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     if desired_runtime is not None:
         plt.axhline(y=desired_runtime, color='red', linestyle='--', linewidth=2, 
                     label=f'Desired Runtime ({desired_runtime}s)')
-        plt.legend()
+        plt.legend(loc='upper left')
 
     # Set labels
     plt.xlabel('Total Number of Stations to Process', fontsize=12)
@@ -586,7 +586,7 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
         plt.xlabel('Total Requested RAM (MB)')
         plt.ylabel('Process Tree RAM (MB)')
         plt.title(f'Requested vs Actual RAM\n{model_name} ({trial_type}, {execution_mode.upper()})')
-        plt.legend()
+        plt.legend(loc='upper left')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
