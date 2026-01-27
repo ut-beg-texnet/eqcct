@@ -762,6 +762,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     task_col = 'Number of Concurrent Station Tasks'
     cpu_col = 'Number of CPUs Allocated for Ray to Use'
     actor_col = 'N ModelActors'
+    ripper_task_col = 'Actual Ripper Concurrent Tasks'
     
     # Add execution mode labels
     df_ma['Execution Mode'] = 'ModelActor'
@@ -771,6 +772,65 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     df_ma['Throughput (Stations/s)'] = df_ma[station_col] / df_ma[runtime_col]
     df_rp['Throughput (Stations/s)'] = df_rp[station_col] / df_rp[runtime_col]
     
+    # Prepare hover strings based on trial type
+    if not is_gpu:
+        ma_hover = (
+            "<b>ModelActor Method</b><br>"
+            "Total Number of Stations to Process: %{y}<br>"
+            "CPUs: %{x}<br>"
+            "Concurrent Tasks Requested: %{customdata[2]}<br>"
+            "Number of ModelActor's Created: %{customdata[3]}<br>"
+            "Runtime (s): %{z:.2f}<br>"
+            "Process Tree RAM (MB): %{customdata[4]:.2f}<br>"
+            "<extra></extra>"
+        )
+        rp_hover = (
+            "<b>Ripper Method</b><br>"
+            "Total Number of Stations to Process: %{y}<br>"
+            "CPUs: %{x}<br>"
+            "Concurrent Tasks Requested: %{customdata[2]}<br>"
+            "Concurrent Tasks Generated: %{customdata[5]}<br>"
+            "Runtime (s): %{z:.2f}<br>"
+            "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
+            "<extra></extra>"
+        )
+    else:
+        ma_hover = (
+            "<b>ModelActor Method</b><br>"
+            "Total Number of Stations to Process: %{y}<br>"
+            "CPUs: %{x}<br>"
+            "GPUs: %{customdata[0]}<br>"
+            "GPU IDs: %{customdata[1]}<br>"
+            "Concurrent Tasks Requested: %{customdata[2]}<br>"
+            "Number of ModelActor's Created: %{customdata[3]}<br>"
+            "Runtime (s): %{z:.2f}<br>"
+            "Process Tree RAM (MB): %{customdata[4]:.2f}<br>"
+            "<extra></extra>"
+        )
+        rp_hover = (
+            "<b>Ripper Method</b><br>"
+            "Total Number of Stations to Process: %{y}<br>"
+            "CPUs: %{x}<br>"
+            "GPUs: %{customdata[0]}<br>"
+            "GPU IDs: %{customdata[1]}<br>"
+            "Concurrent Tasks Requested: %{customdata[2]}<br>"
+            "Concurrent Tasks Generated: %{customdata[5]}<br>"
+            "Runtime (s): %{z:.2f}<br>"
+            "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
+            "<extra></extra>"
+        )
+
+    # Prepare unified generated tasks and labels for comparison
+    df_ma['Generated Tasks'] = df_ma[actor_col]
+    df_ma['Generated Label'] = "Number of ModelActor's Created:"
+    
+    # For ripper, use actual tasks if available, else requested
+    if ripper_task_col in df_rp.columns and df_rp[ripper_task_col].notna().any():
+        df_rp['Generated Tasks'] = df_rp[ripper_task_col]
+    else:
+        df_rp['Generated Tasks'] = df_rp[task_col]
+    df_rp['Generated Label'] = "Concurrent Tasks Generated:"
+
     # Combine datasets
     df_combined = pd.concat([df_ma, df_rp], ignore_index=True)
     
@@ -785,7 +845,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         color='Execution Mode',
         barmode='overlay',
         opacity=0.7,
-        title=f"[{model_name} - {trial_type}] Throughput Distribution: ModelActor vs Ripper",
+        title=f"[{model_name} - {trial_type}] Throughput Distribution: ModelActor Method vs Ripper Method",
         labels={'Throughput (Stations/s)': 'Throughput (Stations/s)'}
     )
     output_file = os.path.join(output_dir, f"comparison_throughput_dist_{model_name}_{trial_type.lower()}.html")
@@ -798,14 +858,29 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         x=station_col,
         y=runtime_col,
         color='Execution Mode',
-        size=cpu_col,
-        hover_data=[task_col, 'Throughput (Stations/s)'],
-        title=f"[{model_name} - {trial_type}] Runtime vs Workload Size: ModelActor vs Ripper",
+        size=runtime_col,
+        title=f"[{model_name} - {trial_type}] Runtime vs Workload Size: ModelActor Method vs Ripper Method",
         labels={
-            station_col: 'Number of Stations',
+            station_col: 'Total Number of Stations to Process',
             runtime_col: 'Runtime (s)',
             cpu_col: 'CPUs'
         }
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>Trial Details</b><br>"
+            "Execution Mode: %{customdata[0]}<br>"
+            "Total Number of Stations to Process: %{x}<br>"
+            "Number of Concurrent Station Tasks: %{customdata[1]}<br>"
+            "%{customdata[2]} %{customdata[3]}<br>"
+            "Runtime (s): %{y:.2f}<br>"
+            "Throughput (Total Stations/s): %{customdata[4]:.2f}<br>"
+            "<extra></extra>"
+        ),
+        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Throughput (Stations/s)']].values
+    )
+    fig.update_layout(
+        xaxis=dict(dtick=10)
     )
     output_file = os.path.join(output_dir, f"comparison_runtime_vs_stations_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
@@ -820,8 +895,14 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         x='Execution Mode',
         y=actual_ram_col,
         color='Execution Mode',
-        title=f"[{model_name} - {trial_type}] RAM Usage: ModelActor vs Ripper",
-        labels={actual_ram_col: 'Process Tree RAM (MB)'}
+        title=f"[{model_name} - {trial_type}] RAM Usage: ModelActor Method vs Ripper Method",
+        labels={
+            'Execution Mode': 'Execution Mode:',
+            actual_ram_col: 'Process Tree RAM (MB):'
+        }
+    )
+    fig.update_traces(
+        hovertemplate="Execution Mode: %{x}<br>Process Tree RAM (MB): %{y:.2f}<extra></extra>"
     )
     fig.update_layout(
         yaxis=dict(dtick=ram_dtick)
@@ -845,7 +926,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         color='Execution Mode',
         error_y='std',
         markers=True,
-        title=f"[{model_name} - {trial_type}] Throughput Scaling: ModelActor vs Ripper",
+        title=f"[{model_name} - {trial_type}] Throughput Scaling: ModelActor Method vs Ripper Method",
         labels={
             task_col: 'Concurrent Tasks',
             'mean': 'Mean Throughput (Stations/s)'
@@ -865,7 +946,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig = make_subplots(
         rows=1, cols=2,
         specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
-        subplot_titles=['ModelActor', 'Ripper']
+        subplot_titles=['ModelActor Method', 'Ripper Method']
     )
     
     # Calculate shared color scale limits
@@ -907,22 +988,11 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
                 cmax=conc_max,
                 opacity=0.8,
                 symbol=df_ma['Marker Symbol'],
-                line=dict(color='black', width=0.5)
+                line=dict(width=0) # Removed outline
             ),
-            name='ModelActor',
-            showlegend=True, # Keep these as they represent the subplots
-            hovertemplate=(
-                "<b>ModelActor</b><br>"
-                "Total Number of Stations to Process: %{y}<br>"
-                "CPUs: %{x}<br>"
-                "GPUs: %{customdata[0]}<br>"
-                "GPU IDs: %{customdata[1]}<br>"
-                "Concurrent Tasks Requested: %{customdata[2]}<br>"
-                "Number of ModelActor's Created: %{customdata[3]}<br>"
-                "Runtime (s): %{z:.2f}<br>"
-                "Process Tree RAM (MB): %{customdata[4]:.2f}<br>"
-                "<extra></extra>"
-            ),
+            name='ModelActor Method',
+            showlegend=False, # Removed dot in legend
+            hovertemplate=ma_hover,
             customdata=df_ma[['GPU Count', 'GPUs Used', task_col, actor_col, actual_ram_col]].values
         ),
         row=1, col=1
@@ -942,21 +1012,12 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
                 cmax=conc_max,
                 opacity=0.8,
                 symbol=df_rp['Marker Symbol'],
-                line=dict(color='black', width=0.5)
+                line=dict(width=0) # Removed outline
             ),
-            name='Ripper',
-            hovertemplate=(
-                "<b>Ripper</b><br>"
-                "Total Number of Stations to Process: %{y}<br>"
-                "CPUs: %{x}<br>"
-                "GPUs: %{customdata[0]}<br>"
-                "GPU IDs: %{customdata[1]}<br>"
-                "Concurrent Tasks Requested: %{customdata[2]}<br>"
-                "Runtime (s): %{z:.2f}<br>"
-                "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
-                "<extra></extra>"
-            ),
-            customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col]].values
+            name='Ripper Method',
+            showlegend=False, # Removed dot in legend
+            hovertemplate=rp_hover,
+            customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col, runtime_col, ripper_task_col]].values
         ),
         row=1, col=2
     )
