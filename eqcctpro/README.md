@@ -636,9 +636,9 @@ When a trial needs **more actors than currently exist in the Ray session**, new 
 
 | Trial | N Actors | RAM Growth | What Happened |
 |-------|----------|------------|---------------|
-| 1 | 1 | +1128 MB | 🆕 First actor spawned |
-| 3 | 2 | +1596 MB | 🆕 Second actor spawned |
-| 6 | 3 | +2931 MB | 🆕 Third actor spawned |
+| 1 | 1 | +1128 MB | First actor spawned |
+| 3 | 2 | +1596 MB | Second actor spawned |
+| 6 | 3 | +2931 MB | Third actor spawned |
 
 Each new actor costs ~1500-3000 MB (model weights + TensorFlow runtime + Ray worker).
 
@@ -648,9 +648,9 @@ When a trial needs **fewer or equal actors** than already exist, Ray reuses them
 
 | Trial | N Actors | RAM Growth | What Happened |
 |-------|----------|------------|---------------|
-| 4 | 1 | -61 MB | ♻️ Reused existing actor |
-| 7 | 1 | +3.74 MB | ♻️ Reused existing actor |
-| 8 | 2 | +1.94 MB | ♻️ Reused existing actors |
+| 4 | 1 | -61 MB | Reused existing actor |
+| 7 | 1 | +3.74 MB | Reused existing actor |
+| 8 | 2 | +1.94 MB | Reused existing actors |
 
 **Idle actors stay in memory** - Ray doesn't deallocate them between trials within the same session.
 
