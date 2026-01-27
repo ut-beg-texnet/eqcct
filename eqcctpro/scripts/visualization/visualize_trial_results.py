@@ -846,7 +846,22 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         barmode='overlay',
         opacity=0.7,
         title=f"[{model_name} - {trial_type}] Throughput Distribution: ModelActor Method vs Ripper Method",
-        labels={'Throughput (Stations/s)': 'Throughput (Stations/s)'}
+        labels={
+            'Throughput (Stations/s)': 'Throughput (Total Stations/s)',
+            'count': 'Number of Trials Achieved Benchmark'
+        }
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>Performance Benchmark</b><br>"
+            "Execution Mode: %{fullData.name}<br>"
+            "Throughput (Total Stations/s): %{x}<br>"
+            "Number of Trials Achieved Benchmark: %{y}<extra></extra>"
+        )
+    )
+    fig.update_layout(
+        yaxis_title="Number of Trials Achieved Benchmark",
+        xaxis_title="Throughput (Total Stations/s)"
     )
     output_file = os.path.join(output_dir, f"comparison_throughput_dist_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
@@ -912,10 +927,22 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     print(f"Saved: {output_file}")
     
     # 5. Throughput Scaling by Concurrent Tasks (Line Chart)
-    ma_by_task = df_ma.groupby(task_col)['Throughput (Stations/s)'].agg(['mean', 'std']).reset_index()
-    ma_by_task['Execution Mode'] = 'ModelActor'
-    rp_by_task = df_rp.groupby(task_col)['Throughput (Stations/s)'].agg(['mean', 'std']).reset_index()
-    rp_by_task['Execution Mode'] = 'Ripper'
+    # Use the previously calculated 'Generated Tasks' and labels
+    ma_by_task = df_ma.groupby(task_col).agg({
+        'Throughput (Stations/s)': ['mean', 'std'],
+        'Generated Tasks': 'mean'
+    }).reset_index()
+    ma_by_task.columns = [task_col, 'mean', 'std', 'Generated Tasks']
+    ma_by_task['Execution Mode'] = 'ModelActor Method'
+    ma_by_task['Generated Label'] = "Number of ModelActors Created:"
+    
+    rp_by_task = df_rp.groupby(task_col).agg({
+        'Throughput (Stations/s)': ['mean', 'std'],
+        'Generated Tasks': 'mean'
+    }).reset_index()
+    rp_by_task.columns = [task_col, 'mean', 'std', 'Generated Tasks']
+    rp_by_task['Execution Mode'] = 'Ripper Method'
+    rp_by_task['Generated Label'] = "Concurrent Tasks Generated:"
     
     scaling_df = pd.concat([ma_by_task, rp_by_task], ignore_index=True)
     
@@ -928,9 +955,23 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         markers=True,
         title=f"[{model_name} - {trial_type}] Throughput Scaling: ModelActor Method vs Ripper Method",
         labels={
-            task_col: 'Concurrent Tasks',
-            'mean': 'Mean Throughput (Stations/s)'
+            task_col: 'Concurrent Tasks Requested',
+            'mean': 'Mean Throughput (Total Stations/s)'
         }
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>Scaling Analysis</b><br>"
+            "Execution Mode: %{fullData.name}<br>"
+            "Concurrent Tasks Requested: %{x}<br>"
+            "%{customdata[0]} %{customdata[1]:.0f}<br>"
+            "Mean Throughput (Total Stations/s): %{y:.2f} ± %{customdata[2]:.2f}<br>"
+            "<extra></extra>"
+        ),
+        customdata=scaling_df[['Generated Label', 'Generated Tasks', 'std']].values
+    )
+    fig.update_layout(
+        xaxis=dict(dtick=10)
     )
     output_file = os.path.join(output_dir, f"comparison_throughput_scaling_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
