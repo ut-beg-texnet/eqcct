@@ -417,7 +417,7 @@ eval_gpu.evaluate()
 
 ---
 
-# **3. Efficiency and Performance Analysis**
+# **3. Numerical Efficiency Analysis**
 
 The `analyze_trial_results_efficiency.py` script provides deep insights into your benchmarking results, including throughput gains, memory utilization, and comparative performance between ModelActor and Ripper modes.
 
@@ -439,17 +439,48 @@ Compare the performance of **ModelActor** vs. **Ripper** mode side-by-side for a
 python scripts/analysis/analyze_trial_results_efficiency.py --compare --model eqcct --trial_type cpu --results_root results/csv/
 ```
 
+### **Key Metrics Defined**
+- **Effective Concurrency**: A unified metric for parallelism. In **ModelActor** mode, it represents the number of persistent actors spawned. In **Ripper** mode, it represents the actual number of concurrent tasks executed.
+- **Throughput (Stations/s)**: The total number of stations processed divided by the total runtime.
+- **Resource Cost Score**: A weighted score (CPUs + GPUs × 10) to evaluate the efficiency of hardware utilization.
+
 ### **Generated Artifacts**
 The script generates the following in your output directory:
 1.  **`efficiency_summary_*.txt`**: A comprehensive text report with throughput formulas, memory usage summaries, and performance lever correlations.
-2.  **`correlation_matrix_*.png`**: Visualizes how resources (CPUs, GPUs, Concurrency) correlate with runtime and memory.
-3.  **`runtime_vs_stations_by_concurrency_*.png`**: Scatter plot showing runtime scaling across workload sizes, colored by actor/task count.
+2.  **`correlation_matrix_*.png`**: Visualizes how resources correlate with runtime. **Note**: In ModelActor mode, requested concurrency is excluded in favor of `Effective Concurrency`.
+3.  **`runtime_vs_stations_by_concurrency_*.png`**: Static scatter plot showing runtime scaling across workload sizes.
 4.  **`requested_vs_actual_ram_*.png`**: Analyzes theoretical vs. actual memory footprints.
-5.  **`efficiency_analysis_results_*.csv`**: A processed version of your trial data with additional calculated metrics like Throughput/CPU.
+5.  **`efficiency_analysis_results_*.csv`**: A processed version of trial data with derived metrics.
 
 ---
 
-# **4. Finding Optimal Configurations**
+# **4. Interactive Visualization (Plotly)**
+
+The `visualize_trial_results.py` script generates high-fidelity, interactive visualizations (HTML) for exploring multidimensional trial data.
+
+### **Usage Examples**
+```sh
+# Single file visualization
+python scripts/visualization/visualize_trial_results.py /path/to/results/cpu_test_results.csv --output_dir vis/
+
+# Batch visualization (creates separate folders per trial)
+python scripts/visualization/visualize_trial_results.py --batch --results_root results/csv/ --output_dir batch_vis/
+
+# Compare ModelActor vs Ripper performance
+python scripts/visualization/visualize_trial_results.py --compare --model eqcct --trial_type gpu --results_root results/csv/
+```
+
+### **Interactive Plot Features**
+- **3D Resource Plots**: Explore the relationship between **CPUs**, **Total Stations**, and **Runtime/RAM/VRAM** in interactive 3D space.
+- **Memory Efficiency (2D)**: Requested vs. Actual RAM/VRAM plots with fixed 10K step sizes and 0-min axes for clarity.
+- **Throughput Scaling**: Visualize how `Effective Concurrency` impacts stations-per-second.
+- **Customizable Overlays**: Pass `--desired_runtime X` to add a labeled target runtime line to 2D runtime plots.
+- **Hover Details**: Comprehensive tooltips showing station counts, CPUs, requested vs. created actors, and precise memory/runtime values.
+- **Hardware-Aware Scales**: Automatically uses "N Model Actors" for ModelActor trials and "Concurrent Tasks" for Ripper trials, with a standardized rainbow color scale.
+
+---
+
+# **5. Finding Optimal Configurations**
 
 Once the evaluation is complete, use the configuration finders to extract the best settings. Results are now automatically grouped by the model used during testing.
 
@@ -471,7 +502,7 @@ There are more examples on how to use EQCCTPro using different SeisBench and EQC
 
 ---
 
-# **5. Resource Requirement Calibration**
+# **6. Resource Requirement Calibration**
 
 EQCCTPro relies on accurate memory footprint estimates to perform memory-aware parallelization and prevent Out-Of-Memory (OOM) errors. These estimates are stored as lookup tables in `eqcctpro/parallelization.py`.
 
