@@ -1355,9 +1355,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
             logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
             
+            # Create all actors in parallel (non-blocking .remote() calls)
+            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
                 # Use fractional GPU so Ray knows this actor needs GPU resources
                 # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
                 actor = SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
@@ -1366,14 +1367,16 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
                     use_gpu=True
                 )
-                try:
-                    ray.get(actor.ready.remote())
-                except Exception as e:
-                    logger.error(f"Failed to create SeisBenchModelActor {i+1}: {e}")
-                    raise
-                logger.info(f"SeisBenchModelActor {i+1} created successfully.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
+            
+            # Wait for all actors to initialize in parallel
+            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+            try:
+                ray.get([actor.ready.remote() for actor in model_actors])
+            except Exception as e:
+                logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
+                raise
+            logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
             
             # Generate comment if actors were capped
             if len(model_actors) < requested_actors:
@@ -1413,9 +1416,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 logger.info(f"      Concurrency limited by RAM, not CPU count.")
             logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
             
+            # Create all actors in parallel (non-blocking .remote() calls)
+            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating SeisBenchModelActor {i+1}/{n_actors} ({model_ram_mb/1024:.2f}GB RAM each)...")
                 # NO .options() - let Ray handle scheduling
                 # taskset already limits which CPUs Ray can see
                 actor = SeisBenchModelActor.remote(
@@ -1424,14 +1428,16 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     gpus_to_use=False,
                     use_gpu=False
                 )
-                try:
-                    ray.get(actor.ready.remote())
-                except Exception as e:
-                    logger.error(f"Failed to create SeisBenchModelActor {i+1}: {e}")
-                    raise
-                logger.info(f"SeisBenchModelActor {i+1} created successfully.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.")
+            
+            # Wait for all actors to initialize in parallel
+            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+            try:
+                ray.get([actor.ready.remote() for actor in model_actors])
+            except Exception as e:
+                logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
+                raise
+            logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
             
             # Generate comment if actors were capped
             if len(model_actors) < requested_actors:
@@ -1526,9 +1532,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
             logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
             
+            # Create all actors in parallel (non-blocking .remote() calls)
+            logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
                 # Use fractional GPU so Ray knows this actor needs GPU resources
                 # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
                 # TF memory growth is enabled in tf_environ, allowing multiple actors per GPU
@@ -1539,15 +1546,16 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     gpu_memory_limit_mb=per_actor_vram_mb,  # Per-actor VRAM limit via TF config
                     use_gpu=True
                 )
-                try:
-                    ray.get(actor.ready.remote())
-                except Exception as e:
-                    logger.error(f"Failed to create ModelActor {i+1}: {e}")
-                    raise
-                logger.info(f"ModelActor {i+1} created successfully.")
                 model_actors.append(actor)
-                
-            logger.info(f"Created {len(model_actors)} GPU actor(s). Task queue will handle concurrency.")
+            
+            # Wait for all actors to initialize in parallel
+            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+            try:
+                ray.get([actor.ready.remote() for actor in model_actors])
+            except Exception as e:
+                logger.error(f"Failed to initialize ModelActors: {e}")
+                raise
+            logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
             logger.info(f"[ModelActor] Models successfully loaded onto GPU(s).")
             
             # Generate comment if actors were capped
@@ -1583,9 +1591,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 logger.info(f"      Concurrency limited by RAM, not CPU count.")
             logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
             
+            # Create all actors in parallel (non-blocking .remote() calls)
+            logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
             model_actors = []
             for i in range(n_actors):
-                logger.info(f"Creating ModelActor {i+1}/{n_actors} ({model_ram_mb/1024:.2f}GB RAM each)...")
                 # NO .options() - let Ray handle scheduling
                 # taskset already limits which CPUs Ray can see
                 actor = ModelActor.remote(
@@ -1594,14 +1603,16 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     gpu_memory_limit_mb=None, 
                     use_gpu=False
                 )
-                try:
-                    ray.get(actor.ready.remote())
-                except Exception as e:
-                    logger.error(f"Failed to create ModelActor {i+1}: {e}")
-                    raise
-                logger.info(f"ModelActor {i+1} created successfully.")
                 model_actors.append(actor)
-            logger.info(f"Created {len(model_actors)} CPU actor(s). Task queue will handle concurrency.")
+            
+            # Wait for all actors to initialize in parallel
+            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+            try:
+                ray.get([actor.ready.remote() for actor in model_actors])
+            except Exception as e:
+                logger.error(f"Failed to initialize ModelActors: {e}")
+                raise
+            logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
             
             # Generate comment if actors were capped
             if len(model_actors) < requested_actors:
