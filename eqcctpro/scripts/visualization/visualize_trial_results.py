@@ -170,8 +170,15 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     task_col = 'Number of Concurrent Station Tasks'
     actor_col = 'N ModelActors'
     ripper_task_col = 'Actual Ripper Concurrent Tasks'
-    runtime_col = 'Total Run time for Picker (s)'
     station_col = 'Number of Stations Used'
+    
+    # Timing columns
+    total_trial_time_col = 'Total Trial Time (s)'           # Entire trial: setup + actor creation + processing
+    actor_creation_time_col = 'Actor Creation Time (s)'     # Time to spin up ModelActors (empty for Ripper)
+    avg_model_load_time_col = 'Avg Model Load Time (s)'     # Average model load time per task (Ripper only)
+    waveform_proc_time_col = 'Waveform Processing Time (s)' # Average time to load waveforms per task
+    picker_runtime_col = 'Total Run time for Picker (s)'    # Total time for all task processing
+    runtime_col = total_trial_time_col  # Use total trial time for main plots
     
     # Memory columns (PID-isolated tracking)
     total_req_vram_col = 'Total Requested VRAM (MB)'
@@ -209,12 +216,20 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         print(f"Filtering to successful trials: {len(df)} rows")
     
     # Convert numeric columns
-    numeric_cols = [cpu_col, task_col, actor_col, ripper_task_col, runtime_col, station_col,
+    numeric_cols = [cpu_col, task_col, actor_col, ripper_task_col, station_col,
+                    total_trial_time_col, actor_creation_time_col, avg_model_load_time_col,
+                    waveform_proc_time_col, picker_runtime_col,
                     actual_ram_col, actual_vram_col, ram_util_col, vram_util_col,
                     total_req_ram_col, total_req_vram_col]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Calculate additional metrics for hover details
+    if actor_creation_time_col in df.columns and actor_col in df.columns:
+        df['Avg. ModelActor Creation Time (s)'] = df[actor_creation_time_col] / df[actor_col].replace(0, np.nan)
+    else:
+        df['Avg. ModelActor Creation Time (s)'] = np.nan
     
     # Create unified concurrency column
     df['Effective Concurrency'] = df[concurrency_col].fillna(1)
@@ -361,7 +376,14 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     z_dtick = 10000
 
             # Prepare hover template based on execution mode
-            actor_hover = "Number of ModelActor's Created: %{customdata[3]}<br>" if execution_mode == 'modelactor' else ""
+            if execution_mode == 'modelactor':
+                actor_hover = (
+                    "Number of ModelActor's Created: %{customdata[3]}<br>"
+                    "Avg. ModelActor Creation Time (s): %{customdata[6]:.4f}<br>"
+                    "Total Actor Creation Time (s): %{customdata[7]:.2f}<br>"
+                )
+            else:
+                actor_hover = ""
             
             # Add dummy traces for symbol legend if it's a GPU trial
             if is_gpu_trial:
@@ -423,11 +445,15 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "GPU IDs: %{customdata[1]}<br>"
                     "Concurrent Tasks Requested: %{customdata[2]}<br>"
                     + actor_hover +
-                    "Runtime (s): %{customdata[4]:.2f}<br>"
+                    "Avg. Waveform Processing Time (s): %{customdata[8]:.4f}<br>"
+                    "Total Picking Time (s): %{customdata[9]:.2f}<br>"
+                    "Total Trial Runtime (s): %{customdata[4]:.2f}<br>"
                     "Process Tree RAM (MB): %{customdata[5]:.2f}<br>"
                     "<extra></extra>"
                 ),
-                customdata=curr_df[['GPU Count', 'GPUs Used', task_col, actor_col, runtime_col, actual_ram_col]].values
+                customdata=curr_df[['GPU Count', 'GPUs Used', task_col, actor_col, runtime_col, actual_ram_col, 
+                                    'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                                    waveform_proc_time_col, picker_runtime_col]].values
             ))
 
             # Add threshold lines for runtime plots
@@ -499,7 +525,14 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     )
 
     # 1. Runtime vs Stations (2D scatter with concurrency coloring)
-    actor_hover = "Number of ModelActor's Created: %{customdata[3]}<br>" if execution_mode == 'modelactor' else ""
+    if execution_mode == 'modelactor':
+        actor_hover = (
+            "Number of ModelActor's Created: %{customdata[3]}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[6]:.4f}<br>"
+            "Total Actor Creation Time (s): %{customdata[7]:.2f}<br>"
+        )
+    else:
+        actor_hover = ""
     fig = px.scatter(
         df, 
         x=station_col, 
@@ -508,7 +541,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         size=runtime_col,
         symbol='GPU Count',
         symbol_map=symbol_map_dict,
-        title=f"[{model_name}] Runtime vs Workload Size",
+        title=f"[{model_name}] Total Trial Runtime vs Workload Size",
         labels={'GPU Count': 'GPUs Used'}
     )
     fig.update_coloraxes(**coloraxes_dict)
@@ -522,11 +555,15 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             "GPU IDs: %{customdata[2]}<br>"
             "Concurrent Tasks Requested: %{customdata[4]}<br>"
             + actor_hover +
-            "Runtime (s): %{y:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[8]:.4f}<br>"
+            "Total Picking Time (s): %{customdata[9]:.2f}<br>"
+            "Total Trial Runtime (s): %{y:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[5]:.2f}<br>"
             "<extra></extra>"
         ),
-        customdata=df[[cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, actual_ram_col]].values
+        customdata=df[[cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, actual_ram_col, 
+                       'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                       waveform_proc_time_col, picker_runtime_col]].values
     )
 
     if desired_runtime is not None:
@@ -542,7 +579,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
 
     fig.update_layout(
         xaxis=dict(title='Total Number of Stations to Process', dtick=10),
-        yaxis=dict(title='Runtime (s)'),
+        yaxis=dict(title='Total Trial Runtime (s)'),
         legend=dict(
             yanchor="top",
             y=0.99,
@@ -557,9 +594,19 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
 
     # 2. Memory Efficiency: Requested vs Actual RAM
     if total_req_ram_col in df.columns and actual_ram_col in df.columns:
-        valid_mem = df[[total_req_ram_col, actual_ram_col, 'Effective Concurrency', station_col, cpu_col, task_col, actor_col, runtime_col, 'GPU Count', 'GPUs Used', 'Marker Symbol']].dropna()
+        valid_mem = df[[total_req_ram_col, actual_ram_col, 'Effective Concurrency', station_col, cpu_col, 
+                       task_col, actor_col, runtime_col, 'GPU Count', 'GPUs Used', 'Marker Symbol',
+                       'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                       waveform_proc_time_col, picker_runtime_col]].dropna()
         if len(valid_mem) > 0:
-            actor_hover = "Number of ModelActor's Created: %{customdata[4]}<br>" if execution_mode == 'modelactor' else ""
+            if execution_mode == 'modelactor':
+                actor_hover = (
+                    "Number of ModelActor's Created: %{customdata[4]}<br>"
+                    "Avg. ModelActor Creation Time (s): %{customdata[7]:.4f}<br>"
+                    "Total Actor Creation Time (s): %{customdata[8]:.2f}<br>"
+                )
+            else:
+                actor_hover = ""
             fig = px.scatter(
                 valid_mem,
                 x=total_req_ram_col,
@@ -581,11 +628,15 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "GPU IDs: %{customdata[3]}<br>"
                     "Concurrent Tasks Requested: %{customdata[5]}<br>"
                     + actor_hover +
-                    "Runtime (s): %{customdata[6]:.2f}<br>"
+                    "Avg. Waveform Processing Time (s): %{customdata[9]:.4f}<br>"
+                    "Total Picking Time (s): %{customdata[10]:.2f}<br>"
+                    "Total Trial Runtime (s): %{customdata[6]:.2f}<br>"
                     "Process Tree RAM (MB): %{y:.2f}<br>"
                     "<extra></extra>"
                 ),
-                customdata=valid_mem[[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col]].values
+                customdata=valid_mem[[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col,
+                                     'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                                     waveform_proc_time_col, picker_runtime_col]].values
             )
             max_val = max(valid_mem[total_req_ram_col].max(), valid_mem[actual_ram_col].max())
             fig.add_trace(go.Scatter(
@@ -594,6 +645,17 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 line=dict(color='red', dash='dash'),
                 name='Estimated Prediction RAM Cost'
             ))
+            
+            # Add desired runtime line if provided
+            if desired_runtime is not None:
+                fig.add_trace(go.Scatter(
+                    x=[valid_mem[total_req_ram_col].min(), valid_mem[total_req_ram_col].max()],
+                    y=[desired_runtime, desired_runtime],
+                    mode='lines',
+                    line=dict(color='red', dash='dash', width=2),
+                    name=f'Desired Runtime ({desired_runtime}s)'
+                ))
+                
             fig.update_layout(
                 xaxis=dict(title='Total Requested RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
                 yaxis=dict(title='Process Tree RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
@@ -612,7 +674,14 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     # 3. Throughput analysis
     df['Throughput (Stations/s)'] = df[station_col] / df[runtime_col]
     
-    actor_hover = "Number of ModelActor's Created: %{customdata[4]}<br>" if execution_mode == 'modelactor' else ""
+    if execution_mode == 'modelactor':
+        actor_hover = (
+            "Number of ModelActor's Created: %{customdata[4]}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[7]:.4f}<br>"
+            "Total Actor Creation Time (s): %{customdata[8]:.2f}<br>"
+        )
+    else:
+        actor_hover = ""
     fig = px.scatter(
         df,
         x=task_col,
@@ -635,13 +704,28 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             "GPU IDs: %{customdata[2]}<br>"
             "Concurrent Tasks Requested: %{x}<br>"
             + actor_hover +
-            "Runtime (s): %{customdata[5]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[9]:.4f}<br>"
+            "Total Picking Time (s): %{customdata[10]:.2f}<br>"
+            "Total Trial Runtime (s): %{customdata[5]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[6]:.2f}<br>"
             "Throughput (Stations/s): %{y:.3f}<br>"
             "<extra></extra>"
         ),
-        customdata=df[[cpu_col, 'GPU Count', 'GPUs Used', task_col, actor_col, runtime_col, actual_ram_col]].values
+        customdata=df[[cpu_col, 'GPU Count', 'GPUs Used', task_col, actor_col, runtime_col, actual_ram_col,
+                       'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                       waveform_proc_time_col, picker_runtime_col]].values
     )
+    
+    # Add desired runtime line if provided
+    if desired_runtime is not None:
+        fig.add_trace(go.Scatter(
+            x=[df[task_col].min(), df[task_col].max()],
+            y=[desired_runtime, desired_runtime],
+            mode='lines',
+            line=dict(color='red', dash='dash', width=2),
+            name=f'Desired Runtime ({desired_runtime}s)'
+        ))
+        
     fig.update_layout(
         xaxis=dict(title='Concurrent Tasks Requested'),
         yaxis=dict(title='Throughput (Stations/s)'),
@@ -659,11 +743,21 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
 
     # 4. GPU-specific: VRAM requested vs actual
     if is_gpu_trial and total_req_vram_col in df.columns and actual_vram_col in df.columns:
-        valid_vram = df[[total_req_vram_col, actual_vram_col, 'Effective Concurrency', station_col, cpu_col, task_col, actor_col, runtime_col, 'GPU Count', 'GPUs Used', 'Marker Symbol']].dropna()
+        valid_vram = df[[total_req_vram_col, actual_vram_col, 'Effective Concurrency', station_col, cpu_col, 
+                        task_col, actor_col, runtime_col, 'GPU Count', 'GPUs Used', 'Marker Symbol',
+                        'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                        waveform_proc_time_col, picker_runtime_col]].dropna()
         valid_vram = valid_vram[valid_vram[actual_vram_col] > 0]
         
         if len(valid_vram) > 0:
-            actor_hover = "Number of ModelActor's Created: %{customdata[4]}<br>" if execution_mode == 'modelactor' else ""
+            if execution_mode == 'modelactor':
+                actor_hover = (
+                    "Number of ModelActor's Created: %{customdata[4]}<br>"
+                    "Avg. ModelActor Creation Time (s): %{customdata[7]:.4f}<br>"
+                    "Total Actor Creation Time (s): %{customdata[8]:.2f}<br>"
+                )
+            else:
+                actor_hover = ""
             fig = px.scatter(
                 valid_vram,
                 x=total_req_vram_col,
@@ -685,11 +779,15 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "GPU IDs: %{customdata[3]}<br>"
                     "Concurrent Tasks Requested: %{customdata[5]}<br>"
                     + actor_hover +
-                    "Runtime (s): %{customdata[6]:.2f}<br>"
+                    "Avg. Waveform Processing Time (s): %{customdata[9]:.4f}<br>"
+                    "Total Picking Time (s): %{customdata[10]:.2f}<br>"
+                    "Total Trial Runtime (s): %{customdata[6]:.2f}<br>"
                     "Process Tree VRAM (MB): %{y:.2f}<br>"
                     "<extra></extra>"
                 ),
-                customdata=valid_vram[[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col]].values
+                customdata=valid_vram[[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col,
+                                      'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                                      waveform_proc_time_col, picker_runtime_col]].values
             )
             max_val = max(valid_vram[total_req_vram_col].max(), valid_vram[actual_vram_col].max())
             fig.add_trace(go.Scatter(
@@ -698,6 +796,17 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 line=dict(color='red', dash='dash'),
                 name='Estimated Prediction VRAM Cost'
             ))
+            
+            # Add desired runtime line if provided
+            if desired_runtime is not None:
+                fig.add_trace(go.Scatter(
+                    x=[valid_vram[total_req_vram_col].min(), valid_vram[total_req_vram_col].max()],
+                    y=[desired_runtime, desired_runtime],
+                    mode='lines',
+                    line=dict(color='red', dash='dash', width=2),
+                    name=f'Desired Runtime ({desired_runtime}s)'
+                ))
+                
             fig.update_layout(
                 xaxis=dict(title='Total Requested VRAM (MB)'),
                 yaxis=dict(title='Process Tree VRAM (MB)'),
@@ -755,7 +864,12 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     print(f"Ripper Trials: {len(df_rp)}")
     
     # Column definitions
-    runtime_col = 'Total Run time for Picker (s)'
+    total_trial_time_col = 'Total Trial Time (s)'           # Entire trial
+    picker_runtime_col = 'Total Run time for Picker (s)'    # Pure processing time
+    actor_creation_time_col = 'Actor Creation Time (s)'     # Actor creation (empty for Ripper)
+    avg_model_load_time_col = 'Avg Model Load Time (s)'     # Model load time (Ripper only)
+    waveform_proc_time_col = 'Waveform Processing Time (s)' # Waveform load time
+    runtime_col = picker_runtime_col  # Use picker runtime for 3D comparison plots
     station_col = 'Number of Stations Used'
     actual_ram_col = 'Process Tree RAM (MB)'
     actual_vram_col = 'Process Tree VRAM (MB)'
@@ -768,9 +882,23 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     df_ma['Execution Mode'] = 'ModelActor'
     df_rp['Execution Mode'] = 'Ripper'
     
-    # Calculate throughput
+    # Calculate throughput (using picker runtime - pure processing time)
     df_ma['Throughput (Stations/s)'] = df_ma[station_col] / df_ma[runtime_col]
     df_rp['Throughput (Stations/s)'] = df_rp[station_col] / df_rp[runtime_col]
+    
+    # Convert timing columns to numeric
+    for col in [total_trial_time_col, picker_runtime_col, actor_creation_time_col, 
+                avg_model_load_time_col, waveform_proc_time_col]:
+        if col in df_ma.columns:
+            df_ma[col] = pd.to_numeric(df_ma[col], errors='coerce')
+        if col in df_rp.columns:
+            df_rp[col] = pd.to_numeric(df_rp[col], errors='coerce')
+    
+    # Calculate additional metrics for hover details
+    if actor_creation_time_col in df_ma.columns and actor_col in df_ma.columns:
+        df_ma['Avg. ModelActor Creation Time (s)'] = df_ma[actor_creation_time_col] / df_ma[actor_col].replace(0, np.nan)
+    else:
+        df_ma['Avg. ModelActor Creation Time (s)'] = np.nan
     
     # Prepare hover strings based on trial type
     if not is_gpu:
@@ -780,7 +908,11 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "CPUs: %{x}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Number of ModelActor's Created: %{customdata[3]}<br>"
-            "Runtime (s): %{z:.2f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[5]:.4f}<br>"
+            "Total Actor Creation Time (s): %{customdata[6]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
+            "Total Picking Time (s): %{customdata[8]:.2f}<br>"
+            "Total Trial Runtime (s): %{customdata[9]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
         )
@@ -790,7 +922,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "CPUs: %{x}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Concurrent Tasks Generated: %{customdata[5]}<br>"
-            "Runtime (s): %{z:.2f}<br>"
+            "Avg. Model Load Time (s): %{customdata[6]:.4f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
+            "Total Picking Time (s): %{customdata[4]:.2f}<br>"
+            "Total Trial Runtime (s): %{customdata[8]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
             "<extra></extra>"
         )
@@ -803,7 +938,11 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "GPU IDs: %{customdata[1]}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Number of ModelActor's Created: %{customdata[3]}<br>"
-            "Runtime (s): %{z:.2f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[5]:.4f}<br>"
+            "Total Actor Creation Time (s): %{customdata[6]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
+            "Total Picking Time (s): %{customdata[8]:.2f}<br>"
+            "Total Trial Runtime (s): %{customdata[9]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
         )
@@ -815,7 +954,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "GPU IDs: %{customdata[1]}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Concurrent Tasks Generated: %{customdata[5]}<br>"
-            "Runtime (s): %{z:.2f}<br>"
+            "Avg. Model Load Time (s): %{customdata[6]:.4f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
+            "Total Picking Time (s): %{customdata[4]:.2f}<br>"
+            "Total Trial Runtime (s): %{customdata[8]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
             "<extra></extra>"
         )
@@ -830,6 +972,13 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     else:
         df_rp['Generated Tasks'] = df_rp[task_col]
     df_rp['Generated Label'] = "Concurrent Tasks Generated:"
+
+    # Ensure all timing columns exist in both dataframes for combined analysis
+    all_timing_cols = [total_trial_time_col, picker_runtime_col, actor_creation_time_col, 
+                        avg_model_load_time_col, waveform_proc_time_col, 'Avg. ModelActor Creation Time (s)']
+    for col in all_timing_cols:
+        if col not in df_ma.columns: df_ma[col] = np.nan
+        if col not in df_rp.columns: df_rp[col] = np.nan
 
     # Combine datasets
     df_combined = pd.concat([df_ma, df_rp], ignore_index=True)
@@ -877,7 +1026,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         title=f"[{model_name} - {trial_type}] Runtime vs Workload Size: ModelActor Method vs Ripper Method",
         labels={
             station_col: 'Total Number of Stations to Process',
-            runtime_col: 'Runtime (s)',
+            runtime_col: 'Total Trial Runtime (s)',
             cpu_col: 'CPUs'
         }
     )
@@ -888,12 +1037,31 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "Total Number of Stations to Process: %{x}<br>"
             "Number of Concurrent Station Tasks: %{customdata[1]}<br>"
             "%{customdata[2]} %{customdata[3]}<br>"
-            "Runtime (s): %{y:.2f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[5]:.4f}<br>"
+            "Total Actor Creation Time (s): %{customdata[6]:.2f}<br>"
+            "Avg. Model Load Time (s): %{customdata[10]:.4f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
+            "Total Picking Time (s): %{customdata[8]:.2f}<br>"
+            "Total Trial Runtime (s): %{y:.2f}<br>"
             "Throughput (Total Stations/s): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
         ),
-        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Throughput (Stations/s)']].values
+        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Throughput (Stations/s)',
+                               'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                               waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
+                               avg_model_load_time_col]].values
     )
+    
+    # Add desired runtime line if provided
+    if desired_runtime is not None:
+        fig.add_trace(go.Scatter(
+            x=[df_combined[station_col].min(), df_combined[station_col].max()],
+            y=[desired_runtime, desired_runtime],
+            mode='lines',
+            line=dict(color='red', dash='dash', width=2),
+            name=f'Desired Runtime ({desired_runtime}s)'
+        ))
+        
     fig.update_layout(
         xaxis=dict(dtick=10)
     )
@@ -1034,7 +1202,9 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             name='ModelActor Method',
             showlegend=False, # Removed dot in legend
             hovertemplate=ma_hover,
-            customdata=df_ma[['GPU Count', 'GPUs Used', task_col, actor_col, actual_ram_col]].values
+            customdata=df_ma[['GPU Count', 'GPUs Used', task_col, actor_col, actual_ram_col,
+                             'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                             waveform_proc_time_col, picker_runtime_col, total_trial_time_col]].values
         ),
         row=1, col=1
     )
@@ -1058,7 +1228,9 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             name='Ripper Method',
             showlegend=False, # Removed dot in legend
             hovertemplate=rp_hover,
-            customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col, runtime_col, ripper_task_col]].values
+            customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col, picker_runtime_col,
+                             ripper_task_col, avg_model_load_time_col, waveform_proc_time_col,
+                             total_trial_time_col]].values
         ),
         row=1, col=2
     )
@@ -1089,7 +1261,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             ), row=1, col=1)
 
     fig.update_layout(
-        title=f"[{model_name} - {trial_type}] 3D Runtime Comparison",
+        title=f"[{model_name} - {trial_type}] 3D Picker Runtime Comparison",
         showlegend=True,
         legend=dict(
             x=1.05,
@@ -1102,45 +1274,87 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         scene=dict(
             xaxis=dict(title='CPUs Allocated', dtick=1),
             yaxis=dict(title='Total Number of Stations to Process', dtick=10),
-            zaxis_title='Runtime (s)'
+            zaxis_title='Picker Runtime (s)'
         ),
         scene2=dict(
             xaxis=dict(title='CPUs Allocated', dtick=1),
             yaxis=dict(title='Total Number of Stations to Process', dtick=10),
-            zaxis_title='Runtime (s)'
+            zaxis_title='Picker Runtime (s)'
         )
     )
-    output_file = os.path.join(output_dir, f"comparison_3d_runtime_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_3d_picker_runtime_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
-    # 7. Summary Statistics Table
+    # 7. Summary Statistics Table - including new timing metrics
+    # Helper function to safely format values
+    def safe_format(series, fmt=".2f", default="N/A"):
+        if series.notna().any():
+            return f"{series.mean():{fmt}}"
+        return default
+    
+    def safe_format_min(series, fmt=".2f", default="N/A"):
+        if series.notna().any():
+            return f"{series.min():{fmt}}"
+        return default
+    
+    # Build summary table with comprehensive timing metrics
     summary_data = {
         'Metric': [
+            '--- Throughput Metrics ---',
             'Mean Throughput (st/s)',
             'Median Throughput (st/s)',
             'Max Throughput (st/s)',
-            'Mean Runtime (s)',
-            'Min Runtime (s)',
+            '--- Runtime Metrics ---',
+            'Mean Total Trial Time (s)',
+            'Min Total Trial Time (s)',
+            'Mean Picker Runtime (s)',
+            'Min Picker Runtime (s)',
+            '--- Setup Time Metrics ---',
+            'Mean Actor Creation Time (s)',
+            'Mean Avg Model Load Time (s)',
+            'Mean Waveform Processing Time (s)',
+            '--- Memory Metrics ---',
             'Mean RAM (MB)',
+            '--- Trial Info ---',
             'Trial Count'
         ],
         'ModelActor': [
+            '',
             f"{df_ma['Throughput (Stations/s)'].mean():.2f}",
             f"{df_ma['Throughput (Stations/s)'].median():.2f}",
             f"{df_ma['Throughput (Stations/s)'].max():.2f}",
-            f"{df_ma[runtime_col].mean():.2f}",
-            f"{df_ma[runtime_col].min():.2f}",
+            '',
+            safe_format(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
+            safe_format_min(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
+            safe_format(df_ma[picker_runtime_col]) if picker_runtime_col in df_ma.columns else "N/A",
+            safe_format_min(df_ma[picker_runtime_col]) if picker_runtime_col in df_ma.columns else "N/A",
+            '',
+            safe_format(df_ma[actor_creation_time_col]) if actor_creation_time_col in df_ma.columns else "N/A",
+            safe_format(df_ma[avg_model_load_time_col]) if avg_model_load_time_col in df_ma.columns else "N/A",
+            safe_format(df_ma[waveform_proc_time_col], ".4f") if waveform_proc_time_col in df_ma.columns else "N/A",
+            '',
             f"{df_ma[actual_ram_col].mean():.1f}",
+            '',
             str(len(df_ma))
         ],
         'Ripper': [
+            '',
             f"{df_rp['Throughput (Stations/s)'].mean():.2f}",
             f"{df_rp['Throughput (Stations/s)'].median():.2f}",
             f"{df_rp['Throughput (Stations/s)'].max():.2f}",
-            f"{df_rp[runtime_col].mean():.2f}",
-            f"{df_rp[runtime_col].min():.2f}",
+            '',
+            safe_format(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
+            safe_format_min(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
+            safe_format(df_rp[picker_runtime_col]) if picker_runtime_col in df_rp.columns else "N/A",
+            safe_format_min(df_rp[picker_runtime_col]) if picker_runtime_col in df_rp.columns else "N/A",
+            '',
+            "N/A (no actors)",  # Ripper mode doesn't create actors
+            safe_format(df_rp[avg_model_load_time_col]) if avg_model_load_time_col in df_rp.columns else "N/A",
+            safe_format(df_rp[waveform_proc_time_col], ".4f") if waveform_proc_time_col in df_rp.columns else "N/A",
+            '',
             f"{df_rp[actual_ram_col].mean():.1f}",
+            '',
             str(len(df_rp))
         ]
     }
