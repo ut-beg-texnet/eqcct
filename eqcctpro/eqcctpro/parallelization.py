@@ -875,6 +875,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
         tf_environ(gpu_id=-1, intra_threads=intra_threads, inter_threads=inter_threads, logger=logger, skip_tf=skip_tf)
         # tf_environ(gpu_id=1, gpu_memory_limit_mb=gpu_memory_limit_mb, gpus_to_use=gpu_id, intra_threads=intra_threads, inter_threads=inter_threads)
 
+    # ===== TIMING: Start tracking total trial time =====
+    trial_start_time = time.time()
 
     args = {
     "input_dir": input_dir,
@@ -949,6 +951,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # for OOM prevention between trials.
     # =====================================================================
     if ripper:
+        # ===== TIMING: Ripper mode has no actor creation, just setup time =====
+        setup_start_time = time.time()
+        
         logger.info(f"===== RIPPER MODE ENABLED =====")
         logger.info(f"Using old task-based approach (model loaded per task)")
         logger.info(f"This allows more flexible GPU memory sharing but has model loading overhead.")
@@ -1077,6 +1082,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
         
         # Submit tasks to ray in a queue (old methodology)
         tasks_queue = []
+        
+        # ===== TIMING: End of setup, start of processing =====
+        setup_end_time = time.time()
+        setup_time_seconds = setup_end_time - setup_start_time
+        logger.info(f"Ripper mode setup completed in {setup_time_seconds:.2f} seconds")
+        
         logger.info(f"Starting EQCCTPro parallelized waveform processing (RIPPER MODE)...") 
         logger.info("")
         start_time = time.time() 
@@ -1097,6 +1108,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
         logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
         logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
 
+        # ===== TIMING: Collect model and waveform load times for averaging =====
+        model_load_times = []
+        waveform_load_times = []
+        
         # Concurrent Prediction(s) Parallel Processing - RIPPER MODE
         try: 
             for i in range(len(tasks_predictor)):
@@ -1132,18 +1147,44 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     else:
                         tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                         for finished_task in tasks_finished:
-                            log_entry = ray.get(finished_task)
+                            result = ray.get(finished_task)
+                            log_entry, ml_time, wf_time = result  # Unpack tuple: (log_message, model_load_time, waveform_load_time)
                             logger.info(f'{log_entry}')
+                            if ml_time is not None:
+                                model_load_times.append(ml_time)
+                            if wf_time is not None:
+                                waveform_load_times.append(wf_time)
 
             # After adding all the tasks to queue, process what's left
             while tasks_queue:
                 tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                 for finished_task in tasks_finished:
-                    log_entry = ray.get(finished_task)
+                    result = ray.get(finished_task)
+                    log_entry, ml_time, wf_time = result  # Unpack tuple: (log_message, model_load_time, waveform_load_time)
                     logger.info(f'{log_entry}')
+                    if ml_time is not None:
+                        model_load_times.append(ml_time)
+                    if wf_time is not None:
+                        waveform_load_times.append(wf_time)
             logger.info("")
+            
+            # Calculate average model load time
+            if model_load_times:
+                avg_model_load_time = sum(model_load_times) / len(model_load_times)
+                logger.info(f"Average model load time (per task): {avg_model_load_time:.3f}s (across {len(model_load_times)} tasks)")
+            else:
+                avg_model_load_time = 0.0
+            
+            # Calculate average waveform load time
+            if waveform_load_times:
+                avg_waveform_load_time = sum(waveform_load_times) / len(waveform_load_times)
+                logger.info(f"Average waveform load time (per task): {avg_waveform_load_time:.3f}s (across {len(waveform_load_times)} tasks)")
+            else:
+                avg_waveform_load_time = 0.0
 
         except Exception as e:
+            avg_model_load_time = 0.0  # Default if error occurs before collecting any times
+            avg_waveform_load_time = 0.0
             logger.error(f"ERROR in parallel processing (RIPPER MODE) at {datetime.now()}")
             logger.error(f"Error: {str(e)}")
             logger.error(traceback.format_exc())
@@ -1165,6 +1206,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
             else:
                 model_used = "eqcct"
             
+            # Calculate timing metrics for ripper mode
+            total_trial_time_seconds = end_time - trial_start_time
+            waveform_processing_time_seconds = end_time - start_time
+            
             trial_data = {
                 "Trial Number": None,
                 "Stations Used": str(station_list),
@@ -1181,7 +1226,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 "N ModelActors": 0,  # RIPPER mode doesn't use ModelActors
                 "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
                 "Actual Ripper Concurrent Tasks": int(max_pending_tasks),  # Actual concurrent tasks after VRAM/RAM limiting
-                "Total Run time for Picker (s)": round(end_time - start_time, 6),
+                # ===== TIMING METRICS =====
+                "Total Trial Time (s)": round(total_trial_time_seconds, 6),  # Entire trial: setup + processing
+                "Actor Creation Time (s)": "",  # N/A for RIPPER mode (no actors created)
+                "Avg Model Load Time (s)": round(avg_model_load_time, 6),  # RIPPER: average time to load model per task
+                "Waveform Processing Time (s)": round(avg_waveform_load_time, 6),  # Average time to load waveforms into memory per task
+                "Total Run time for Picker (s)": round(waveform_processing_time_seconds, 6),  # Total time for all task processing
                 "Model Used": model_used,
                 "Trial Success": "",
                 "Error Message": str(""),
@@ -1195,6 +1245,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # =====================================================================
     # STANDARD MODE: Use ModelActor pool (new methodology)
     # =====================================================================
+    
+    # ===== TIMING: Start tracking actor creation time =====
+    actor_creation_start_time = time.time()
     
     # CREATE MODEL ACTOR(S) - Add this before the task loop
     logger.info(f"Creating model actor(s)...") 
@@ -1554,6 +1607,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
             if len(model_actors) < requested_actors:
                 actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
 
+    # ===== TIMING: End of actor creation =====
+    actor_creation_end_time = time.time()
+    actor_creation_time_seconds = actor_creation_end_time - actor_creation_start_time
+    logger.info(f"Actor creation completed in {actor_creation_time_seconds:.2f} seconds")
+
     # Submit tasks to ray in a queue
     tasks_queue = []
     max_pending_tasks = number_of_concurrent_station_predictions
@@ -1579,6 +1637,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
     logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
     logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
 
+    # ===== TIMING: Collect waveform load times for averaging =====
+    waveform_load_times = []
 
     # Concurrent Prediction(s) Parallel Processing
     try: 
@@ -1611,18 +1671,32 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 else:
                     tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                     for finished_task in tasks_finished:
-                        log_entry = ray.get(finished_task)
+                        result = ray.get(finished_task)
+                        log_entry, load_time = result  # Unpack tuple: (log_message, waveform_load_time)
                         logger.info(f'{log_entry}')
+                        if load_time is not None:
+                            waveform_load_times.append(load_time)
 
         # After adding all the tasks to queue, process what's left
         while tasks_queue:
             tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
             for finished_task in tasks_finished:
-                log_entry = ray.get(finished_task)
+                result = ray.get(finished_task)
+                log_entry, load_time = result  # Unpack tuple: (log_message, waveform_load_time)
                 logger.info(f'{log_entry}')
+                if load_time is not None:
+                    waveform_load_times.append(load_time)
         logger.info("")
+        
+        # Calculate average waveform load time
+        if waveform_load_times:
+            avg_waveform_load_time = sum(waveform_load_times) / len(waveform_load_times)
+            logger.info(f"Average waveform load time (per task): {avg_waveform_load_time:.3f}s (across {len(waveform_load_times)} tasks)")
+        else:
+            avg_waveform_load_time = 0.0
 
     except Exception as e:
+        avg_waveform_load_time = 0.0  # Default if error occurs before collecting any times
         # Catch any error in the parallel processing
         logger.error(f"ERROR in parallel processing at {datetime.now()}")
         logger.error(f"Error: {str(e)}")
@@ -1654,6 +1728,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # This may be less than number_of_concurrent_station_predictions due to optimal capping
         actual_actors = len(model_actors) if model_actors else 1
         
+        # Calculate timing metrics
+        total_trial_time_seconds = end_time - trial_start_time
+        waveform_processing_time_seconds = end_time - start_time
+        
         trial_data = {
             "Trial Number": None,  # Will be auto-filled by append_trial_row
             "Stations Used": str(station_list),
@@ -1669,7 +1747,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
             "Length of Timechunk (min)": timechunk_length_min if timechunk_length_min is not None else "",
             "N ModelActors": actual_actors,  # Actual actors created (capped to hardware/memory)
             "Number of Concurrent Station Tasks": int(number_of_concurrent_station_predictions) if number_of_concurrent_station_predictions is not None else "",
-            "Total Run time for Picker (s)": round(end_time - start_time, 6),
+            # ===== TIMING METRICS =====
+            "Total Trial Time (s)": round(total_trial_time_seconds, 6),  # Entire trial: setup + actor creation + processing
+            "Actor Creation Time (s)": round(actor_creation_time_seconds, 6),  # Time to spin up ModelActors
+            "Avg Model Load Time (s)": "",  # N/A for ModelActor mode (models loaded once in actor, not per-task)
+            "Waveform Processing Time (s)": round(avg_waveform_load_time, 6),  # Average time to load waveforms into memory per task
+            "Total Run time for Picker (s)": round(waveform_processing_time_seconds, 6),  # Total time for all task processing
             "Model Used": model_used,
             "Trial Success": "",
             "Error Message": str(""),
@@ -1873,14 +1956,17 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     
     if not files_list:
         csvPr_gen.close()
-        return f"{pos} {station}: FAILED - No mSEED files found."
+        return (f"{pos} {station}: FAILED - No mSEED files found.", None)
     
+    # ===== TIMING: Track waveform loading time =====
+    waveform_load_start = time.time()
     try:
         # Use SeisBench preprocessing
         stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
     except Exception as e:
         csvPr_gen.close()
-        return f"{pos} {station}: FAILED reading mSEED: {str(e)}"
+        return (f"{pos} {station}: FAILED reading mSEED: {str(e)}", None)
+    waveform_load_time = time.time() - waveform_load_start
 
     try:
         # Get picks from SeisBench model
@@ -1992,12 +2078,15 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         
         end_Predicting = time.time()
         delta = (end_Predicting - start_Predicting)
-        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
+        # Return tuple: (log_message, waveform_load_time) for timing analysis
+        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", waveform_load_time)
 
     except Exception as exp:
         if 'csvPr_gen' in locals():
             csvPr_gen.close()
-        return f"{pos} {station}: FAILED the prediction. {exp}"
+        # Return tuple with waveform_load_time if available
+        load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+        return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
 
 
 @ray.remote
@@ -2069,10 +2158,13 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     start_Predicting = time.time()
     files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
     
+    # ===== TIMING: Track waveform loading time =====
+    waveform_load_start = time.time()
     try:
         meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
     except Exception:
-        return f"{pos} {station}: FAILED reading mSEED."
+        return (f"{pos} {station}: FAILED reading mSEED.", None)
+    waveform_load_time = time.time() - waveform_load_start
 
     try:
         params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
@@ -2096,10 +2188,13 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                                         
         end_Predicting = time.time()
         delta = (end_Predicting - start_Predicting)
-        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"
+        # Return tuple: (log_message, waveform_load_time) for timing analysis
+        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", waveform_load_time)
 
     except Exception as exp:
-        return f"{pos} {station}: FAILED the prediction. {exp}"
+        # Return tuple with waveform_load_time if available
+        load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+        return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
 
 
 # =====================================================================
@@ -2173,7 +2268,10 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     pos, station, out_dir, args = predict_args
     
     # RIPPER MODE: Load the model inside this task (old approach)
+    # ===== TIMING: Track model load time for ripper mode analysis =====
+    model_load_start = time.time()
     model = load_eqcct_model(args["p_model"], args["s_model"])
+    model_load_time = time.time() - model_load_start
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
@@ -2203,10 +2301,13 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     start_Predicting = time.time()
     files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
     
+    # ===== TIMING: Track waveform loading time =====
+    waveform_load_start = time.time()
     try:
         meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
     except Exception:
-        return f"{pos} {station}: FAILED reading mSEED."
+        return (f"{pos} {station}: FAILED reading mSEED.", model_load_time, None)
+    waveform_load_time = time.time() - waveform_load_start
 
     try:
         params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
@@ -2237,10 +2338,13 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
         except Exception:
             pass
         
-        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"
+        # Return tuple: (log_message, model_load_time, waveform_load_time) for timing analysis
+        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", model_load_time, waveform_load_time)
 
     except Exception as exp:
-        return f"{pos} {station}: FAILED the prediction. {exp}"
+        # Return tuple with available times
+        wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+        return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
 
 
 @ray.remote
@@ -2274,6 +2378,9 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     
     device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
     
+    # ===== TIMING: Track model load time for ripper mode analysis =====
+    model_load_start = time.time()
+    
     # Create and load the model
     model_wrapper = SeisBenchModels(parent_model_name, child_model_name)
     model_wrapper.load_model()
@@ -2285,6 +2392,8 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                 model_wrapper.model.to(device)
         except Exception:
             pass
+    
+    model_load_time = time.time() - model_load_start
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
@@ -2314,15 +2423,22 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     start_Predicting = time.time()
     files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
     
+    # ===== TIMING: Track waveform loading time =====
+    waveform_load_start = time.time()
     try:
         # Use mseed2stream_3c for SeisBench preprocessing - returns (stream, freqmin, freqmax)
         result = mseed2stream_3c(args, files_list, station)
         if result is None:
             csvPr_gen.close()
-            return f"{pos} {station}: FAILED reading mSEED (no valid 3C stream)."
+            return (f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).", model_load_time, None)
         
         stream, freqmin, freqmax = result
-        
+    except Exception as e:
+        csvPr_gen.close()
+        return (f"{pos} {station}: FAILED reading mSEED: {str(e)}", model_load_time, None)
+    waveform_load_time = time.time() - waveform_load_start
+    
+    try:
         # Run SeisBench model prediction using the model wrapper's classify method
         # IMPORTANT: strict=False and flexible_horizontal_components=True are needed
         # to handle streams that don't perfectly match expected channel names
@@ -2367,9 +2483,13 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         if gpu and torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        return f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
+        # Return tuple: (log_message, model_load_time, waveform_load_time) for timing analysis
+        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", model_load_time, waveform_load_time)
 
     except Exception as exp:
         if 'csvPr_gen' in locals():
             csvPr_gen.close()
-        return f"{pos} {station}: FAILED the prediction. {exp}"
+        # Return tuple with available times
+        ml_time = model_load_time if 'model_load_time' in locals() else None
+        wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+        return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time)

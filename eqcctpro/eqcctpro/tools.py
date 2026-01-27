@@ -64,8 +64,13 @@ CANONICAL_CSV_HEADER = [
     "RAM Overhead (MB)",              # Process Tree RAM - Total Requested RAM
     "VRAM Utilization (%)",           # (Actual / Requested) × 100
     "RAM Utilization (%)",            # (Actual / Requested) × 100
-    # ===== PERFORMANCE =====
-    "Total Run time for Picker (s)",
+    # ===== TIMING METRICS =====
+    "Total Trial Time (s)",               # Entire trial: setup + actor creation + processing
+    "Actor Creation Time (s)",            # Time to spin up ModelActors (empty for Ripper mode)
+    "Avg Model Load Time (s)",            # Average model load time per task (Ripper mode only)
+    "Waveform Processing Time (s)",       # Average time to load waveforms into memory per task
+    # ===== PERFORMANCE (Legacy) =====
+    "Total Run time for Picker (s)",      # Total time for all task processing
     "Intra-parallelism Threads",
     "Inter-parallelism Threads",
     "Inference Actor Memory Limit (MB)",  # Legacy/compatibility

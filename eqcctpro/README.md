@@ -245,7 +245,7 @@ Before running large-scale production jobs, use `EvaluateSystem` to benchmark yo
 ### **Key Benchmark Optimizations**
 - **20% Step Size**: Automatically tests station concurrency at 20%, 40%, 60%, 80%, and 100% levels.
 - **Redundancy Filtering**: Skips configurations that are already in the results CSV, allowing for interrupted evaluations to resume instantly.
-- **Optimal Actor Pool Architecture**: Deep learning frameworks (TensorFlow/PyTorch) cannot share GPU memory between processes. EQCCTPro creates exactly 1 ModelActor per GPU (or 1 per CPU), with tasks distributed via round-robin. This achieves parallelism without memory conflicts.
+- **Memory-Aware Dynamic Actor Pool**: EQCCTPro automatically calculates how many model instances can safely fit on each GPU based on the specific model's VRAM requirements and the available hardware memory. It utilizes Ray's fractional GPU allocation to stack multiple actors on a single GPU when possible, maximizing throughput while preventing memory conflicts.
 - **Automatic Ray Restart for OOM Prevention**: When increasing concurrency between trials, actors from previous trials may remain in GPU/RAM. If spawning new actors alongside existing ones would exceed the user-defined VRAM/RAM capacity (`max_vram_mb` / `ram_safety_cap`), Ray is automatically restarted to clear memory before the trial runs. This prevents unexpected OOM crashes during benchmark progression.
 
 ### **Optimal Actor Pool Architecture (Technical Details)**
@@ -254,24 +254,23 @@ EQCCTPro uses a hardware-aware actor pool design for maximum efficiency:
 
 | Mode | Actor Creation | Concurrency Method |
 |------|----------------|-------------------|
-| **GPU** | 1 ModelActor per physical GPU | Task queue with round-robin |
-| **CPU** | 1 ModelActor per physical CPU | Task queue with round-robin |
+| **GPU** | Multiple ModelActors per physical GPU (VRAM dependent) | Task queue with round-robin |
+| **CPU** | 1 ModelActor per physical CPU core (RAM dependent) | Task queue with round-robin |
 
 **Why not create N actors for N concurrent tasks?**
-- **GPU**: TensorFlow/PyTorch allocate GPU memory based on their own configs, not Ray's fractional GPU hints. Multiple actors on the same GPU cause OOM.
-- **CPU**: Each actor loads a full model copy into RAM. More actors than CPUs wastes memory and causes thrashing.
+- **GPU**: Deep learning frameworks (TensorFlow/PyTorch) allocate GPU memory based on their internal runtimes. EQCCTPro calculates a `MIN_FRACTIONAL_GPU` value dynamically for each model (e.g., PhaseNet needs ~1.6% of a 93GB GPU, while EQCCT needs ~3%). By accurately matching the actor count to available VRAM, we achieve maximum parallelism without OOM.
+- **CPU**: Each actor loads a full model copy into RAM. EQCCTPro caps the actor count based on available system RAM and a safety buffer to prevent thrashing and system instability.
 
 **How concurrency works:**
 ```
-Example: 2 GPUs, 50 stations to process
-- 2 ModelActors created (1 per GPU)
-- 50 tasks submitted to queue
-- Tasks round-robin distributed: Actor 0 gets tasks 0,2,4,...; Actor 1 gets tasks 1,3,5,...
-- Both actors process in parallel, each handling 25 tasks sequentially
-- Result: 2x parallelism without memory conflicts
+Example: 1 GPU (93GB), PhaseNet model (~1.5GB VRAM), 60 stations to process
+- EQCCTPro calculates that ~57 actors can fit on the GPU (95% headroom / 1.6% per actor)
+- 60 tasks submitted to queue
+- Tasks are distributed across the 57 actors
+- Result: High degree of parallelism (~57x) on a single GPU
 ```
 
-The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to memory limits). When these differ, the `Comments` column explains the constraint (e.g., "Requested 10 actors, created 2 (VRAM limited to 8000 MB, 2756 MB/actor)").
+The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to hardware and memory limits). When these differ, the `Comments` column explains the constraint (e.g., "Requested 100 actors, created 57 (VRAM limited to 93100 MB, 1524 MB/actor)").
 
 ---
 
@@ -306,6 +305,7 @@ runner = RunEQCCTPro(
 | **GPU Scheduling** | 1 actor per physical GPU, round-robin tasks | Multiple tasks can share GPU memory dynamically |
 | **Overhead** | Lower (no repeated model loading) | Higher (model loaded per task) |
 | **VRAM Flexibility** | Fixed actor pool, constrained by `MIN_FRACTIONAL_GPU` | More dynamic memory sharing |
+| **Timing Pattern** | High upfront `Actor Creation Time`, then fast processing | Zero actor creation, but consistent `Avg Model Load Time` per task |
 | **Best For** | Production workloads, consistent throughput | Experimentation, memory-constrained environments |
 
 #### **When to Use Ripper Mode**
@@ -599,7 +599,15 @@ The overhead typically consists of:
         - In **Ripper mode**, this equals either `Actual Ripper Concurrent Tasks` (if available) or `Number of Concurrent Station Tasks` (the number of simultaneous tasks requested).
 - **`VRAM Utilization (%)`**: How much VRAM is actually being used relative to what was requested (`Process Tree VRAM / Total Requested VRAM × 100`). Values **>100%** indicate overhead exceeds buffer allocations; values **<100%** indicate underutilization or efficient memory sharing.
 - **`RAM Utilization (%)`**: How much RAM is actually being used relative to what was requested (`Process Tree RAM / Total Requested RAM × 100`). Similar interpretation to VRAM utilization.
-- **`Total Run time for Picker (s)`**: The wall-clock time taken to complete the workload.
+- **`Total Trial Time (s)`**: The absolute wall-clock duration of the entire trial, from the very start of the `run_eqcctpro` call to its completion. This includes setup, ModelActor creation (if applicable), and all waveform processing.
+- **`Actor Creation Time (s)`**: 
+    - In **ModelActor mode**: The time taken to spin up persistent Ray actors and load their models into memory.
+    - In **Ripper mode**: This field is empty (N/A).
+- **`Avg Model Load Time (s)`**: 
+    - In **ModelActor mode**: This field is empty (N/A).
+    - In **Ripper mode**: The average time taken to load the model into memory *per station task*. Since models are loaded/unloaded for every station in Ripper mode, this represents the recurring overhead.
+- **`Waveform Processing Time (s)`**: The average time to load waveforms (mSEED files) into memory per station task. This measures the `_mseed2nparray` (EQCCT) or `mseed2stream_3c` (SeisBench) call duration.
+- **`Total Run time for Picker (s)`**: The total wall-clock time for all station task processing (task submission, waveform loading, and inference combined).
 - **`Intra-parallelism Threads`**: Number of threads TensorFlow uses for individual operations.
 - **`Inter-parallelism Threads`**: Number of threads TensorFlow uses for independent operations in parallel.
 - **`Inference Actor Memory Limit (MB)`**: Legacy VRAM ceiling per shared inference actor.
