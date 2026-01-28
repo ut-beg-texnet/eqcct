@@ -284,9 +284,16 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     plot_configs = [
         {
             'z_col': runtime_col, 
-            'title': 'Runtime vs Resources', 
-            'z_label': 'Runtime (s)', 
+            'title': 'Total Trial Runtime vs Resources', 
+            'z_label': 'Total Trial Runtime (s)', 
             'file_name': 'runtime_3d',
+            'show_threshold': True
+        },
+        {
+            'z_col': picker_runtime_col, 
+            'title': 'Total Waveform Picking Time vs Resources', 
+            'z_label': 'Total Waveform Picking Time (s)', 
+            'file_name': 'picking_time_3d',
             'show_threshold': True
         },
         {
@@ -379,7 +386,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             if execution_mode == 'modelactor':
                 actor_hover = (
                     "Number of ModelActor's Created: %{customdata[3]}<br>"
-                    "Avg. ModelActor Creation Time (s): %{customdata[6]:.4f}<br>"
+                    "Avg. ModelActor Creation Time (s): %{customdata[6]:.2f}<br>"
                     "Total Actor Creation Time (s): %{customdata[7]:.2f}<br>"
                 )
             else:
@@ -445,8 +452,8 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "GPU IDs: %{customdata[1]}<br>"
                     "Concurrent Tasks Requested: %{customdata[2]}<br>"
                     + actor_hover +
-                    "Avg. Waveform Processing Time (s): %{customdata[8]:.4f}<br>"
-                    "Total Picking Time (s): %{customdata[9]:.2f}<br>"
+                    "Avg. Waveform Processing Time (s): %{customdata[8]:.2f}<br>"
+                    "Total Waveform Picking Time (s): %{customdata[9]:.2f}<br>"
                     "Total Trial Runtime (s): %{customdata[4]:.2f}<br>"
                     "Process Tree RAM (MB): %{customdata[5]:.2f}<br>"
                     "<extra></extra>"
@@ -486,7 +493,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     xanchor='center'
                 ),
                 scene=dict(
-                    xaxis=dict(title='CPUs Allocated', range=x_range, dtick=cpu_step),
+                    xaxis=dict(title='CPUs Allocated', range=x_range, dtick=1),
                     yaxis=dict(title='Total Number of Stations to Process', range=y_range, dtick=10),
                     zaxis=dict(title=config['z_label'], dtick=z_dtick),
                     aspectmode='manual',
@@ -528,7 +535,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     if execution_mode == 'modelactor':
         actor_hover = (
             "Number of ModelActor's Created: %{customdata[3]}<br>"
-            "Avg. ModelActor Creation Time (s): %{customdata[6]:.4f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[6]:.2f}<br>"
             "Total Actor Creation Time (s): %{customdata[7]:.2f}<br>"
         )
     else:
@@ -555,8 +562,8 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             "GPU IDs: %{customdata[2]}<br>"
             "Concurrent Tasks Requested: %{customdata[4]}<br>"
             + actor_hover +
-            "Avg. Waveform Processing Time (s): %{customdata[8]:.4f}<br>"
-            "Total Picking Time (s): %{customdata[9]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[8]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{customdata[9]:.2f}<br>"
             "Total Trial Runtime (s): %{y:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[5]:.2f}<br>"
             "<extra></extra>"
@@ -602,7 +609,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             if execution_mode == 'modelactor':
                 actor_hover = (
                     "Number of ModelActor's Created: %{customdata[4]}<br>"
-                    "Avg. ModelActor Creation Time (s): %{customdata[7]:.4f}<br>"
+                    "Avg. ModelActor Creation Time (s): %{customdata[7]:.2f}<br>"
                     "Total Actor Creation Time (s): %{customdata[8]:.2f}<br>"
                 )
             else:
@@ -628,8 +635,8 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "GPU IDs: %{customdata[3]}<br>"
                     "Concurrent Tasks Requested: %{customdata[5]}<br>"
                     + actor_hover +
-                    "Avg. Waveform Processing Time (s): %{customdata[9]:.4f}<br>"
-                    "Total Picking Time (s): %{customdata[10]:.2f}<br>"
+                    "Avg. Waveform Processing Time (s): %{customdata[9]:.2f}<br>"
+                    "Total Waveform Picking Time (s): %{customdata[10]:.2f}<br>"
                     "Total Trial Runtime (s): %{customdata[6]:.2f}<br>"
                     "Process Tree RAM (MB): %{y:.2f}<br>"
                     "<extra></extra>"
@@ -677,7 +684,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     if execution_mode == 'modelactor':
         actor_hover = (
             "Number of ModelActor's Created: %{customdata[4]}<br>"
-            "Avg. ModelActor Creation Time (s): %{customdata[7]:.4f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[7]:.2f}<br>"
             "Total Actor Creation Time (s): %{customdata[8]:.2f}<br>"
         )
     else:
@@ -704,8 +711,8 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             "GPU IDs: %{customdata[2]}<br>"
             "Concurrent Tasks Requested: %{x}<br>"
             + actor_hover +
-            "Avg. Waveform Processing Time (s): %{customdata[9]:.4f}<br>"
-            "Total Picking Time (s): %{customdata[10]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[9]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{customdata[10]:.2f}<br>"
             "Total Trial Runtime (s): %{customdata[5]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[6]:.2f}<br>"
             "Throughput (Stations/s): %{y:.3f}<br>"
@@ -753,7 +760,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             if execution_mode == 'modelactor':
                 actor_hover = (
                     "Number of ModelActor's Created: %{customdata[4]}<br>"
-                    "Avg. ModelActor Creation Time (s): %{customdata[7]:.4f}<br>"
+                    "Avg. ModelActor Creation Time (s): %{customdata[7]:.2f}<br>"
                     "Total Actor Creation Time (s): %{customdata[8]:.2f}<br>"
                 )
             else:
@@ -779,8 +786,8 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "GPU IDs: %{customdata[3]}<br>"
                     "Concurrent Tasks Requested: %{customdata[5]}<br>"
                     + actor_hover +
-                    "Avg. Waveform Processing Time (s): %{customdata[9]:.4f}<br>"
-                    "Total Picking Time (s): %{customdata[10]:.2f}<br>"
+                    "Avg. Waveform Processing Time (s): %{customdata[9]:.2f}<br>"
+                    "Total Waveform Picking Time (s): %{customdata[10]:.2f}<br>"
                     "Total Trial Runtime (s): %{customdata[6]:.2f}<br>"
                     "Process Tree VRAM (MB): %{y:.2f}<br>"
                     "<extra></extra>"
@@ -825,7 +832,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     print(f"\nVisualization complete! All files saved to: {output_dir}")
 
 
-def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visualizations"):
+def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visualizations", desired_runtime=None):
     """
     Create comparative visualizations between ModelActor and Ripper execution modes.
     """
@@ -869,7 +876,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     actor_creation_time_col = 'Actor Creation Time (s)'     # Actor creation (empty for Ripper)
     avg_model_load_time_col = 'Avg Model Load Time (s)'     # Model load time (Ripper only)
     waveform_proc_time_col = 'Waveform Processing Time (s)' # Waveform load time
-    runtime_col = picker_runtime_col  # Use picker runtime for 3D comparison plots
+    runtime_col = total_trial_time_col  # Use total trial time for runtime comparison plots
     station_col = 'Number of Stations Used'
     actual_ram_col = 'Process Tree RAM (MB)'
     actual_vram_col = 'Process Tree VRAM (MB)'
@@ -908,10 +915,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "CPUs: %{x}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Number of ModelActor's Created: %{customdata[3]}<br>"
-            "Avg. ModelActor Creation Time (s): %{customdata[5]:.4f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[5]:.2f}<br>"
             "Total Actor Creation Time (s): %{customdata[6]:.2f}<br>"
-            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
-            "Total Picking Time (s): %{customdata[8]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{customdata[8]:.2f}<br>"
             "Total Trial Runtime (s): %{customdata[9]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
@@ -922,9 +929,9 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "CPUs: %{x}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Concurrent Tasks Generated: %{customdata[5]}<br>"
-            "Avg. Model Load Time (s): %{customdata[6]:.4f}<br>"
-            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
-            "Total Picking Time (s): %{customdata[4]:.2f}<br>"
+            "Avg. Model Load Time (s): %{customdata[6]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{customdata[4]:.2f}<br>"
             "Total Trial Runtime (s): %{customdata[8]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
             "<extra></extra>"
@@ -938,10 +945,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "GPU IDs: %{customdata[1]}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Number of ModelActor's Created: %{customdata[3]}<br>"
-            "Avg. ModelActor Creation Time (s): %{customdata[5]:.4f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[5]:.2f}<br>"
             "Total Actor Creation Time (s): %{customdata[6]:.2f}<br>"
-            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
-            "Total Picking Time (s): %{customdata[8]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{customdata[8]:.2f}<br>"
             "Total Trial Runtime (s): %{customdata[9]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
@@ -954,9 +961,9 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "GPU IDs: %{customdata[1]}<br>"
             "Concurrent Tasks Requested: %{customdata[2]}<br>"
             "Concurrent Tasks Generated: %{customdata[5]}<br>"
-            "Avg. Model Load Time (s): %{customdata[6]:.4f}<br>"
-            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
-            "Total Picking Time (s): %{customdata[4]:.2f}<br>"
+            "Avg. Model Load Time (s): %{customdata[6]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{customdata[4]:.2f}<br>"
             "Total Trial Runtime (s): %{customdata[8]:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[3]:.2f}<br>"
             "<extra></extra>"
@@ -1037,11 +1044,11 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "Total Number of Stations to Process: %{x}<br>"
             "Number of Concurrent Station Tasks: %{customdata[1]}<br>"
             "%{customdata[2]} %{customdata[3]}<br>"
-            "Avg. ModelActor Creation Time (s): %{customdata[5]:.4f}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[5]:.2f}<br>"
             "Total Actor Creation Time (s): %{customdata[6]:.2f}<br>"
-            "Avg. Model Load Time (s): %{customdata[10]:.4f}<br>"
-            "Avg. Waveform Processing Time (s): %{customdata[7]:.4f}<br>"
-            "Total Picking Time (s): %{customdata[8]:.2f}<br>"
+            "Avg. Model Load Time (s): %{customdata[10]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{customdata[8]:.2f}<br>"
             "Total Trial Runtime (s): %{y:.2f}<br>"
             "Throughput (Total Stations/s): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
@@ -1066,6 +1073,59 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         xaxis=dict(dtick=10)
     )
     output_file = os.path.join(output_dir, f"comparison_runtime_vs_stations_{model_name}_{trial_type.lower()}.html")
+    fig.write_html(output_file)
+    print(f"Saved: {output_file}")
+
+    # 2b. Picking Time vs Stations Comparison
+    fig = px.scatter(
+        df_combined,
+        x=station_col,
+        y=picker_runtime_col,
+        color='Execution Mode',
+        size=picker_runtime_col,
+        title=f"[{model_name} - {trial_type}] Picking Time vs Workload Size: ModelActor Method vs Ripper Method",
+        labels={
+            station_col: 'Total Number of Stations to Process',
+            picker_runtime_col: 'Total Waveform Picking Time (s)',
+            cpu_col: 'CPUs'
+        }
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>Trial Details</b><br>"
+            "Execution Mode: %{customdata[0]}<br>"
+            "Total Number of Stations to Process: %{x}<br>"
+            "Number of Concurrent Station Tasks: %{customdata[1]}<br>"
+            "%{customdata[2]} %{customdata[3]}<br>"
+            "Avg. ModelActor Creation Time (s): %{customdata[5]:.2f}<br>"
+            "Total Actor Creation Time (s): %{customdata[6]:.2f}<br>"
+            "Avg. Model Load Time (s): %{customdata[10]:.2f}<br>"
+            "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
+            "Total Waveform Picking Time (s): %{y:.2f}<br>"
+            "Total Trial Runtime (s): %{customdata[9]:.2f}<br>"
+            "Throughput (Total Stations/s): %{customdata[4]:.2f}<br>"
+            "<extra></extra>"
+        ),
+        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Throughput (Stations/s)',
+                               'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                               waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
+                               avg_model_load_time_col]].values
+    )
+
+    # Add desired runtime line if provided
+    if desired_runtime is not None:
+        fig.add_trace(go.Scatter(
+            x=[df_combined[station_col].min(), df_combined[station_col].max()],
+            y=[desired_runtime, desired_runtime],
+            mode='lines',
+            line=dict(color='red', dash='dash', width=2),
+            name=f'Desired Runtime ({desired_runtime}s)'
+        ))
+
+    fig.update_layout(
+        xaxis=dict(dtick=10)
+    )
+    output_file = os.path.join(output_dir, f"comparison_picking_time_vs_stations_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1151,7 +1211,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     df_ma['Marker Symbol'] = df_ma['GPU Count'].apply(lambda x: symbol_map_dict.get(int(x), 'circle'))
     df_rp['Marker Symbol'] = df_rp['GPU Count'].apply(lambda x: symbol_map_dict.get(int(x), 'circle'))
     
-    # 6. 3D Comparison: Runtime vs CPUs vs Tasks
+    # 6. 3D Comparison: Total Trial Runtime vs CPUs vs Stations
     fig = make_subplots(
         rows=1, cols=2,
         specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
@@ -1176,7 +1236,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         go.Scatter3d(
             x=df_ma[cpu_col],
             y=df_ma[station_col],
-            z=df_ma[runtime_col],
+            z=df_ma[total_trial_time_col],
             mode='markers',
             marker=dict(
                 size=5,
@@ -1197,10 +1257,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
                 cmax=conc_max,
                 opacity=0.8,
                 symbol=df_ma['Marker Symbol'],
-                line=dict(width=0) # Removed outline
+                line=dict(width=0)
             ),
             name='ModelActor Method',
-            showlegend=False, # Removed dot in legend
+            showlegend=False,
             hovertemplate=ma_hover,
             customdata=df_ma[['GPU Count', 'GPUs Used', task_col, actor_col, actual_ram_col,
                              'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
@@ -1213,7 +1273,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         go.Scatter3d(
             x=df_rp[cpu_col],
             y=df_rp[station_col],
-            z=df_rp[runtime_col],
+            z=df_rp[total_trial_time_col],
             mode='markers',
             marker=dict(
                 size=5,
@@ -1223,10 +1283,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
                 cmax=conc_max,
                 opacity=0.8,
                 symbol=df_rp['Marker Symbol'],
-                line=dict(width=0) # Removed outline
+                line=dict(width=0)
             ),
             name='Ripper Method',
-            showlegend=False, # Removed dot in legend
+            showlegend=False,
             hovertemplate=rp_hover,
             customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col, picker_runtime_col,
                              ripper_task_col, avg_model_load_time_col, waveform_proc_time_col,
@@ -1261,7 +1321,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             ), row=1, col=1)
 
     fig.update_layout(
-        title=f"[{model_name} - {trial_type}] 3D Picker Runtime Comparison",
+        title=f"[{model_name} - {trial_type}] 3D Total Trial Runtime Comparison",
         showlegend=True,
         legend=dict(
             x=1.05,
@@ -1274,15 +1334,134 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         scene=dict(
             xaxis=dict(title='CPUs Allocated', dtick=1),
             yaxis=dict(title='Total Number of Stations to Process', dtick=10),
-            zaxis_title='Picker Runtime (s)'
+            zaxis_title='Total Trial Runtime (s)'
         ),
         scene2=dict(
             xaxis=dict(title='CPUs Allocated', dtick=1),
             yaxis=dict(title='Total Number of Stations to Process', dtick=10),
-            zaxis_title='Picker Runtime (s)'
+            zaxis_title='Total Trial Runtime (s)'
         )
     )
-    output_file = os.path.join(output_dir, f"comparison_3d_picker_runtime_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_3d_total_trial_runtime_{model_name}_{trial_type.lower()}.html")
+    fig.write_html(output_file)
+    print(f"Saved: {output_file}")
+
+    # 6b. 3D Comparison: Total Picking Time vs CPUs vs Stations
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
+        subplot_titles=['ModelActor Method', 'Ripper Method']
+    )
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=df_ma[cpu_col],
+            y=df_ma[station_col],
+            z=df_ma[picker_runtime_col],
+            mode='markers',
+            marker=dict(
+                size=5,
+                color=df_ma[actor_col],
+                colorscale='Turbo',
+                colorbar=dict(
+                    title=dict(
+                        text="Effective Concurrency",
+                        font=dict(size=14)
+                    ), 
+                    dtick=comp_dtick, 
+                    x=1.1, 
+                    y=0.5, 
+                    len=0.9,
+                    yanchor='middle'
+                ),
+                cmin=conc_min,
+                cmax=conc_max,
+                opacity=0.8,
+                symbol=df_ma['Marker Symbol'],
+                line=dict(width=0)
+            ),
+            name='ModelActor Method',
+            showlegend=False,
+            hovertemplate=ma_hover,
+            customdata=df_ma[['GPU Count', 'GPUs Used', task_col, actor_col, actual_ram_col,
+                             'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                             waveform_proc_time_col, picker_runtime_col, total_trial_time_col]].values
+        ),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter3d(
+            x=df_rp[cpu_col],
+            y=df_rp[station_col],
+            z=df_rp[picker_runtime_col],
+            mode='markers',
+            marker=dict(
+                size=5,
+                color=df_rp[task_col],
+                colorscale='Turbo',
+                cmin=conc_min,
+                cmax=conc_max,
+                opacity=0.8,
+                symbol=df_rp['Marker Symbol'],
+                line=dict(width=0)
+            ),
+            name='Ripper Method',
+            showlegend=False,
+            hovertemplate=rp_hover,
+            customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col, picker_runtime_col,
+                             ripper_task_col, avg_model_load_time_col, waveform_proc_time_col,
+                             total_trial_time_col]].values
+        ),
+        row=1, col=2
+    )
+    
+    # Add dummy traces for symbol legend if it's a GPU trial
+    if is_gpu:
+        for gpu_count in all_unique_gpus:
+            if gpu_count == 0: continue
+            symbol = symbol_map_dict.get(int(gpu_count), 'circle')
+            fig.add_trace(go.Scatter3d(
+                x=[None], y=[None], z=[None],
+                mode='markers',
+                marker=dict(
+                    symbol=symbol,
+                    color='rgba(0,0,0,0.5)',
+                    size=6,
+                    line=dict(width=1, color='black')
+                ),
+                name=f"{int(gpu_count)} {'GPU' if gpu_count == 1 else 'GPUs'}",
+                legendgroup="GPU Count",
+                legendgrouptitle=dict(
+                    text="GPUs Used",
+                    font=dict(size=14)
+                ),
+                showlegend=True
+            ), row=1, col=1)
+
+    fig.update_layout(
+        title=f"[{model_name} - {trial_type}] 3D Total Waveform Picking Time Comparison",
+        showlegend=True,
+        legend=dict(
+            x=1.05,
+            y=0.95,
+            xanchor='right',
+            yanchor='top',
+            bgcolor='rgba(255,255,255,0.5)',
+            font=dict(size=12)
+        ),
+        scene=dict(
+            xaxis=dict(title='CPUs Allocated', dtick=1),
+            yaxis=dict(title='Total Number of Stations to Process', dtick=10),
+            zaxis_title='Total Waveform Picking Time (s)'
+        ),
+        scene2=dict(
+            xaxis=dict(title='CPUs Allocated', dtick=1),
+            yaxis=dict(title='Total Number of Stations to Process', dtick=10),
+            zaxis_title='Total Waveform Picking Time (s)'
+        )
+    )
+    output_file = os.path.join(output_dir, f"comparison_3d_total_waveform_picking_time_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1332,7 +1511,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             '',
             safe_format(df_ma[actor_creation_time_col]) if actor_creation_time_col in df_ma.columns else "N/A",
             safe_format(df_ma[avg_model_load_time_col]) if avg_model_load_time_col in df_ma.columns else "N/A",
-            safe_format(df_ma[waveform_proc_time_col], ".4f") if waveform_proc_time_col in df_ma.columns else "N/A",
+            safe_format(df_ma[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_ma.columns else "N/A",
             '',
             f"{df_ma[actual_ram_col].mean():.1f}",
             '',
@@ -1351,7 +1530,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             '',
             "N/A (no actors)",  # Ripper mode doesn't create actors
             safe_format(df_rp[avg_model_load_time_col]) if avg_model_load_time_col in df_rp.columns else "N/A",
-            safe_format(df_rp[waveform_proc_time_col], ".4f") if waveform_proc_time_col in df_rp.columns else "N/A",
+            safe_format(df_rp[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_rp.columns else "N/A",
             '',
             f"{df_rp[actual_ram_col].mean():.1f}",
             '',
@@ -1519,7 +1698,7 @@ Examples:
         else:
             modelactor_csv, ripper_csv = find_comparison_files(args.results_root, args.model, args.trial_type)
             if modelactor_csv and ripper_csv:
-                compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, args.output_dir)
+                compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, args.output_dir, desired_runtime=args.desired_runtime)
             else:
                 print(f"Error: Could not find both ModelActor and Ripper results for {args.model} ({args.trial_type})")
                 if not modelactor_csv:

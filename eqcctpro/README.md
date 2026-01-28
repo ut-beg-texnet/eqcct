@@ -440,8 +440,9 @@ python scripts/analysis/analyze_trial_results_efficiency.py --compare --model eq
 ```
 
 ### **Key Metrics Defined**
-- **Effective Concurrency**: A unified metric for parallelism. In **ModelActor** mode, it represents the number of persistent actors spawned. In **Ripper** mode, it represents the actual number of concurrent tasks executed.
+- **Effective Concurrency**: A unified metric for parallelism. In **ModelActor** mode, it represents the **number of persistent actors spawned**. In **Ripper** mode, it represents the **actual number of concurrent tasks executed**.
 - **Throughput (Stations/s)**: The total number of stations processed divided by the total runtime.
+- **RAM Utilization (%)**: A measure of memory efficiency, calculated as `(Process Tree RAM / Total Requested RAM) × 100`. Values < 100% indicate efficient memory sharing (e.g., via Copy-on-Write), while values > 100% indicate that overhead (Ray/Framework) has exceeded the allocated safety buffers.
 - **Resource Cost Score**: A weighted score (CPUs + GPUs × 10) to evaluate the efficiency of hardware utilization.
 
 ### **Generated Artifacts**
