@@ -47,6 +47,7 @@ class RunEQCCTPro():
                 vram_mb: float = None,
                 selected_gpus: list = None,
                 gpu_vram_safety_cap: float = 0.95,
+                ram_safety_cap: float = 0.90,
                 cpu_id_list: list = [1],
                 start_time:str = None, 
                 end_time:str = None, 
@@ -78,6 +79,11 @@ class RunEQCCTPro():
         self.best_usecase_config = best_usecase_config
         self.vram_mb = vram_mb
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
+        
+        if ram_safety_cap > 0.97:
+            raise ValueError(f"ram_safety_cap cannot exceed 0.97, got {ram_safety_cap}. This is unsafe for system stability.")
+        self.ram_safety_cap = ram_safety_cap
+
         self.selected_gpus = selected_gpus if selected_gpus is not None else list_gpu_ids() # a list of the GPU IDs. If not provided, we use all available GPUs
         self.cpu_id_list = cpu_id_list 
         self.cpu_count = len(cpu_id_list)
@@ -287,6 +293,7 @@ class RunEQCCTPro():
                                         intra_threads=self.intra_threads, inter_threads=self.inter_threads,
                                         model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
                                         seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
+                                        ram_safety_cap=self.ram_safety_cap,
                                         ripper=self.ripper))
                     break
                 
@@ -440,8 +447,8 @@ class EvaluateSystem():
         self.vram_mb = max_vram_mb
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
         
-        if ram_safety_cap > 0.98:
-            raise ValueError(f"ram_safety_cap cannot exceed 0.98, got {ram_safety_cap}")
+        if ram_safety_cap > 0.97:
+            raise ValueError(f"ram_safety_cap cannot exceed 0.97, got {ram_safety_cap}. This is unsafe for system stability.")
         self.ram_safety_cap = ram_safety_cap
 
         self.selected_gpus = selected_gpus
@@ -1000,6 +1007,7 @@ class EvaluateSystem():
                                                             test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt,
                                                             model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
                                                             seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
+                                                            ram_safety_cap=self.ram_safety_cap,
                                                             ripper=self.ripper))
                                     
                                         break
@@ -1565,6 +1573,7 @@ class EvaluateSystem():
                                 timechunk_dt=self.timechunk_dt,
                                 model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
                                 seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
+                                ram_safety_cap=self.ram_safety_cap,
                                 ripper=self.ripper
                             )
                             

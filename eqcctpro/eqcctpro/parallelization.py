@@ -808,6 +808,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
               seisbench_parent_model=None,
               seisbench_child_model=None,
               Detection_threshold=0.3,
+              ram_safety_cap=None,
               # Ripper mode - uses old task-based approach instead of ModelActors
               ripper=False): 
     
@@ -867,6 +868,14 @@ def mseed_predictor(input_dir='downloads_mseeds',
     log_handler = QueueHandler(log_queue)
     if log_queue is not None:
         logger.addHandler(log_handler)  # Ray queue supports put()
+
+    # ===== RAM SAFETY CAP VALIDATION =====
+    if ram_safety_cap is not None:
+        if ram_safety_cap > 0.97:
+            logger.error(f"CRITICAL: ram_safety_cap ({ram_safety_cap:.2f}) exceeds the maximum allowed limit of 0.97. This is unsafe for system stability.")
+            logger.error("Please reduce ram_safety_cap to 0.97 or lower and try again. Exiting...")
+            sys.exit(1)
+        logger.info(f"RAM safety cap validated: {ram_safety_cap:.1%}")
 
     # We set up the tf_environ again for the Raylets, who adopt their own import state and TF runtime when created. 
     # We want to ensure that they are configured properly so that they won't die (bad)
@@ -1059,10 +1068,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 # Apply headroom factor for CPU ripper mode
                 # NOTE: CPU ripper mode creates/destroys models per-task, which causes RAM churn.
                 # Lower values (0.70-0.80) are safer but reduce concurrency.
-                # Higher values (0.90) maximize concurrency but may cause OOM if system
+                # higher values (0.90) maximize concurrency but may cause OOM if system
                 # has other processes competing for RAM.
-                # RIPPER_RAM_HEADROOM can be adjusted in parallelization.py (search for this variable)
-                ripper_ram_headroom = 0.80
+                # Use user-defined ram_safety_cap if available, otherwise default to 0.80
+                ripper_ram_headroom = ram_safety_cap if ram_safety_cap is not None else 0.80
                 usable_ram_mb = actual_free_ram_mb * ripper_ram_headroom
                 max_safe_concurrent = max(1, int(usable_ram_mb / ram_per_task_mb))
                 
