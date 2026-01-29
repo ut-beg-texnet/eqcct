@@ -973,10 +973,13 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None, de
     ax.set_xticklabels([int(t) for t in ma_by_task.index])
     ax.legend()
     
+    # Sanitize model name for filenames
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    
     plt.suptitle(f'{model_name} - ModelActor vs Ripper ({trial_type})', fontsize=14)
     plt.tight_layout()
     
-    plot_name = f"comparison_modelactor_vs_ripper_{model_name}_{trial_type.lower()}.png"
+    plot_name = f"comparison_modelactor_vs_ripper_{safe_model_name}_{trial_type.lower()}.png"
     plot_path = os.path.join(output_dir, plot_name) if output_dir else plot_name
     plt.savefig(plot_path, dpi=150)
     plt.close()

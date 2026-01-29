@@ -206,6 +206,9 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         model_name = df['Model Used'].iloc[0] if 'Model Used' in df.columns else "Unknown"
         model_name = f"{model_name}-{'GPU' if is_gpu_trial else 'CPU'}-{execution_mode.upper()}"
     
+    # Sanitize model name for filenames (replace / with _)
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    
     print(f"Detected trial type: {trial_type.upper()}")
     print(f"Detected execution mode: {execution_mode.upper()}")
     print(f"Model: {model_name}")
@@ -860,6 +863,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     
     # Get model info
     model_name = df_ma['Model Used'].iloc[0] if 'Model Used' in df_ma.columns else "Unknown"
+    
+    # Sanitize model name for filenames (replace / with _)
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    
     df_ma['GPU Count'] = df_ma['GPUs Used'].apply(parse_gpu_list)
     df_rp['GPU Count'] = df_rp['GPUs Used'].apply(parse_gpu_list)
     is_gpu = df_ma['GPU Count'].max() > 0
@@ -1026,7 +1033,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         yaxis_title="Number of Trials Achieved Benchmark",
         xaxis_title="Picker Throughput (Stations/Picker Runtime)"
     )
-    output_file = os.path.join(output_dir, f"comparison_picker_throughput_dist_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_picker_throughput_dist_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1081,7 +1088,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.update_layout(
         xaxis=dict(dtick=10)
     )
-    output_file = os.path.join(output_dir, f"comparison_runtime_vs_stations_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_runtime_vs_stations_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
 
@@ -1136,7 +1143,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.update_layout(
         xaxis=dict(dtick=10)
     )
-    output_file = os.path.join(output_dir, f"comparison_picking_time_vs_stations_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_picking_time_vs_stations_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1161,7 +1168,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.update_layout(
         yaxis=dict(dtick=ram_dtick)
     )
-    output_file = os.path.join(output_dir, f"comparison_ram_usage_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_ram_usage_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1212,7 +1219,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.update_layout(
         xaxis=dict(dtick=10)
     )
-    output_file = os.path.join(output_dir, f"comparison_picker_throughput_scaling_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_picker_throughput_scaling_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1353,7 +1360,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             zaxis_title='Total Trial Runtime (s)'
         )
     )
-    output_file = os.path.join(output_dir, f"comparison_3d_total_trial_runtime_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_3d_total_trial_runtime_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
 
@@ -1472,7 +1479,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             zaxis_title='Total Waveform Picking Time (s)'
         )
     )
-    output_file = os.path.join(output_dir, f"comparison_3d_total_waveform_picking_time_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_3d_total_waveform_picking_time_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1640,7 +1647,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.update_layout(
         title=f"[{model_name} - {trial_type}] Summary Statistics: ModelActor vs Ripper"
     )
-    output_file = os.path.join(output_dir, f"comparison_summary_table_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_summary_table_{safe_model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1701,23 +1708,37 @@ def find_comparison_files(results_root, model, trial_type):
     trial_type = trial_type.lower()
     model = model.lower()
     
-    modelactor_pattern = f"eval_{trial_type}_{model}_modelactor"
-    ripper_pattern = f"eval_{trial_type}_{model}_ripper"
-    
     modelactor_csv = None
     ripper_csv = None
     
+    # We look for directories that contain:
+    # 1. 'eval_'
+    # 2. the trial_type (cpu/gpu)
+    # 3. the model name substring
+    # 4. the execution mode (_modelactor or _ripper)
     for item in os.listdir(results_root):
         item_path = os.path.join(results_root, item)
-        if os.path.isdir(item_path):
-            if modelactor_pattern in item.lower():
-                csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
-                if csv_files:
-                    modelactor_csv = csv_files[0]
-            elif ripper_pattern in item.lower():
-                csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
-                if csv_files:
-                    ripper_csv = csv_files[0]
+        if not os.path.isdir(item_path):
+            continue
+            
+        item_lower = item.lower()
+        if not item_lower.startswith('eval_'):
+            continue
+            
+        if trial_type not in item_lower:
+            continue
+            
+        if model not in item_lower:
+            continue
+            
+        if "_modelactor" in item_lower:
+            csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
+            if csv_files:
+                modelactor_csv = csv_files[0]
+        elif "_ripper" in item_lower:
+            csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
+            if csv_files:
+                ripper_csv = csv_files[0]
     
     return modelactor_csv, ripper_csv
 

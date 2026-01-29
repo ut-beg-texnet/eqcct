@@ -461,14 +461,15 @@ The `visualize_trial_results.py` script generates high-fidelity, interactive vis
 
 ### **Usage Examples**
 ```sh
-# Single file visualization
+# Single file visualization (auto-detects model name from CSV)
 python scripts/visualization/visualize_trial_results.py /path/to/results/cpu_test_results.csv --output_dir vis/
 
-# Batch visualization (creates separate folders per trial)
+# Batch visualization (creates separate folders per trial subdirectory)
 python scripts/visualization/visualize_trial_results.py --batch --results_root results/csv/ --output_dir batch_vis/
 
-# Compare ModelActor vs Ripper performance
-python scripts/visualization/visualize_trial_results.py --compare --model eqcct --trial_type gpu --results_root results/csv/
+# Compare ModelActor vs Ripper performance for a specific model
+# The --model argument acts as a search keyword for result directories
+python scripts/visualization/visualize_trial_results.py --compare --model phasenetlight --trial_type cpu
 ```
 
 ### **Interactive Plot Features**
