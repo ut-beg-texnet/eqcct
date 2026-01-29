@@ -889,9 +889,16 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     df_ma['Execution Mode'] = 'ModelActor'
     df_rp['Execution Mode'] = 'Ripper'
     
-    # Calculate throughput (using picker runtime - pure processing time)
-    df_ma['Throughput (Stations/s)'] = df_ma[station_col] / df_ma[runtime_col]
-    df_rp['Throughput (Stations/s)'] = df_rp[station_col] / df_rp[runtime_col]
+    # Calculate BOTH throughput metrics:
+    # 1. Picker Throughput = Stations / Picker Runtime (pure processing speed, excludes setup)
+    # 2. Total Throughput = Stations / Total Trial Time (end-to-end including setup)
+    df_ma['Picker Throughput (st/s)'] = df_ma[station_col] / df_ma[picker_runtime_col]
+    df_rp['Picker Throughput (st/s)'] = df_rp[station_col] / df_rp[picker_runtime_col]
+    df_ma['Total Throughput (st/s)'] = df_ma[station_col] / df_ma[total_trial_time_col]
+    df_rp['Total Throughput (st/s)'] = df_rp[station_col] / df_rp[total_trial_time_col]
+    # Keep backward compatibility
+    df_ma['Throughput (Stations/s)'] = df_ma['Total Throughput (st/s)']
+    df_rp['Throughput (Stations/s)'] = df_rp['Total Throughput (st/s)']
     
     # Convert timing columns to numeric
     for col in [total_trial_time_col, picker_runtime_col, actor_creation_time_col, 
@@ -997,13 +1004,13 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     # 1. Throughput Distribution Comparison
     fig = px.histogram(
         df_combined,
-        x='Throughput (Stations/s)',
+        x='Picker Throughput (st/s)',
         color='Execution Mode',
         barmode='overlay',
         opacity=0.7,
-        title=f"[{model_name} - {trial_type}] Throughput Distribution: ModelActor Method vs Ripper Method",
+        title=f"[{model_name} - {trial_type}] Picker Throughput Distribution: ModelActor Method vs Ripper Method",
         labels={
-            'Throughput (Stations/s)': 'Throughput (Total Stations/s)',
+            'Picker Throughput (st/s)': 'Picker Throughput (Stations/Picker Runtime)',
             'count': 'Number of Trials Achieved Benchmark'
         }
     )
@@ -1011,15 +1018,15 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         hovertemplate=(
             "<b>Performance Benchmark</b><br>"
             "Execution Mode: %{fullData.name}<br>"
-            "Throughput (Total Stations/s): %{x}<br>"
+            "Picker Throughput (st/s): %{x}<br>"
             "Number of Trials Achieved Benchmark: %{y}<extra></extra>"
         )
     )
     fig.update_layout(
         yaxis_title="Number of Trials Achieved Benchmark",
-        xaxis_title="Throughput (Total Stations/s)"
+        xaxis_title="Picker Throughput (Stations/Picker Runtime)"
     )
-    output_file = os.path.join(output_dir, f"comparison_throughput_dist_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_picker_throughput_dist_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1050,13 +1057,15 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
             "Total Waveform Picking Time (s): %{customdata[8]:.2f}<br>"
             "Total Trial Runtime (s): %{y:.2f}<br>"
-            "Throughput (Total Stations/s): %{customdata[4]:.2f}<br>"
+            "--- Throughput ---<br>"
+            "Picker Throughput (st/s): %{customdata[11]:.2f}<br>"
+            "Total Throughput (st/s): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
         ),
-        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Throughput (Stations/s)',
+        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Total Throughput (st/s)',
                                'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
                                waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
-                               avg_model_load_time_col]].values
+                               avg_model_load_time_col, 'Picker Throughput (st/s)']].values
     )
     
     # Add desired runtime line if provided
@@ -1103,13 +1112,15 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "Avg. Waveform Processing Time (s): %{customdata[7]:.2f}<br>"
             "Total Waveform Picking Time (s): %{y:.2f}<br>"
             "Total Trial Runtime (s): %{customdata[9]:.2f}<br>"
-            "Throughput (Total Stations/s): %{customdata[4]:.2f}<br>"
+            "--- Throughput ---<br>"
+            "Picker Throughput (st/s): %{customdata[11]:.2f}<br>"
+            "Total Throughput (st/s): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
         ),
-        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Throughput (Stations/s)',
+        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Total Throughput (st/s)',
                                'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
                                waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
-                               avg_model_load_time_col]].values
+                               avg_model_load_time_col, 'Picker Throughput (st/s)']].values
     )
 
     # Add desired runtime line if provided
@@ -1140,8 +1151,8 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         color='Execution Mode',
         title=f"[{model_name} - {trial_type}] RAM Usage: ModelActor Method vs Ripper Method",
         labels={
-            'Execution Mode': 'Execution Mode:',
-            actual_ram_col: 'Process Tree RAM (MB):'
+            'Execution Mode': 'Execution Mode',
+            actual_ram_col: 'Process Tree RAM (MB)'
         }
     )
     fig.update_traces(
@@ -1154,10 +1165,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
-    # 5. Throughput Scaling by Concurrent Tasks (Line Chart)
+    # 5. Throughput Scaling by Concurrent Tasks (Line Chart) - Picker Throughput
     # Use the previously calculated 'Generated Tasks' and labels
     ma_by_task = df_ma.groupby(task_col).agg({
-        'Throughput (Stations/s)': ['mean', 'std'],
+        'Picker Throughput (st/s)': ['mean', 'std'],
         'Generated Tasks': 'mean'
     }).reset_index()
     ma_by_task.columns = [task_col, 'mean', 'std', 'Generated Tasks']
@@ -1165,7 +1176,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     ma_by_task['Generated Label'] = "Number of ModelActors Created:"
     
     rp_by_task = df_rp.groupby(task_col).agg({
-        'Throughput (Stations/s)': ['mean', 'std'],
+        'Picker Throughput (st/s)': ['mean', 'std'],
         'Generated Tasks': 'mean'
     }).reset_index()
     rp_by_task.columns = [task_col, 'mean', 'std', 'Generated Tasks']
@@ -1181,10 +1192,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         color='Execution Mode',
         error_y='std',
         markers=True,
-        title=f"[{model_name} - {trial_type}] Throughput Scaling: ModelActor Method vs Ripper Method",
+        title=f"[{model_name} - {trial_type}] Picker Throughput Scaling: ModelActor Method vs Ripper Method",
         labels={
             task_col: 'Concurrent Tasks Requested',
-            'mean': 'Mean Throughput (Total Stations/s)'
+            'mean': 'Mean Picker Throughput (st/s)'
         }
     )
     fig.update_traces(
@@ -1193,7 +1204,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "Execution Mode: %{fullData.name}<br>"
             "Concurrent Tasks Requested: %{x}<br>"
             "%{customdata[0]} %{customdata[1]:.0f}<br>"
-            "Mean Throughput (Total Stations/s): %{y:.2f} ± %{customdata[2]:.2f}<br>"
+            "Mean Picker Throughput (st/s): %{y:.2f} ± %{customdata[2]:.2f}<br>"
             "<extra></extra>"
         ),
         customdata=scaling_df[['Generated Label', 'Generated Tasks', 'std']].values
@@ -1201,7 +1212,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.update_layout(
         xaxis=dict(dtick=10)
     )
-    output_file = os.path.join(output_dir, f"comparison_throughput_scaling_{model_name}_{trial_type.lower()}.html")
+    output_file = os.path.join(output_dir, f"comparison_picker_throughput_scaling_{model_name}_{trial_type.lower()}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
@@ -1477,65 +1488,139 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             return f"{series.min():{fmt}}"
         return default
     
+    # Calculate max concurrency metrics
+    # ModelActor: max number of actors created
+    ma_max_actors = int(df_ma[actor_col].max()) if actor_col in df_ma.columns else 0
+    ma_max_actor_row = df_ma[df_ma[actor_col] == ma_max_actors].iloc[0] if ma_max_actors > 0 else None
+    ma_ram_at_max = f"{ma_max_actor_row[actual_ram_col]:.1f}" if ma_max_actor_row is not None and actual_ram_col in df_ma.columns else "N/A"
+    
+    # Ripper: max number of concurrent tasks
+    rp_max_tasks = int(df_rp[ripper_task_col].max()) if ripper_task_col in df_rp.columns else 0
+    rp_max_task_row = df_rp[df_rp[ripper_task_col] == rp_max_tasks].iloc[0] if rp_max_tasks > 0 else None
+    rp_ram_at_max = f"{rp_max_task_row[actual_ram_col]:.1f}" if rp_max_task_row is not None and actual_ram_col in df_rp.columns else "N/A"
+    
+    # Check if GPU trial for VRAM metrics
+    is_gpu = trial_type.lower() == 'gpu'
+    if is_gpu:
+        ma_vram_at_max = f"{ma_max_actor_row[actual_vram_col]:.1f}" if ma_max_actor_row is not None and actual_vram_col in df_ma.columns else "N/A"
+        rp_vram_at_max = f"{rp_max_task_row[actual_vram_col]:.1f}" if rp_max_task_row is not None and actual_vram_col in df_rp.columns else "N/A"
+        ma_mean_vram = f"{df_ma[actual_vram_col].mean():.1f}" if actual_vram_col in df_ma.columns else "N/A"
+        rp_mean_vram = f"{df_rp[actual_vram_col].mean():.1f}" if actual_vram_col in df_rp.columns else "N/A"
+    
     # Build summary table with comprehensive timing metrics
+    summary_metrics = [
+        '--- Picker Throughput (st/Picker Runtime) ---',
+        'Mean Picker Throughput (st/s)',
+        'Median Picker Throughput (st/s)',
+        'Max Picker Throughput (st/s)',
+        '--- Total Throughput (st/Total Trial Time) ---',
+        'Mean Total Throughput (st/s)',
+        'Median Total Throughput (st/s)',
+        'Max Total Throughput (st/s)',
+        '--- Runtime Metrics ---',
+        'Mean Total Trial Time (s)',
+        'Min Total Trial Time (s)',
+        'Mean Picker Runtime (s)',
+        'Min Picker Runtime (s)',
+        '--- Setup Time Metrics ---',
+        'Mean Actor Creation Time (s)',
+        'Mean Avg Model Load Time (s)',
+        'Mean Waveform Processing Time (s)',
+        '--- Concurrency Metrics ---',
+        'Max ModelActors / Concurrent Tasks',
+        'RAM at Max Concurrency (MB)',
+    ]
+    
+    ma_values = [
+        '',
+        f"{df_ma['Picker Throughput (st/s)'].mean():.2f}",
+        f"{df_ma['Picker Throughput (st/s)'].median():.2f}",
+        f"{df_ma['Picker Throughput (st/s)'].max():.2f}",
+        '',
+        f"{df_ma['Total Throughput (st/s)'].mean():.2f}",
+        f"{df_ma['Total Throughput (st/s)'].median():.2f}",
+        f"{df_ma['Total Throughput (st/s)'].max():.2f}",
+        '',
+        safe_format(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
+        safe_format_min(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
+        safe_format(df_ma[picker_runtime_col]) if picker_runtime_col in df_ma.columns else "N/A",
+        safe_format_min(df_ma[picker_runtime_col]) if picker_runtime_col in df_ma.columns else "N/A",
+        '',
+        safe_format(df_ma[actor_creation_time_col]) if actor_creation_time_col in df_ma.columns else "N/A",
+        safe_format(df_ma[avg_model_load_time_col]) if avg_model_load_time_col in df_ma.columns else "N/A",
+        safe_format(df_ma[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_ma.columns else "N/A",
+        '',
+        f"{ma_max_actors} actors",
+        ma_ram_at_max,
+    ]
+    
+    rp_values = [
+        '',
+        f"{df_rp['Picker Throughput (st/s)'].mean():.2f}",
+        f"{df_rp['Picker Throughput (st/s)'].median():.2f}",
+        f"{df_rp['Picker Throughput (st/s)'].max():.2f}",
+        '',
+        f"{df_rp['Total Throughput (st/s)'].mean():.2f}",
+        f"{df_rp['Total Throughput (st/s)'].median():.2f}",
+        f"{df_rp['Total Throughput (st/s)'].max():.2f}",
+        '',
+        safe_format(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
+        safe_format_min(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
+        safe_format(df_rp[picker_runtime_col]) if picker_runtime_col in df_rp.columns else "N/A",
+        safe_format_min(df_rp[picker_runtime_col]) if picker_runtime_col in df_rp.columns else "N/A",
+        '',
+        "N/A (no actors)",  # Ripper mode doesn't create actors
+        safe_format(df_rp[avg_model_load_time_col]) if avg_model_load_time_col in df_rp.columns else "N/A",
+        safe_format(df_rp[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_rp.columns else "N/A",
+        '',
+        f"{rp_max_tasks} tasks",
+        rp_ram_at_max,
+    ]
+    
+    # Add VRAM metrics for GPU trials
+    if is_gpu:
+        summary_metrics.append('VRAM at Max Concurrency (MB)')
+        ma_values.append(ma_vram_at_max)
+        rp_values.append(rp_vram_at_max)
+    
+    # Add memory metrics section
+    summary_metrics.extend([
+        '--- Memory Metrics ---',
+        'Mean RAM (MB)',
+    ])
+    ma_values.extend([
+        '',
+        f"{df_ma[actual_ram_col].mean():.1f}",
+    ])
+    rp_values.extend([
+        '',
+        f"{df_rp[actual_ram_col].mean():.1f}",
+    ])
+    
+    # Add mean VRAM for GPU trials
+    if is_gpu:
+        summary_metrics.append('Mean VRAM (MB)')
+        ma_values.append(ma_mean_vram)
+        rp_values.append(rp_mean_vram)
+    
+    # Add trial info section
+    summary_metrics.extend([
+        '--- Trial Info ---',
+        'Trial Count'
+    ])
+    ma_values.extend([
+        '',
+        str(len(df_ma))
+    ])
+    rp_values.extend([
+        '',
+        str(len(df_rp))
+    ])
+    
     summary_data = {
-        'Metric': [
-            '--- Throughput Metrics ---',
-            'Mean Throughput (st/s)',
-            'Median Throughput (st/s)',
-            'Max Throughput (st/s)',
-            '--- Runtime Metrics ---',
-            'Mean Total Trial Time (s)',
-            'Min Total Trial Time (s)',
-            'Mean Picker Runtime (s)',
-            'Min Picker Runtime (s)',
-            '--- Setup Time Metrics ---',
-            'Mean Actor Creation Time (s)',
-            'Mean Avg Model Load Time (s)',
-            'Mean Waveform Processing Time (s)',
-            '--- Memory Metrics ---',
-            'Mean RAM (MB)',
-            '--- Trial Info ---',
-            'Trial Count'
-        ],
-        'ModelActor': [
-            '',
-            f"{df_ma['Throughput (Stations/s)'].mean():.2f}",
-            f"{df_ma['Throughput (Stations/s)'].median():.2f}",
-            f"{df_ma['Throughput (Stations/s)'].max():.2f}",
-            '',
-            safe_format(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
-            safe_format_min(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
-            safe_format(df_ma[picker_runtime_col]) if picker_runtime_col in df_ma.columns else "N/A",
-            safe_format_min(df_ma[picker_runtime_col]) if picker_runtime_col in df_ma.columns else "N/A",
-            '',
-            safe_format(df_ma[actor_creation_time_col]) if actor_creation_time_col in df_ma.columns else "N/A",
-            safe_format(df_ma[avg_model_load_time_col]) if avg_model_load_time_col in df_ma.columns else "N/A",
-            safe_format(df_ma[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_ma.columns else "N/A",
-            '',
-            f"{df_ma[actual_ram_col].mean():.1f}",
-            '',
-            str(len(df_ma))
-        ],
-        'Ripper': [
-            '',
-            f"{df_rp['Throughput (Stations/s)'].mean():.2f}",
-            f"{df_rp['Throughput (Stations/s)'].median():.2f}",
-            f"{df_rp['Throughput (Stations/s)'].max():.2f}",
-            '',
-            safe_format(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
-            safe_format_min(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
-            safe_format(df_rp[picker_runtime_col]) if picker_runtime_col in df_rp.columns else "N/A",
-            safe_format_min(df_rp[picker_runtime_col]) if picker_runtime_col in df_rp.columns else "N/A",
-            '',
-            "N/A (no actors)",  # Ripper mode doesn't create actors
-            safe_format(df_rp[avg_model_load_time_col]) if avg_model_load_time_col in df_rp.columns else "N/A",
-            safe_format(df_rp[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_rp.columns else "N/A",
-            '',
-            f"{df_rp[actual_ram_col].mean():.1f}",
-            '',
-            str(len(df_rp))
-        ]
+        'Metric': summary_metrics,
+        'ModelActor': ma_values,
+        'Ripper': rp_values
     }
     
     fig = go.Figure(data=[go.Table(

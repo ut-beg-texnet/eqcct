@@ -1299,7 +1299,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Calculate max actors based on VRAM (memory constraint, not hardware count)
             max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
-            n_actors = min(requested_actors, max(1, max_actors_by_vram))
+            
+            # ===== cuDNN STABILITY HEADROOM =====
+            # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
+            # causes cuDNN resource contention, resulting in:
+            #   - "DNN library is not found"
+            #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
+            # Solution: Reserve 1 actor's worth of headroom from the VRAM-calculated max.
+            max_actors_with_headroom = max(1, max_actors_by_vram - 1)
+            n_actors = min(requested_actors, max_actors_with_headroom)
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
@@ -1307,10 +1315,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
             logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
             logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
+            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - 1 for stability)")
             logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by VRAM ({available_vram_mb:.0f} MB pool / {per_actor_vram_mb:.0f} MB per actor = {max_actors_by_vram} max).")
+                logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
             
             # Calculate fractional GPU allocation so Ray knows these are GPU actors
             # 
@@ -1476,7 +1485,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Calculate max actors based on VRAM (memory constraint, not hardware count)
             max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
-            n_actors = min(requested_actors, max(1, max_actors_by_vram))
+            
+            # ===== cuDNN STABILITY HEADROOM =====
+            # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
+            # causes cuDNN resource contention, resulting in:
+            #   - "DNN library is not found"
+            #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
+            # Solution: Reserve 1 actor's worth of headroom from the VRAM-calculated max.
+            max_actors_with_headroom = max(1, max_actors_by_vram - 1)
+            n_actors = min(requested_actors, max_actors_with_headroom)
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
@@ -1484,10 +1501,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
             logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
             logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
+            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - 1 for stability)")
             logger.info(f"Creating {n_actors} ModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by VRAM ({available_vram_mb:.0f} MB pool / {per_actor_vram_mb:.0f} MB per actor = {max_actors_by_vram} max).")
+                logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
             
             # Calculate fractional GPU allocation so Ray knows these are GPU actors
             # 

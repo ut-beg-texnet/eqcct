@@ -1264,13 +1264,25 @@ class EvaluateSystem():
                 overhead_vram_per_task_mb = 128.0  # Extra per-task VRAM for waveform data
                 overhead_ram_per_task_mb = 256.0   # Extra per-task RAM for waveform data
                 
-                # Use user-defined VRAM capacity if provided, otherwise calculate based on total hardware and safety cap.
+                # ===== VRAM CAPACITY CALCULATION =====
+                # IMPORTANT: max_vram_mb is the TOTAL VRAM pool across ALL selected GPUs.
+                # When testing with a subset of GPUs (e.g., 1 GPU out of 2), we must scale
+                # the VRAM budget proportionally to the number of GPUs being used.
+                total_selected_gpus = len(self.selected_gpus) if self.selected_gpus else 1
+                gpus_in_this_test = len(gpus_to_use)
+                
                 if self.vram_mb:
-                    aggregate_vram_cap_mb = float(self.vram_mb)
-                    self.logger.info(f"Using user-defined VRAM capacity: {aggregate_vram_cap_mb:.0f} MB")
+                    # User provided total VRAM across all selected GPUs
+                    # Calculate per-GPU budget and scale to GPUs being used in this test
+                    per_gpu_vram_budget_mb = float(self.vram_mb) / total_selected_gpus
+                    aggregate_vram_cap_mb = per_gpu_vram_budget_mb * gpus_in_this_test
+                    self.logger.info(f"Using user-defined VRAM capacity: {self.vram_mb:.0f} MB total across {total_selected_gpus} GPU(s)")
+                    self.logger.info(f"  → Per-GPU VRAM budget: {per_gpu_vram_budget_mb:.0f} MB")
+                    self.logger.info(f"  → VRAM for this test ({gpus_in_this_test} GPU(s)): {aggregate_vram_cap_mb:.0f} MB")
                 else:
                     per_gpu_total_mb = [get_gpu_vram(gpu_index=g)[0] * 1024.0 for g in gpus_to_use]
                     aggregate_vram_cap_mb = sum(per_gpu_total_mb) * self.gpu_vram_safety_cap
+                    per_gpu_vram_budget_mb = aggregate_vram_cap_mb / gpus_in_this_test
                     self.logger.info(f"Using calculated VRAM capacity: {aggregate_vram_cap_mb:.0f} MB ({sum(per_gpu_total_mb):.0f} MB total × {self.gpu_vram_safety_cap:.0%} safety)")
                 
                 # Get system RAM capacity (psutil already imported at top of file)
@@ -1285,10 +1297,7 @@ class EvaluateSystem():
                 self.logger.info(f"Model VRAM per Actor: {model_vram_per_actor_mb:.0f} MB (includes {VRAM_BUFFER_MB:.0f} MB safety buffer for Ray/CUDA overhead)")
                 self.logger.info(f"Model RAM per Actor: {model_ram_per_actor_mb:.0f} MB (includes {RAM_BUFFER_MB:.0f} MB safety buffer for Ray/framework overhead)")
                 self.logger.info(f"")
-                if self.vram_mb:
-                    self.logger.info(f"VRAM Capacity: {aggregate_vram_cap_mb:.0f} MB (User-Defined)")
-                else:
-                    self.logger.info(f"VRAM Capacity: {aggregate_vram_cap_mb:.0f} MB (Total: {sum(per_gpu_total_mb):.0f} MB × {self.gpu_vram_safety_cap:.0%} safety)")
+                self.logger.info(f"VRAM Capacity for this test: {aggregate_vram_cap_mb:.0f} MB ({gpus_in_this_test} GPU(s) × {per_gpu_vram_budget_mb:.0f} MB/GPU)")
                 self.logger.info(f"RAM Capacity: {aggregate_ram_cap_mb:.0f} MB (Total: {system_ram_total_mb:.0f} MB × {self.ram_safety_cap:.0%} safety)")
                 self.logger.info(f"Currently Available RAM: {system_ram_available_mb:.0f} MB")
                 
@@ -1302,11 +1311,20 @@ class EvaluateSystem():
                 max_actors_by_vram = int(aggregate_vram_cap_mb // model_vram_per_actor_mb)
                 max_actors_by_ram = int(aggregate_ram_cap_mb // model_ram_per_actor_mb)
                 
-                # The effective limit is the minimum of VRAM and RAM constraints
-                max_actors = max(1, min(max_actors_by_vram, max_actors_by_ram))
-                
-                # Hardware reference (for logging only - not the limiting factor)
+                # Hardware reference
                 n_gpus = len(gpus_to_use)
+                
+                # ===== cuDNN STABILITY HEADROOM =====
+                # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
+                # causes cuDNN resource contention, resulting in:
+                #   - "DNN library is not found"
+                #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
+                # Solution: Reserve 1 actor's worth of headroom from the VRAM-calculated max.
+                # This provides buffer space for cuDNN context management.
+                max_actors_with_headroom = max(1, max_actors_by_vram - 1)
+                
+                # The effective limit is the minimum of memory constraints (with headroom applied to VRAM)
+                max_actors = max(1, min(max_actors_with_headroom, max_actors_by_ram))
                 
                 # Check if at least one actor fits in memory
                 one_actor_fits_vram = model_vram_per_actor_mb <= aggregate_vram_cap_mb
@@ -1317,8 +1335,9 @@ class EvaluateSystem():
                 self.logger.info(f"===== MEMORY-AWARE ACTOR CAPPING (GPU) =====")
                 self.logger.info(f"GPUs visible to Ray: {n_gpus}")
                 self.logger.info(f"Max actors by VRAM: {max_actors_by_vram} ({aggregate_vram_cap_mb:.0f} MB / {model_vram_per_actor_mb:.0f} MB per actor)")
+                self.logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - 1 for stability)")
                 self.logger.info(f"Max actors by RAM: {max_actors_by_ram} ({aggregate_ram_cap_mb:.0f} MB / {model_ram_per_actor_mb:.0f} MB per actor)")
-                self.logger.info(f"Effective max actors: {max_actors} (memory-constrained, not hardware-constrained)")
+                self.logger.info(f"Effective max actors: {max_actors}")
                 self.logger.info(f"Ray will handle GPU scheduling (CUDA_VISIBLE_DEVICES already limits visibility)")
                 self.logger.info(f"TF memory growth enabled: Multiple actors can share GPU memory dynamically")
                 self.logger.info(f"==========================================")
@@ -1427,86 +1446,14 @@ class EvaluateSystem():
                     self.logger.info(f"Testing N ModelActors (concurrent predictions): {valid_predictions}")
                     
                     for predictions in valid_predictions:
-                        # ===== RIPPER MODE: Fresh Ray instance per trial =====
-                        # Ripper mode benefits from a clean GPU state at each trial start
-                        # This ensures no memory fragmentation from previous trials affects the current one
-                        if self.ripper:
-                            self.logger.info(f"")
-                            self.logger.info(f"===== RIPPER MODE: Restarting Ray for fresh GPU state =====")
-                            
-                            # Stop the log drain thread gracefully
-                            self.log_queue.put(None)  # Sentinel to stop the drain thread
-                            time.sleep(0.5)  # Give thread time to finish
-                            
-                            # Shutdown and reinitialize Ray
-                            ray.shutdown()
-                            time.sleep(1.0)  # Allow GPU memory to be fully released
-                            
-                            # Reinitialize Ray with the same configuration
-                            ray.init(ignore_reinit_error=True, num_gpus=len(gpus_to_use), num_cpus=len(cpus_to_use), 
-                                    logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
-                            self.log_queue = Queue()
-                            self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
-                            self._log_thread.start()
-                            
-                            # Reset the high water mark since we cleared GPU memory
-                            actors_high_water_mark = 0
-                            self.logger.info(f"Ray restarted. GPU memory cleared for ripper trial.")
-                            self.logger.info(f"=================================================")
+                        # ===== PRE-FLIGHT CHECKS: Skip if already tested =====
+                        # Check these BEFORE restarting Ray to avoid unnecessary restarts
                         
-                        # ===== CALCULATE REQUESTED MEMORY FOR THIS TRIAL =====
-                        # N ModelActors = predictions (each concurrent task gets its own ModelActor)
-                        n_model_actors = predictions
-                        requested_vram_mb = n_model_actors * model_vram_per_actor_mb
-                        requested_ram_mb = n_model_actors * model_ram_per_actor_mb
-                        task_overhead_vram_mb = n_model_actors * overhead_vram_per_task_mb
-                        task_overhead_ram_mb = n_model_actors * overhead_ram_per_task_mb
-                        total_requested_vram_mb = requested_vram_mb + task_overhead_vram_mb
-                        total_requested_ram_mb = requested_ram_mb + task_overhead_ram_mb
-
-                        # ===== OOM PREVENTION: Restart Ray if needed =====
-                        # When increasing concurrency, actors from previous trials may still be in GPU memory.
-                        # If the new actors + existing actors would exceed VRAM capacity, restart Ray.
-                        restart_note = ""
-                        if predictions > actors_high_water_mark and actors_high_water_mark > 0:
-                            # Estimate total VRAM if we add new actors while existing ones are still in memory
-                            estimated_total_vram = (actors_high_water_mark + predictions) * model_vram_per_actor_mb
-                            if estimated_total_vram > aggregate_vram_cap_mb:
-                                self.logger.warning(f"")
-                                self.logger.warning(f"===== RAY RESTART: Clearing GPU Memory =====")
-                                self.logger.warning(f"Increasing from {actors_high_water_mark} to {predictions} actors")
-                                self.logger.warning(f"Estimated VRAM if additive: {estimated_total_vram:.0f} MB > capacity {aggregate_vram_cap_mb:.0f} MB")
-                                self.logger.warning(f"Restarting Ray to prevent OOM...")
-                                
-                                # Stop the log drain thread gracefully
-                                self.log_queue.put(None)  # Sentinel to stop the drain thread
-                                time.sleep(0.5)  # Give thread time to finish
-                                
-                                # Shutdown and reinitialize Ray
-                                ray.shutdown()
-                                time.sleep(1.0)  # Allow GPU memory to be released
-                                
-                                # Reinitialize Ray with the same configuration
-                                ray.init(ignore_reinit_error=True, num_gpus=len(gpus_to_use), num_cpus=len(cpus_to_use), 
-                                        logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
-                                self.log_queue = Queue()
-                                self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
-                                self._log_thread.start()
-                                
-                                # Set the restart note BEFORE resetting the high water mark
-                                restart_note = f"[RAY RESTART] GPU memory cleared (Prev Peak: {actors_high_water_mark} actors). "
-                                # Reset the high water mark since we cleared GPU memory
-                                actors_high_water_mark = 0
-                                self.logger.info(f"Ray restarted successfully. GPU memory cleared.")
-                                self.logger.info(f"==========================================")
-                                self.logger.info(f"")
-
-                        # Efficiency check: avoid redundant tests for same (stations, predictions) - no VRAM tiers needed
+                        # Efficiency check: avoid redundant tests for same (stations, predictions)
                         config_key = (stations, predictions)
                         if config_key in tested_gpu_configs:
                             continue
-                        tested_gpu_configs.add(config_key)
-
+                        
                         # Use model's known VRAM requirement as the gpu_memory_limit_mb (no tiers)
                         gpu_memory_limit_mb = int(round(model_vram_per_actor_mb))
 
@@ -1523,7 +1470,53 @@ class EvaluateSystem():
                             self.logger.info(f"[SKIP] Already tested: {key}")
                             trials_skipped += 1
                             continue
+                        
+                        # Mark as tested/planned (before Ray restart to prevent redundant work)
+                        tested_gpu_configs.add(config_key)
                         planned_keys.add(key)
+                        
+                        # ===== FRESH RAY INSTANCE PER TRIAL =====
+                        # Both Ripper and ModelActor modes benefit from a clean GPU state at each trial start.
+                        # This ensures no memory fragmentation from previous trials affects the current one.
+                        # For ModelActor mode, this prevents cumulative actor memory from causing OOM.
+                        mode_label = "RIPPER" if self.ripper else "MODELACTOR"
+                        self.logger.info(f"")
+                        self.logger.info(f"===== {mode_label} MODE: Restarting Ray for fresh GPU state =====")
+                        
+                        # Stop the log drain thread gracefully
+                        self.log_queue.put(None)  # Sentinel to stop the drain thread
+                        time.sleep(0.5)  # Give thread time to finish
+                        
+                        # Shutdown and reinitialize Ray
+                        ray.shutdown()
+                        time.sleep(1.0)  # Allow GPU memory to be fully released
+                        
+                        # Reinitialize Ray with the same configuration
+                        ray.init(ignore_reinit_error=True, num_gpus=len(gpus_to_use), num_cpus=len(cpus_to_use), 
+                                logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir, runtime_env=runtime_env)
+                        self.log_queue = Queue()
+                        self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
+                        self._log_thread.start()
+                        
+                        # Reset the high water mark since we cleared GPU memory
+                        actors_high_water_mark = 0
+                        self.logger.info(f"Ray restarted. GPU memory cleared for {mode_label.lower()} trial.")
+                        self.logger.info(f"=================================================")
+                        
+                        # ===== CALCULATE REQUESTED MEMORY FOR THIS TRIAL =====
+                        # N ModelActors = predictions (each concurrent task gets its own ModelActor)
+                        n_model_actors = predictions
+                        requested_vram_mb = n_model_actors * model_vram_per_actor_mb
+                        requested_ram_mb = n_model_actors * model_ram_per_actor_mb
+                        task_overhead_vram_mb = n_model_actors * overhead_vram_per_task_mb
+                        task_overhead_ram_mb = n_model_actors * overhead_ram_per_task_mb
+                        total_requested_vram_mb = requested_vram_mb + task_overhead_vram_mb
+                        total_requested_ram_mb = requested_ram_mb + task_overhead_ram_mb
+
+                        # Note: OOM prevention via conditional Ray restart is no longer needed since we now
+                        # restart Ray at the beginning of every trial (fresh GPU state each time).
+                        restart_note = ""
+
                         trials_run += 1
                         self.logger.info("")
                         self.logger.info(f"------- Trial Number: {trial_num} -------")
@@ -1634,8 +1627,8 @@ class EvaluateSystem():
                         remove_output_subdirs(self.output_dir, logger=self.logger) 
                         trial_num += 1
                             
-                        # Update the high water mark of actors spawned in this Ray session
-                        # This is used to detect when we need to restart Ray to prevent OOM
+                        # Track actors for logging purposes (note: Ray is restarted every trial now,
+                        # so this is mainly for informational purposes in the logs)
                         actors_high_water_mark = max(actors_high_water_mark, predictions)
                         
                         # ===== MEMORY LOGGING =====
