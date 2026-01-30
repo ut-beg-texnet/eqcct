@@ -1301,12 +1301,18 @@ def mseed_predictor(input_dir='downloads_mseeds',
             max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
             
             # ===== cuDNN STABILITY HEADROOM =====
-            # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
+            # IMPORTANT: Having too many concurrent TensorFlow/PyTorch processes on a single GPU 
             # causes cuDNN resource contention, resulting in:
             #   - "DNN library is not found"
             #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
-            # Solution: Reserve 1 actor's worth of headroom from the VRAM-calculated max.
-            max_actors_with_headroom = max(1, max_actors_by_vram - 1)
+            #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
+            # 
+            # Solution: Reserve headroom PER GPU, not just globally.
+            # When multiple actors initialize concurrently on the same GPU, they each need
+            # CUDA context memory and cuDNN workspace memory, which causes fragmentation.
+            # Reserving 1 actor's worth per GPU provides adequate safety margin.
+            headroom_actors = max(1, n_gpus)  # At least 1 actor reserved per GPU
+            max_actors_with_headroom = max(1, max_actors_by_vram - headroom_actors)
             n_actors = min(requested_actors, max_actors_with_headroom)
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
@@ -1315,7 +1321,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
             logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
             logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
-            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - 1 for stability)")
+            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - {headroom_actors} for stability, 1 per GPU)")
             logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
@@ -1491,8 +1497,14 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # causes cuDNN resource contention, resulting in:
             #   - "DNN library is not found"
             #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
-            # Solution: Reserve 1 actor's worth of headroom from the VRAM-calculated max.
-            max_actors_with_headroom = max(1, max_actors_by_vram - 1)
+            #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
+            # 
+            # Solution: Reserve headroom PER GPU, not just globally.
+            # When multiple actors initialize concurrently on the same GPU, they each need
+            # CUDA context memory and cuDNN workspace memory, which causes fragmentation.
+            # Reserving 1 actor's worth per GPU provides adequate safety margin.
+            headroom_actors = max(1, n_gpus)  # At least 1 actor reserved per GPU
+            max_actors_with_headroom = max(1, max_actors_by_vram - headroom_actors)
             n_actors = min(requested_actors, max_actors_with_headroom)
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
@@ -1501,7 +1513,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
             logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
             logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
-            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - 1 for stability)")
+            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - {headroom_actors} for stability, 1 per GPU)")
             logger.info(f"Creating {n_actors} ModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")

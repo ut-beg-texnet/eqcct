@@ -1319,9 +1319,14 @@ class EvaluateSystem():
                 # causes cuDNN resource contention, resulting in:
                 #   - "DNN library is not found"
                 #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
-                # Solution: Reserve 1 actor's worth of headroom from the VRAM-calculated max.
-                # This provides buffer space for cuDNN context management.
-                max_actors_with_headroom = max(1, max_actors_by_vram - 1)
+                #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
+                # 
+                # Solution: Reserve headroom PER GPU, not just globally.
+                # When multiple actors initialize concurrently on the same GPU, they each need
+                # CUDA context memory and cuDNN workspace memory, which causes fragmentation.
+                # Reserving 1 actor's worth per GPU provides adequate safety margin.
+                headroom_actors = max(1, n_gpus)  # At least 1 actor reserved per GPU
+                max_actors_with_headroom = max(1, max_actors_by_vram - headroom_actors)
                 
                 # The effective limit is the minimum of memory constraints (with headroom applied to VRAM)
                 max_actors = max(1, min(max_actors_with_headroom, max_actors_by_ram))
@@ -1335,7 +1340,7 @@ class EvaluateSystem():
                 self.logger.info(f"===== MEMORY-AWARE ACTOR CAPPING (GPU) =====")
                 self.logger.info(f"GPUs visible to Ray: {n_gpus}")
                 self.logger.info(f"Max actors by VRAM: {max_actors_by_vram} ({aggregate_vram_cap_mb:.0f} MB / {model_vram_per_actor_mb:.0f} MB per actor)")
-                self.logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - 1 for stability)")
+                self.logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - {headroom_actors} for stability, 1 per GPU)")
                 self.logger.info(f"Max actors by RAM: {max_actors_by_ram} ({aggregate_ram_cap_mb:.0f} MB / {model_ram_per_actor_mb:.0f} MB per actor)")
                 self.logger.info(f"Effective max actors: {max_actors}")
                 self.logger.info(f"Ray will handle GPU scheduling (CUDA_VISIBLE_DEVICES already limits visibility)")
