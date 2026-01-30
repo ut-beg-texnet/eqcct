@@ -80,7 +80,7 @@ pip install eqcctpro
 
 1-minute long sample seismic waveforms from 229 TexNet stations have been provided in the repository under the `230_stations_1_min_dt.zip` file to help users understand the EQCCTPro waveform input style. 
 
-After donwloading the `.zip` file from the repository, run:
+After downloading the `.zip` file from the repository, run:
 ```sh
 unzip 230_stations_1_min_dt.zip
 ```
@@ -131,7 +131,7 @@ The timechunk time length is 1 hour long. At the same time, we use a waveform ov
 
 ## **Dataset creation using a FDSNWS connection**
 
-Through the help of [Donavin97](https://github.com/Donavin97), it is now possible to create the necesary dataset structure with your own data using the 
+Through the help of [Donavin97](https://github.com/Donavin97), it is now possible to create the necessary dataset structure with your own data using the 
 provided `create_dataset.py` script.
 
 `create_dataset.py` can:
@@ -177,7 +177,7 @@ waveforms_directory --chunk 60
 The resulting output folder contains the data to be processed by EQCCTPro.
 
 **Note:** Please make sure that you set a consistant chunk size in the download script, as well as in EQCCTPro itself to avoid issues.
-E.g.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling EQCCTPro. This is so that data won't be processed eroniusly.
+E.g.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling EQCCTPro. This is so that data won't be processed erroneously.
 
 ---
 
@@ -223,6 +223,8 @@ runner.run_eqcctpro()
 - **`use_gpu (bool)`**: Enables GPU acceleration. 
 - **`selected_gpus (list)`**: List of GPU indices (e.g., `[0, 1]`) to utilize.
 - **`vram_mb (float)`**: The hard VRAM limit allocated to **each** station prediction task.
+- **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use for the total pool. Default: `0.95`.
+- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.20` (20%).
 - **`cpu_id_list (list)`**: Specific CPU core IDs to bind the process to (e.g., `range(0, 16)`).
 - **`intra_threads (int)`**: Default = 1; Controls how many intra-parallelism threads Tensorflow can use
 - **`inter_threads (int)`**: Default = 1; Controls how many inter-parallelism threads Tensorflow can use
@@ -246,7 +248,36 @@ Before running large-scale production jobs, use `EvaluateSystem` to benchmark yo
 - **20% Step Size**: Automatically tests station concurrency at 20%, 40%, 60%, 80%, and 100% levels.
 - **Redundancy Filtering**: Skips configurations that are already in the results CSV, allowing for interrupted evaluations to resume instantly.
 - **Memory-Aware Dynamic Actor Pool**: EQCCTPro automatically calculates how many model instances can safely fit on each GPU based on the specific model's VRAM requirements and the available hardware memory. It utilizes Ray's fractional GPU allocation to stack multiple actors on a single GPU when possible, maximizing throughput while preventing memory conflicts.
+- **cuDNN Stability Logic**: To prevent "DNN library is not found" and "BLAS operation" errors, EQCCTPro enforces a dynamic safety buffer (`cudnn_headroom`). This reserves VRAM specifically for the dynamic workspace memory that TensorFlow/Keras requires during actual inference, which is not captured by static model weights.
 - **Automatic Ray Restart for OOM Prevention**: When increasing concurrency between trials, actors from previous trials may remain in GPU/RAM. If spawning new actors alongside existing ones would exceed the user-defined VRAM/RAM capacity (`max_vram_mb` / `ram_safety_cap`), Ray is automatically restarted to clear memory before the trial runs. This prevents unexpected OOM crashes during benchmark progression.
+
+### **Deep Dive: The cuDNN Safety Calculation**
+
+The calculation logic for GPU actor capping and concurrent prediction limits transforms a static hardware limit into a dynamic, stability-aware execution plan. Here is the step-by-step breakdown:
+
+#### **1. Defining the Total Pool**
+The `max_vram_mb` (or the physical total) is the budget for the **entire system**. 
+*   **Example**: If you have 2 GPUs and set `max_vram_mb = 93100`, the budget per card is calculated as:
+    `Per-GPU Budget = 93100 / 2 = 46550 MB`
+
+#### **2. Theoretical Capacity**
+The system determines how many models could *physically* fit if memory usage were perfectly static (model weights only). It uses the `per_actor_vram_mb`, which already includes a fixed Ray/CUDA buffer (e.g., 1024 MB).
+*   **Example**: `46550 MB / 2756 MB per actor ≈ 16.9 actors`.
+
+#### **3. Applying the cuDNN Headroom**
+This is the most critical step for stability. TensorFlow/Keras models allocate **dynamic workspace memory** during actual prediction (for convolution algorithms and BLAS operations). This memory is not reserved at startup. 
+
+The `cudnn_headroom` (default **20%**) is applied to the theoretical capacity to reserve a "cushion" for these dynamic spikes:
+*   `Safe Max Per GPU = floor(16.9 × 0.80) = 13 actors`
+*   `Max Actors Total = 13 × 2 GPUs = 26 actors`
+
+#### **4. Why this prevents OOM**
+The `max_vram_mb` acts as the ceiling, but the **Headroom** acts as the safety net. 
+*   **Without Headroom**: If you loaded 16 models on one 46GB GPU, you would use ~44GB for weights. When those 16 models all start a prediction simultaneously, they each try to grab ~500MB+ for cuDNN workspaces ($16 \times 500\text{MB} = 8\text{GB}$ extra). Total needed: $44\text{GB} + 8\text{GB} = 52\text{GB}$, leading to an **immediate crash (OOM)**.
+*   **With 20% Headroom**: By capping at 13 models, you use ~35GB for weights. This leaves **~11GB of free VRAM** specifically for the dynamic cuDNN workspaces. Even if all 13 models hit a heavy convolution at the same time, they have plenty of room to "breathe."
+
+#### **5. Interaction with Concurrency Limits**
+The final piece ensures that `max_pending_tasks` (the number of stations processed at once) matches this safety calculation. EQCCTPro caps the task submission to the `Max Actors Total` (e.g., 26). Even if the user requested 100 concurrent tasks, the code only allows 26 to enter the GPU pipeline at a time. This prevents the "Idle Actor" problem, where actors exist and consume VRAM for weights but starve the active tasks of the dynamic memory they need to finish.
 
 ### **Optimal Actor Pool Architecture (Technical Details)**
 
@@ -409,7 +440,8 @@ eval_gpu.evaluate()
 ### **Evaluation Parameters**
 - **`eval_mode (str)`**: `'cpu'` or `'gpu'`.
 - **`max_vram_mb (float)`**: The total aggregate VRAM budget across all GPUs for the evaluation. If not provided, it is calculated from physical VRAM.
-- **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use. Default: `0.95`.
+- **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use for the total pool. Default: `0.95`.
+- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.20` (20%).
 - **`ram_safety_cap (float)`**: The fraction of Total System RAM (0.0 to 0.98) EQCCTPro is allowed to use. Default: `0.90`.
 - **`stations2use (int)`**: The maximum number of stations to test in the benchmark.
 - **`min_cpu_amount / cpu_test_step_size (int)`**: Controls the iterative testing of CPU core counts.

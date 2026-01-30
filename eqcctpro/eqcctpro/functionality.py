@@ -47,6 +47,7 @@ class RunEQCCTPro():
                 vram_mb: float = None,
                 selected_gpus: list = None,
                 gpu_vram_safety_cap: float = 0.95,
+                cudnn_headroom: float = 0.20,
                 ram_safety_cap: float = 0.90,
                 cpu_id_list: list = [1],
                 start_time:str = None, 
@@ -79,6 +80,10 @@ class RunEQCCTPro():
         self.best_usecase_config = best_usecase_config
         self.vram_mb = vram_mb
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
+        
+        if cudnn_headroom > 0.80:
+            raise ValueError(f"cudnn_headroom cannot exceed 0.80 (80%), got {cudnn_headroom}. This is required for system stability.")
+        self.cudnn_headroom = cudnn_headroom
         
         if ram_safety_cap > 0.97:
             raise ValueError(f"ram_safety_cap cannot exceed 0.97, got {ram_safety_cap}. This is unsafe for system stability.")
@@ -294,6 +299,7 @@ class RunEQCCTPro():
                                         model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
                                         seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
                                         ram_safety_cap=self.ram_safety_cap,
+                                        cudnn_headroom=self.cudnn_headroom,
                                         ripper=self.ripper))
                     break
                 
@@ -411,6 +417,7 @@ class EvaluateSystem():
                  conc_station_tasks_step_size: int = 1,
                  max_vram_mb:float = None,
                  gpu_vram_safety_cap:float = 0.90, 
+                 cudnn_headroom:float = 0.20,
                  ram_safety_cap:float = 0.90,
                  selected_gpus:list = None,
                  start_time:str = None, 
@@ -446,6 +453,10 @@ class EvaluateSystem():
         self.cpu_id_list = cpu_id_list
         self.vram_mb = max_vram_mb
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
+        
+        if cudnn_headroom > 0.80:
+            raise ValueError(f"cudnn_headroom cannot exceed 0.80 (80%), got {cudnn_headroom}. This is required for system stability.")
+        self.cudnn_headroom = cudnn_headroom
         
         if ram_safety_cap > 0.97:
             raise ValueError(f"ram_safety_cap cannot exceed 0.97, got {ram_safety_cap}. This is unsafe for system stability.")
@@ -1314,19 +1325,32 @@ class EvaluateSystem():
                 # Hardware reference
                 n_gpus = len(gpus_to_use)
                 
-                # ===== cuDNN STABILITY HEADROOM =====
+                # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
                 # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
                 # causes cuDNN resource contention, resulting in:
                 #   - "DNN library is not found"
                 #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
                 #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
                 # 
-                # Solution: Reserve headroom PER GPU, not just globally.
-                # When multiple actors initialize concurrently on the same GPU, they each need
-                # CUDA context memory and cuDNN workspace memory, which causes fragmentation.
-                # Reserving 1 actor's worth per GPU provides adequate safety margin.
-                headroom_actors = max(1, n_gpus)  # At least 1 actor reserved per GPU
-                max_actors_with_headroom = max(1, max_actors_by_vram - headroom_actors)
+                # Solution: Enforce a PER-GPU maximum, not just a global total.
+                # cuDNN requires workspace memory beyond just model weights, and concurrent
+                # operations compete for these resources. The headroom provides efficient 
+                # concurrent inference while minimizing OOM risk.
+                #
+                # The formula scales dynamically with any model's VRAM requirements:
+                #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
+                #
+                # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
+                # cuDNN requires significant workspace memory for concurrent convolution operations.
+                # The headroom accounts for cuDNN workspace, CUDA context overhead, and
+                # memory fragmentation during concurrent operations.
+                CUDNN_SAFETY_FACTOR = 1.0 - self.cudnn_headroom  # Use user-defined headroom
+                
+                theoretical_max_per_gpu = per_gpu_vram_budget_mb / model_vram_per_actor_mb if model_vram_per_actor_mb > 0 else float('inf')
+                safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
+                
+                # Total max actors is per-GPU limit × number of GPUs
+                max_actors_with_headroom = safe_max_per_gpu * n_gpus
                 
                 # The effective limit is the minimum of memory constraints (with headroom applied to VRAM)
                 max_actors = max(1, min(max_actors_with_headroom, max_actors_by_ram))
@@ -1339,8 +1363,10 @@ class EvaluateSystem():
                 self.logger.info(f"")
                 self.logger.info(f"===== MEMORY-AWARE ACTOR CAPPING (GPU) =====")
                 self.logger.info(f"GPUs visible to Ray: {n_gpus}")
-                self.logger.info(f"Max actors by VRAM: {max_actors_by_vram} ({aggregate_vram_cap_mb:.0f} MB / {model_vram_per_actor_mb:.0f} MB per actor)")
-                self.logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - {headroom_actors} for stability, 1 per GPU)")
+                self.logger.info(f"Per-GPU VRAM: {per_gpu_vram_budget_mb:.0f} MB")
+                self.logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors ({per_gpu_vram_budget_mb:.0f} MB / {model_vram_per_actor_mb:.0f} MB)")
+                self.logger.info(f"Safe max per GPU (with {self.cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
+                self.logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
                 self.logger.info(f"Max actors by RAM: {max_actors_by_ram} ({aggregate_ram_cap_mb:.0f} MB / {model_ram_per_actor_mb:.0f} MB per actor)")
                 self.logger.info(f"Effective max actors: {max_actors}")
                 self.logger.info(f"Ray will handle GPU scheduling (CUDA_VISIBLE_DEVICES already limits visibility)")

@@ -809,6 +809,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
               seisbench_child_model=None,
               Detection_threshold=0.3,
               ram_safety_cap=None,
+              cudnn_headroom=0.20,
               # Ripper mode - uses old task-based approach instead of ModelActors
               ripper=False): 
     
@@ -850,6 +851,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
              
     gpu_limit: float
        Set the maximum percentage of memory usage for the GPU. 
+
+    cudnn_headroom: float, default=0.20
+        Percentage of GPU VRAM to reserve for cuDNN workspace overhead (0.0 to 0.80).
+        This prevents "DNN library is not found" errors during concurrent predictions.
 
     overwrite: Bolean, default=False
         Overwrite your results automatically.
@@ -1268,6 +1273,16 @@ def mseed_predictor(input_dir='downloads_mseeds',
     requested_concurrent_tasks = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
     actor_cap_comment = ""  # Will be populated if actors are capped due to memory constraints
     
+    # ===== cuDNN CONCURRENT PREDICTION LIMIT =====
+    # This tracks the maximum safe number of concurrent predictions based on GPU constraints.
+    # Key insight: cuDNN workspace memory is allocated dynamically during inference, and having
+    # too many concurrent predictions causes resource contention regardless of total actors.
+    # 
+    # safe_concurrent_predictions is set to safe_max_per_gpu (from a single GPU's perspective)
+    # in GPU branches, ensuring that concurrent predictions don't overwhelm cuDNN resources.
+    # For CPU mode, this remains at the user-requested value.
+    safe_concurrent_predictions = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+    
     if model_type_lower == 'seisbench':
         # Create SeisBench model actors
         if use_gpu:
@@ -1300,28 +1315,50 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Calculate max actors based on VRAM (memory constraint, not hardware count)
             max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
             
-            # ===== cuDNN STABILITY HEADROOM =====
+            # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
             # IMPORTANT: Having too many concurrent TensorFlow/PyTorch processes on a single GPU 
             # causes cuDNN resource contention, resulting in:
             #   - "DNN library is not found"
             #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
             #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
             # 
-            # Solution: Reserve headroom PER GPU, not just globally.
-            # When multiple actors initialize concurrently on the same GPU, they each need
-            # CUDA context memory and cuDNN workspace memory, which causes fragmentation.
-            # Reserving 1 actor's worth per GPU provides adequate safety margin.
-            headroom_actors = max(1, n_gpus)  # At least 1 actor reserved per GPU
-            max_actors_with_headroom = max(1, max_actors_by_vram - headroom_actors)
+            # Solution: Enforce a PER-GPU maximum, not just a global total.
+            # cuDNN requires workspace memory beyond just model weights, and concurrent
+            # operations compete for these resources.
+            #
+            # The formula scales dynamically with any model's VRAM requirements:
+            #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
+            #
+            # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
+            # cuDNN requires significant workspace memory for concurrent convolution operations.
+            # The headroom provides efficient concurrent inference while minimizing OOM risk.
+            # The headroom accounts for:
+            #   1. cuDNN workspace memory that scales with concurrent operations
+            #   2. CUDA context overhead for multiple processes
+            #   3. Memory fragmentation during concurrent allocation/deallocation
+            CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
+            
+            vram_per_single_gpu = available_vram_mb / n_gpus
+            theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
+            safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
+            
+            # Total max actors is per-GPU limit × number of GPUs
+            max_actors_with_headroom = safe_max_per_gpu * n_gpus
             n_actors = min(requested_actors, max_actors_with_headroom)
+            
+            # Cap concurrent predictions to the total safe actors across all GPUs.
+            # This ensures we don't create "idle" actors that eat VRAM while others predict.
+            safe_concurrent_predictions = max_actors_with_headroom
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available GPUs: {n_gpus}")
             logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
             logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
-            logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
-            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - {headroom_actors} for stability, 1 per GPU)")
+            logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
+            logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
+            logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
+            logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
             logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
@@ -1492,28 +1529,57 @@ def mseed_predictor(input_dir='downloads_mseeds',
             # Calculate max actors based on VRAM (memory constraint, not hardware count)
             max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
             
-            # ===== cuDNN STABILITY HEADROOM =====
+            # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
             # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
             # causes cuDNN resource contention, resulting in:
             #   - "DNN library is not found"
             #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
             #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
             # 
-            # Solution: Reserve headroom PER GPU, not just globally.
-            # When multiple actors initialize concurrently on the same GPU, they each need
-            # CUDA context memory and cuDNN workspace memory, which causes fragmentation.
-            # Reserving 1 actor's worth per GPU provides adequate safety margin.
-            headroom_actors = max(1, n_gpus)  # At least 1 actor reserved per GPU
-            max_actors_with_headroom = max(1, max_actors_by_vram - headroom_actors)
+            # Solution: Enforce a PER-GPU maximum, not just a global total.
+            # cuDNN requires workspace memory beyond just model weights, and concurrent
+            # operations compete for these resources.
+            #
+            # The formula scales dynamically with any model's VRAM requirements:
+            #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
+            #
+            # Example: EQCCT with 46550 MB/GPU, 2756 MB/actor:
+            #   theoretical = 46550 / 2756 = 16.9 actors/GPU
+            #   safe_max = floor(16.9 * 0.90) = 15 actors/GPU (with 10% headroom)
+            #
+            # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
+            # cuDNN requires significant workspace memory for concurrent convolution operations.
+            # Empirically tested values:
+            #   - 0.90 (10% headroom): Efficient concurrent inference
+            #   - 0.88 (12% headroom): Previously tested for stability
+            #   - 0.75 (25% headroom): Extremely conservative
+            # The headroom accounts for:
+            #   1. cuDNN workspace memory that scales with concurrent operations
+            #   2. CUDA context overhead for multiple processes
+            #   3. Memory fragmentation during concurrent allocation/deallocation
+            CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
+            
+            vram_per_single_gpu = available_vram_mb / n_gpus
+            theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
+            safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
+            
+            # Total max actors is per-GPU limit × number of GPUs
+            max_actors_with_headroom = safe_max_per_gpu * n_gpus
             n_actors = min(requested_actors, max_actors_with_headroom)
+            
+            # Cap concurrent predictions to the total safe actors across all GPUs.
+            # This ensures we don't create "idle" actors that eat VRAM while others predict.
+            safe_concurrent_predictions = max_actors_with_headroom
             
             logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
             logger.info(f"Available GPUs: {n_gpus}")
             logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
             logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
-            logger.info(f"Max actors by VRAM: {max_actors_by_vram}")
-            logger.info(f"Max actors with cuDNN headroom: {max_actors_with_headroom} (VRAM max - {headroom_actors} for stability, 1 per GPU)")
+            logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
+            logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
+            logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
+            logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
             logger.info(f"Creating {n_actors} ModelActor(s)")
             if requested_actors > n_actors:
                 logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
@@ -1664,7 +1730,18 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
     # Submit tasks to ray in a queue
     tasks_queue = []
-    max_pending_tasks = number_of_concurrent_station_predictions
+    
+    # Cap max_pending_tasks to safe_concurrent_predictions to prevent cuDNN resource contention
+    # This ensures that even with multiple actors/GPUs, we don't overwhelm cuDNN workspace allocation
+    if number_of_concurrent_station_predictions > safe_concurrent_predictions:
+        logger.info(f"cuDNN PREDICTION LIMIT: Capping concurrent predictions from {number_of_concurrent_station_predictions} to {safe_concurrent_predictions}")
+        logger.info(f"  → Actors created: {len(model_actors)} across {len(gpu_id) if use_gpu else 0} GPU(s)")
+        logger.info(f"  → Max concurrent predictions: {safe_concurrent_predictions} (total safe system limit)")
+        logger.info(f"  → Tasks will queue and execute as actors become available")
+        max_pending_tasks = safe_concurrent_predictions
+    else:
+        max_pending_tasks = number_of_concurrent_station_predictions
+    
     logger.info(f"Starting EQCCTPro parallelized waveform processing...") 
     logger.info("")
     start_time = time.time() 
