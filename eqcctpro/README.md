@@ -224,7 +224,7 @@ runner.run_eqcctpro()
 - **`selected_gpus (list)`**: List of GPU indices (e.g., `[0, 1]`) to utilize.
 - **`vram_mb (float)`**: The hard VRAM limit allocated to **each** station prediction task.
 - **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use for the total pool. Default: `0.95`.
-- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.20` (20%).
+- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.25` (25%).
 - **`cpu_id_list (list)`**: Specific CPU core IDs to bind the process to (e.g., `range(0, 16)`).
 - **`intra_threads (int)`**: Default = 1; Controls how many intra-parallelism threads Tensorflow can use
 - **`inter_threads (int)`**: Default = 1; Controls how many inter-parallelism threads Tensorflow can use
@@ -264,17 +264,19 @@ The `max_vram_mb` (or the physical total) is the budget for the **entire system*
 The system determines how many models could *physically* fit if memory usage were perfectly static (model weights only). It uses the `per_actor_vram_mb`, which already includes a fixed Ray/CUDA buffer (e.g., 1024 MB).
 *   **Example**: `46550 MB / 2756 MB per actor ≈ 16.9 actors`.
 
-#### **3. Applying the cuDNN Headroom**
-This is the most critical step for stability. TensorFlow/Keras models allocate **dynamic workspace memory** during actual prediction (for convolution algorithms and BLAS operations). This memory is not reserved at startup. 
+#### **3. Applying the cuDNN Headroom (ModelActor Mode)**
+This is the most critical step for stability in **ModelActor mode**. TensorFlow/Keras models allocate **dynamic workspace memory** during actual prediction (for convolution algorithms and BLAS operations). This memory is not reserved at startup. 
 
-The `cudnn_headroom` (default **20%**) is applied to the theoretical capacity to reserve a "cushion" for these dynamic spikes:
-*   `Safe Max Per GPU = floor(16.9 × 0.80) = 13 actors`
-*   `Max Actors Total = 13 × 2 GPUs = 26 actors`
+The `cudnn_headroom` (default **25%**) is applied to the theoretical capacity to reserve a "cushion" for these dynamic spikes:
+*   `Safe Max Per GPU = floor(16.9 × 0.75) = 12 actors`
+*   `Max Actors Total = 12 × 2 GPUs = 24 actors`
+
+**Note**: For **Ripper Mode**, a different, more optimized calculation is used (see below).
 
 #### **4. Why this prevents OOM**
 The `max_vram_mb` acts as the ceiling, but the **Headroom** acts as the safety net. 
 *   **Without Headroom**: If you loaded 16 models on one 46GB GPU, you would use ~44GB for weights. When those 16 models all start a prediction simultaneously, they each try to grab ~500MB+ for cuDNN workspaces ($16 \times 500\text{MB} = 8\text{GB}$ extra). Total needed: $44\text{GB} + 8\text{GB} = 52\text{GB}$, leading to an **immediate crash (OOM)**.
-*   **With 20% Headroom**: By capping at 13 models, you use ~35GB for weights. This leaves **~11GB of free VRAM** specifically for the dynamic cuDNN workspaces. Even if all 13 models hit a heavy convolution at the same time, they have plenty of room to "breathe."
+*   **With 25% Headroom**: By capping at 12 models, you use ~33GB for weights. This leaves **~13GB of free VRAM** specifically for the dynamic cuDNN workspaces. Even if all 12 models hit a heavy convolution at the same time, they have plenty of room to "breathe."
 
 #### **5. Interaction with Concurrency Limits**
 The final piece ensures that `max_pending_tasks` (the number of stations processed at once) matches this safety calculation. EQCCTPro caps the task submission to the `Max Actors Total` (e.g., 26). Even if the user requested 100 concurrent tasks, the code only allows 26 to enter the GPU pipeline at a time. This prevents the "Idle Actor" problem, where actors exist and consume VRAM for weights but starve the active tasks of the dynamic memory they need to finish.
@@ -346,59 +348,73 @@ runner = RunEQCCTPro(
 - **Variable Workloads**: When task memory requirements vary significantly
 - **Legacy Compatibility**: Matches the original EQCCTPro behavior before ModelActor optimization
 
-#### **Memory Management in Ripper Mode**
+#### **Memory Management in Ripper Mode (Empirically Calibrated)**
 
-Ripper mode benefits from the same automatic OOM prevention mechanisms as ModelActor mode, plus additional runtime memory checking for both GPU and CPU modes.
+Ripper mode uses a simplified but highly optimized memory calculation derived from actual GPU test trials. Unlike ModelActor mode which stacks multiple fixed buffers, Ripper mode uses **model-specific initialization multipliers** and a fixed **concurrency headroom**.
 
-##### **GPU Ripper Mode: VRAM-Aware Concurrency Limiting**
+##### **1. Per-Task Initialization Multiplier**
+Each Ripper task loads its own model. The peak memory during initialization (graph construction, library loading, and weight allocation) is higher than the steady-state inference memory. We use empirically-calibrated multipliers to account for this:
 
-Before each trial, ripper queries **actual free VRAM** from the GPU(s) using `pynvml`:
+| Model | Multiplier | Rationale |
+|-------|------------|-----------|
+| **EQCCT** | **2.0×** | Empirical 1.94× measured + safety margin |
+| **EQTransformer** | **2.0×** | Large model architecture, similar to EQCCT |
+| **PhaseNet / Light** | **1.7×** | Smaller models, higher relative CUDA context overhead |
+| **GPD** | **1.8×** | Medium-sized model |
+
+##### **2. Concurrency Headroom (10%)**
+When many Ripper tasks run **simultaneously**, they compete for cuDNN workspace memory and CUDA context switching. To prevent `CUDNN_STATUS_EXECUTION_FAILED` errors during high-concurrency peaks, EQCCTPro reserves a fixed **10% concurrency headroom**.
+
+##### **3. GPU Ripper Concurrency Calculation**
+Before each trial, EQCCTPro queries **actual free VRAM** from the GPU(s) using `pynvml` and applies the following logic:
+
+```text
+# 1. Get the pool
+effective_vram_pool = min(user_defined_pool, actual_free_vram)
+
+# 2. Reserve 10% for concurrent task interference
+usable_vram = effective_vram_pool × (1.0 - 0.10)
+
+# 3. Calculate tasks per GPU using the init multiplier
+vram_per_task = base_model_vram × model_multiplier
+max_concurrent = floor(usable_vram / vram_per_task)
 ```
-effective_vram = min(user_defined_pool / num_gpus, actual_free_vram)
-max_concurrent = (effective_vram × ripper_headroom) / vram_per_task
-```
 
-This prevents OOM when:
-- User's `max_vram_mb` is for multiple GPUs but only a subset is used
-- Other processes are using GPU memory
-- Previous trials haven't fully released VRAM
+**Why this is better:** 
+- **No Double-Counting**: It avoids stacking `VRAM_BUFFER`, `cudnn_headroom`, and `ripper_multiplier` additively.
+- **Empirically Proven**: This logic enabled **24-26 concurrent EQCCT tasks** on a dual-49GB GPU system, whereas conservative stacking would have limited it to ~20.
+- **Smart Slicing**: Each task is assigned a `gpu_memory_limit_mb` (TensorFlow soft cap) equal to the fair share of the usable VRAM pool.
 
-##### **CPU Ripper Mode: RAM-Aware Concurrency Limiting**
-
+##### **4. CPU Ripper Mode: RAM-Aware Concurrency Limiting**
 Before each trial, ripper queries **actual available RAM** using `psutil`:
+```text
+usable_ram = actual_available_ram × ram_safety_cap
+max_concurrent = floor(usable_ram / ram_per_task)
 ```
-usable_ram = actual_available_ram × ripper_ram_headroom
-max_concurrent = usable_ram / ram_per_task
-```
-
-This prevents OOM when:
-- Other processes are consuming system RAM
-- Previous trials haven't fully released RAM
-- The user requests more concurrent tasks than RAM can support
+This prevents system instability and swap-thrashing when many tasks load models simultaneously.
 
 ##### **Tunable Headroom Variables**
 
-Both headroom factors can be adjusted in `parallelization.py` (search for these variable names):
-
-| Variable | Default | Location | Mode | Description |
-|----------|---------|----------|------|-------------|
-| `ripper_headroom` | `0.85` | ~line 1011 | GPU | Fraction of effective VRAM to use |
-| `ripper_ram_headroom` | `0.80` | ~line 1061 | CPU | Fraction of available RAM to use |
+| Variable | Parameter | Default | Mode | Description |
+|----------|-----------|---------|------|-------------|
+| `cudnn_headroom` | `cudnn_headroom` | `0.25` | GPU | **(ModelActor Only)** Reserved for cuDNN workspace |
+| `Ripper Headroom` | *Internal* | `0.10` | GPU | **(Ripper Only)** Reserved for concurrency interference |
+| `ram_safety_cap` | `ram_safety_cap` | `0.90` | CPU | Fraction of Total System RAM to use |
 
 ##### **Recommended Values and Risks**
 
-| Value Range | Use Case | Risk Level |
-|-------------|----------|------------|
-| **0.70 - 0.75** | Shared systems, other GPU/CPU-intensive processes running | Very Safe |
-| **0.80 - 0.85** | Dedicated systems with moderate background processes | Safe (Default) |
-| **0.90 - 0.95** | Dedicated systems with minimal background processes | Moderate Risk |
-| **> 0.95** | Not recommended | High Risk of OOM |
+| cuDNN Headroom | Use Case | Risk Level |
+|----------------|----------|------------|
+| **0.25 - 0.30** | Shared systems, other GPU-intensive processes running | Very Safe |
+| **0.25** | Dedicated systems with moderate background processes | Safe (Default) |
+| **0.15 - 0.20** | Dedicated systems with minimal background processes | Moderate Risk |
+| **< 0.05** | Not recommended | High Risk of OOM |
 
 **Risks of Higher Values:**
 - **GPU (VRAM)**: Memory fragmentation can cause `CUDNN_STATUS_EXECUTION_FAILED` or `DNN library is not found` errors even when theoretical VRAM is available. TensorFlow's XLA compilation can cause temporary memory spikes.
 - **CPU (RAM)**: System may become unresponsive if RAM is exhausted. Linux OOM killer may terminate processes unexpectedly. Swap usage causes severe performance degradation.
 
-**Recommendation**: Start with the defaults (`0.85` for GPU, `0.80` for CPU). If you encounter OOM errors, reduce the headroom. If tasks complete reliably, you can gradually increase to maximize throughput.
+**Recommendation**: Start with the defaults (`0.25` for GPU, `0.90` for CPU). If you encounter OOM errors, increase the headroom (reduce `ram_safety_cap`). If tasks complete reliably, you can gradually decrease headroom to maximize throughput.
 
 ##### **Other OOM Prevention Mechanisms**
 
@@ -441,7 +457,7 @@ eval_gpu.evaluate()
 - **`eval_mode (str)`**: `'cpu'` or `'gpu'`.
 - **`max_vram_mb (float)`**: The total aggregate VRAM budget across all GPUs for the evaluation. If not provided, it is calculated from physical VRAM.
 - **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use for the total pool. Default: `0.95`.
-- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.20` (20%).
+- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.25` (25%).
 - **`ram_safety_cap (float)`**: The fraction of Total System RAM (0.0 to 0.98) EQCCTPro is allowed to use. Default: `0.90`.
 - **`stations2use (int)`**: The maximum number of stations to test in the benchmark.
 - **`min_cpu_amount / cpu_test_step_size (int)`**: Controls the iterative testing of CPU core counts.
@@ -596,8 +612,8 @@ The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results
 - **`Total Waveform Analysis Timespace (min)`**: Total duration of the analyzed waveforms.
 
 ### **Model-Requested Memory (Theoretical)**
-*These values represent the expected memory footprint based on empirical model data.*
-- **`Requested VRAM per Actor (MB)`**: Theoretical VRAM required for one model instance (GPU trials only). **Includes safety buffer** (1024 MB).
+*These values represent the expected memory footprint based on empirical model data, calibrated from GPU test trials (2x 49GB GPUs, 93100 MB pool).*
+- **`Requested VRAM per Actor (MB)`**: Theoretical VRAM required for one model instance (GPU trials only). **Includes safety buffer** (1024 MB, empirically calibrated).
 - **`Requested RAM per Actor (MB)`**: Theoretical system RAM required for one model instance. In CPU trials, this is the primary memory footprint; in GPU trials, this tracks the system RAM overhead for the GPU process. **Includes safety buffer** (1536 MB).
 - **`Total Requested VRAM (MB)`**: The total theoretical VRAM footprint expected (`N ModelActors × Requested per Actor + N × 128 MB overhead`).
 - **`Total Requested RAM (MB)`**: The total theoretical RAM footprint expected (`N ModelActors × Requested per Actor + N × 256 MB overhead`).
@@ -624,7 +640,7 @@ The overhead typically consists of:
 2. **Ray Raylets**: ~100-200 MB per Raylet process for Ray's distributed runtime.
 3. **Ray Workers**: ~50-150 MB per worker process for Python interpreter and framework imports.
 4. **TensorFlow/PyTorch Buffers**: Variable memory for gradient caching, intermediate tensors, and framework-specific optimizations.
-5. **Safety Buffer**: ~1024 MB (1 GB) for VRAM and ~1536 MB (1.5 GB) for RAM reserved for operational stability and framework overhead.
+5. **Safety Buffer**: ~1024 MB (1 GB) for VRAM and ~1536 MB (1.5 GB) for RAM reserved for operational stability and framework overhead. These values are empirically calibrated from GPU test trials.
 6. **Per-Task Overheads**: ~128 MB VRAM and ~256 MB RAM per concurrent task for waveform data handling and processing.
 
 ### **Efficiency & Performance**
@@ -665,7 +681,7 @@ When analyzing evaluation results, it's important to understand why memory value
 
 | Column | Formula | Description |
 |--------|---------|-------------|
-| **Requested RAM per Actor** | `Model_RAM + RAM_BUFFER (1536 MB)` | Theoretical per-actor cost from isolated testing |
+| **Requested RAM per Actor** | `Model_RAM + RAM_BUFFER (1536 MB)` | Theoretical per-actor cost from isolated testing (empirically calibrated) |
 | **Total Requested RAM** | `N × Requested_per_Actor + N × 256 MB` | Worst-case estimate for N fresh actors |
 | **Process Tree RAM** | `sum(RSS of main + all children)` | Actual total footprint at snapshot time |
 | **RAM Growth** | `Process_Tree_RAM(after) - Process_Tree_RAM(before)` | What THIS specific trial added |

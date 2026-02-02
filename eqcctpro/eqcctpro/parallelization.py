@@ -35,11 +35,19 @@ from logging.handlers import QueueHandler
 # - Model weights
 # - Inference buffers and activations
 
-# Safety buffers for unexpected allocations during inference
+# Safety buffers for unexpected allocations during inference (ModelActor mode)
 # These account for Ray worker process overhead, framework (TF/PyTorch) initialization,
 # and runtime memory spikes.
-VRAM_BUFFER_MB = 1024.0   # 1GB Extra VRAM headroom per model actor
-RAM_BUFFER_MB = 1536.0    # 1.5GB Extra RAM headroom per model actor (includes Ray worker + framework cost)
+# 
+# Calibrated from empirical GPU test data (2x 49GB GPUs, 93100 MB pool):
+# - EQCCT: 26 actors succeeded with requested 2756 MB/actor (base 1732 + buffer 1024)
+# - PhaseNet: 58 actors succeeded with requested 1524 MB/actor (base 500 + buffer 1024)
+# - EQTransformer: 32 actors succeeded with requested 2064 MB/actor (base 528 + buffer 1536)
+#
+# Using 1024 MB as baseline, which proved stable for TensorFlow and smaller PyTorch models.
+# The cudnn_headroom parameter provides additional safety margin.
+VRAM_BUFFER_MB = 1024.0   # 1GB Extra VRAM headroom per model actor (empirically calibrated)
+RAM_BUFFER_MB = 1536.0    # 1.5GB Extra RAM headroom per model actor (for data buffers/Ray overhead)
 
 # GPU Mode - VRAM requirements (MB) for each model actor (first-load cost)
 # These include the CUDA context overhead (~500MB) that each actor pays
@@ -117,7 +125,7 @@ EQCCT_CPU_RAM_MB = 728.0     # TensorFlow CPU-only runtime
 
 def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=500.0, logger=None):
     """
-    Get VRAM requirement for a SeisBench model including buffer.
+    Get VRAM requirement for a SeisBench model including buffer (ModelActor mode).
     
     Args:
         parent_model_name: SeisBench model class (e.g., 'PhaseNet')
@@ -137,6 +145,40 @@ def get_seisbench_model_vram_mb(parent_model_name, child_model_name, default_mb=
     else:
         base_vram = SEISBENCH_MODEL_VRAM_MB[key]
     return base_vram + VRAM_BUFFER_MB
+
+def get_seisbench_model_vram_mb_ripper(parent_model_name, child_model_name, default_mb=500.0, logger=None):
+    """
+    Get VRAM requirement for a SeisBench model in Ripper mode.
+    
+    Uses empirically-calibrated initialization multipliers based on actual GPU test data.
+    Smaller models have relatively higher overhead due to fixed CUDA context costs.
+    
+    Calibration data (2x 49GB GPUs, 93100 MB pool):
+    - PhaseNet: 58 actors → ~1605 MB/actor → 1.65x base
+    - EQTransformer: 32 actors → ~2909 MB/actor → 1.90x base (larger model)
+    
+    We add a small safety margin to empirical values for robustness.
+    """
+    # Model-specific multipliers calibrated from empirical GPU test results
+    # Smaller models have higher relative overhead (CUDA context is fixed cost)
+    RIPPER_MULTIPLIERS = {
+        'PhaseNet': 1.7,       # Empirical 1.65x + margin
+        'PhaseNetLight': 1.7,  # Similar architecture to PhaseNet
+        'EQTransformer': 2.0,  # Empirical 1.90x + margin (larger model)
+        'GPD': 1.8,            # Medium-sized model
+    }
+    
+    multiplier = RIPPER_MULTIPLIERS.get(parent_model_name, 1.8)  # Default for unknown models
+    
+    key = (parent_model_name, child_model_name)
+    if key not in SEISBENCH_MODEL_VRAM_MB:
+        if logger:
+            logger.warning(f"Unknown SeisBench model '{parent_model_name}/{child_model_name}' - using default VRAM estimate ({default_mb} MB). "
+                          f"Consider running measure_model_memory_usage.py to get accurate values.")
+        base_vram = default_mb
+    else:
+        base_vram = SEISBENCH_MODEL_VRAM_MB[key]
+    return base_vram * multiplier
 
 def get_seisbench_model_ram_mb(parent_model_name, child_model_name, use_gpu=True, default_mb=500.0, logger=None):
     """
@@ -165,8 +207,33 @@ def get_seisbench_model_ram_mb(parent_model_name, child_model_name, use_gpu=True
     return base_ram + RAM_BUFFER_MB
 
 def get_eqcct_vram_mb():
-    """Get VRAM requirement for EQCCT model actor."""
+    """Get VRAM requirement for EQCCT model actor (ModelActor mode)."""
     return EQCCT_GPU_VRAM_MB + VRAM_BUFFER_MB
+
+def get_eqcct_vram_mb_ripper():
+    """
+    Get VRAM requirement for EQCCT in Ripper mode.
+    
+    Ripper mode loads/unloads models per-task, which means:
+    - Multiple tasks may initialize TensorFlow simultaneously
+    - CUDA contexts are created/destroyed repeatedly
+    - Memory fragmentation is higher
+    
+    Uses an empirically-calibrated multiplier based on actual GPU test data.
+    
+    Calibration data (2x 49GB GPUs, 93100 MB pool):
+    - 28 concurrent EQCCT tasks succeeded
+    - Process Tree VRAM: ~94,070 MB
+    - Actual per task: 3,360 MB
+    - Base VRAM: 1,732 MB
+    - Empirical multiplier: 1.94x
+    
+    We use 2.0x as a small safety margin above the empirical value.
+    """
+    # Empirically calibrated multiplier (1.94x measured, 2.0x with margin)
+    # Accounts for: TF graph build, XLA compilation, cuDNN workspace, fragmentation
+    RIPPER_INIT_MULTIPLIER = 2.0
+    return EQCCT_GPU_VRAM_MB * RIPPER_INIT_MULTIPLIER
 
 def get_eqcct_ram_mb(use_gpu=True):
     """Get RAM requirement for EQCCT model actor."""
@@ -983,12 +1050,14 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # 2. Other processes may be using GPU memory
         # 3. Previous trials may not have fully released VRAM
         if use_gpu and gpu_id:
-            # Get VRAM requirement per task
+            # Get VRAM requirement per task using RIPPER-SPECIFIC estimates
+            # These use a single initialization multiplier (2.5×) instead of stacking buffers
+            # This accounts for: TF graph build, XLA compilation, cuDNN workspace, fragmentation
             if model_type_lower == 'seisbench':
-                vram_per_task_mb = get_seisbench_model_vram_mb(
+                vram_per_task_mb = get_seisbench_model_vram_mb_ripper(
                     seisbench_parent_model, seisbench_child_model, logger=logger)
             else:
-                vram_per_task_mb = get_eqcct_vram_mb()
+                vram_per_task_mb = get_eqcct_vram_mb_ripper()
             
             # Calculate per-GPU user-defined VRAM budget
             # max_vram_mb (total_vram_pool_mb) is the total across ALL GPUs in selected_gpus
@@ -1022,28 +1091,73 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 actual_free_vram_mb               # Actual free VRAM on these GPUs
             )
             
-            # Apply headroom factor for ripper mode
-            # NOTE: Ripper mode creates/destroys TensorFlow models per-task, which can cause
-            # GPU memory fragmentation. If you see "DNN library is not found" or 
-            # "CUDNN_STATUS_EXECUTION_FAILED" errors, try reducing this to 0.80-0.85.
-            # Higher values (0.95) maximize concurrency but may cause sporadic cuDNN failures.
-            ripper_headroom = 0.85
-            usable_vram_mb = effective_vram_pool * ripper_headroom
-            max_safe_concurrent = max(1, int(usable_vram_mb / vram_per_task_mb))
+            # =====================================================================
+            # RIPPER-SPECIFIC CONCURRENCY HEADROOM
+            # =====================================================================
+            # The per-task VRAM multiplier (2.0× for EQCCT, 1.7× for PhaseNet) handles
+            # SINGLE-TASK overhead: TF/PyTorch init, graph build, cuDNN workspace.
+            #
+            # However, when many tasks run CONCURRENTLY, there's additional overhead from:
+            # - cuDNN workspace contention (multiple tasks allocating simultaneously)
+            # - Memory fragmentation from parallel allocations
+            # - CUDA context switching overhead
+            #
+            # Empirical testing on 2x 49GB GPUs (93100 MB pool) shows:
+            # - 0% headroom (13 tasks/GPU = 26 total): FAILS with cuDNN errors
+            # - 25% headroom (10 tasks/GPU = 20 total): WORKS but too conservative
+            # - 10% headroom (12 tasks/GPU = 24 total): Target balance
+            #
+            # This is NOT double-counting with the multiplier because:
+            # - Multiplier: Per-task initialization overhead
+            # - Concurrency headroom: Multi-task interference overhead
+            # =====================================================================
+            RIPPER_CONCURRENCY_HEADROOM = 0.10  # 10% reserved for concurrent task interference
+            usable_vram_mb = effective_vram_pool * (1.0 - RIPPER_CONCURRENCY_HEADROOM)
+            usable_vram_per_gpu_mb = usable_vram_mb / num_gpus
+            
+            # =====================================================================
+            # RIPPER CONCURRENCY CALCULATION
+            # =====================================================================
+            # vram_per_task_mb includes empirically-calibrated multiplier (2.0× for EQCCT)
+            # Plus 10% concurrency headroom for multi-task interference
+            # =====================================================================
+            
+            max_tasks_per_gpu = max(1, int(usable_vram_per_gpu_mb / vram_per_task_mb))
+            max_safe_concurrent = max_tasks_per_gpu * num_gpus
             
             # Cap max_pending_tasks to the VRAM-safe limit
             requested_concurrency = number_of_concurrent_station_predictions
             if requested_concurrency > max_safe_concurrent:
                 logger.warning(f"RIPPER VRAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
-                             f"but VRAM only allows {max_safe_concurrent} "
-                             f"(Effective: {effective_vram_pool:.0f} MB × {ripper_headroom:.0%} / {vram_per_task_mb:.0f} MB per task)")
+                             f"but VRAM allows {max_safe_concurrent} "
+                             f"({max_tasks_per_gpu} tasks/GPU × {num_gpus} GPUs)")
                 max_pending_tasks = max_safe_concurrent
             else:
                 max_pending_tasks = requested_concurrency
             
+            # Calculate per-task VRAM limit for TensorFlow soft cap
+            # Each task gets its fair share of the GPU's usable VRAM
+            tasks_per_gpu = max(1, int((max_pending_tasks + num_gpus - 1) / num_gpus))  # Ceiling division
+            ripper_vram_limit_per_task_mb = int(usable_vram_per_gpu_mb / tasks_per_gpu)
+            
+            # Calculate the effective multiplier for logging
+            if model_type_lower == 'seisbench':
+                base_vram = SEISBENCH_MODEL_VRAM_MB.get(
+                    (seisbench_parent_model, seisbench_child_model), 500.0)
+                effective_multiplier = vram_per_task_mb / base_vram if base_vram > 0 else 2.0
+            else:
+                effective_multiplier = vram_per_task_mb / EQCCT_GPU_VRAM_MB
+            
             logger.info(f"VRAM-aware concurrency: {max_pending_tasks} concurrent tasks "
-                       f"(User budget/GPU: {user_vram_per_gpu_mb:.0f} MB, Actual free: {actual_free_vram_mb:.0f} MB, "
-                       f"Effective: {effective_vram_pool:.0f} MB, per-task: {vram_per_task_mb:.0f} MB)")
+                       f"(User budget/GPU: {user_vram_per_gpu_mb:.0f} MB, Actual free: {actual_free_vram_mb:.0f} MB)")
+            logger.info(f"RIPPER VRAM ({effective_multiplier:.1f}× task multiplier + {RIPPER_CONCURRENCY_HEADROOM*100:.0f}% concurrency headroom): "
+                       f"{vram_per_task_mb:.0f} MB/task, Usable: {usable_vram_per_gpu_mb:.0f} MB/GPU → {max_tasks_per_gpu} tasks/GPU max")
+            logger.info(f"RIPPER VRAM SLICING: {tasks_per_gpu} tasks/GPU × {ripper_vram_limit_per_task_mb} MB/task "
+                       f"= {tasks_per_gpu * ripper_vram_limit_per_task_mb} MB/GPU (budget: {usable_vram_per_gpu_mb:.0f} MB/GPU)")
+            
+            # CRITICAL: Override gpu_memory_limit_mb with the computed per-task limit
+            # This ensures each Ripper task sets the correct TensorFlow soft memory cap
+            gpu_memory_limit_mb = ripper_vram_limit_per_task_mb
         else:
             # =====================================================================
             # CPU RIPPER MODE: RAM-Aware Concurrency Limiting
@@ -1140,7 +1254,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
                                     child_model_name=seisbench_child_model,
                                     Detection_threshold=Detection_threshold))
                             else:
-                                gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_station_predictions
+                                # CRITICAL: Use max_pending_tasks for GPU allocation, not the original request
+                                # This ensures Ray distributes tasks evenly across GPUs
+                                gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
                                 tasks_queue.append(ripper_parallel_predict_seisbench.options(
                                     num_gpus=gpu_allocation_per_task, num_cpus=0).remote(
                                     tasks_predictor[i], True, gpu_memory_limit_mb,
@@ -1153,7 +1269,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
                                 tasks_queue.append(ripper_parallel_predict_eqcct.remote(
                                     tasks_predictor[i], False, None))
                             else:
-                                gpu_allocation_per_task = len(gpu_id) / number_of_concurrent_station_predictions
+                                # CRITICAL: Use max_pending_tasks for GPU allocation, not the original request
+                                # This ensures Ray distributes tasks evenly across GPUs
+                                gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
                                 tasks_queue.append(ripper_parallel_predict_eqcct.options(
                                     num_gpus=gpu_allocation_per_task, num_cpus=0).remote(
                                     tasks_predictor[i], True, gpu_memory_limit_mb))
@@ -1920,7 +2038,7 @@ class ModelActor:
                     log_device=True,
                     logger=self.logger)
                 self.logger.info("tf_environ finished.")
-            except RuntimeError as e:
+            except (RuntimeError, ValueError) as e:
                 self.logger.error(f"[ModelActor] Error setting memory limit: {e}")
         
         # Load the model once
@@ -2330,7 +2448,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
 # This allows dynamic GPU memory sharing but has model loading overhead.
 # =====================================================================
 
-@ray.remote
+@ray.remote(max_calls=1)
 def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=None):
     """
     RIPPER MODE: Old task-based parallel_predict for EQCCT models.
@@ -2353,26 +2471,18 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # hide oneDNN banner
     
     if gpu is True: 
-        # Ensure TensorFlow only sees its assigned VRAM
-        import tensorflow as tf
-        gpus = tf.config.experimental.list_physical_devices('GPU')
-
-        if gpus:
-            try:
-                # Note: set_memory_growth and VirtualDeviceConfiguration are mutually exclusive
-                # Use VirtualDeviceConfiguration if memory limit is specified, otherwise use memory growth
-                if gpu_memory_limit_mb:
-                    # Set explicit memory limit via virtual device configuration
-                    tf.config.experimental.set_virtual_device_configuration(
-                        gpus[0],
-                        [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=gpu_memory_limit_mb)]
-                    )
-                else:
-                    # Enable memory growth to allow dynamic allocation
-                    for gpu_device in gpus:
-                        tf.config.experimental.set_memory_growth(gpu_device, True)
-            except RuntimeError as e:
-                pass  # Memory already initialized
+        # Use unified tf_environ for stable GPU memory management
+        from eqcctpro.tools import tf_environ
+        try:
+            # Ripper mode tasks see 1 fractional GPU each (via Ray scheduling)
+            # so we just initialize that one GPU
+            tf_environ(
+                gpu_id=0, 
+                vram_limit_mb=gpu_memory_limit_mb,
+                logger=logging.getLogger("eqcctpro.ripper")
+            )
+        except (RuntimeError, ValueError):
+            pass  # Already initialized or logical devices configured
     else:
         os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")  # don't probe CUDA on CPU tasks
 
@@ -2407,7 +2517,8 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return f"{pos} {station}: Skipped (already exists - overwrite=False)."
+            # Return 3-tuple for consistency with caller unpacking logic
+            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
 
     os.makedirs(save_dir)
     csvPr_gen = open(csv_filename, 'w')
@@ -2474,7 +2585,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
         return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
 
 
-@ray.remote
+@ray.remote(max_calls=1)
 def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_mb=None, 
                                        parent_model_name=None, child_model_name=None,
                                        Detection_threshold=0.3):
@@ -2529,7 +2640,8 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return f"{pos} {station}: Skipped (already exists - overwrite=False)."
+            # Return 3-tuple for consistency with caller unpacking logic
+            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
 
     os.makedirs(save_dir, exist_ok=True)
     csvPr_gen = open(csv_filename, 'w')

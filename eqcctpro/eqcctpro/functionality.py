@@ -47,7 +47,7 @@ class RunEQCCTPro():
                 vram_mb: float = None,
                 selected_gpus: list = None,
                 gpu_vram_safety_cap: float = 0.95,
-                cudnn_headroom: float = 0.20,
+                cudnn_headroom: float = 0.25,
                 ram_safety_cap: float = 0.90,
                 cpu_id_list: list = [1],
                 start_time:str = None, 
@@ -208,7 +208,12 @@ class RunEQCCTPro():
     
     def _drain_worker_logs(self):
             while True:
-                rec = self.log_queue.get()  # blocks until a record arrives
+                try:
+                    rec = self.log_queue.get()  # blocks until a record arrives
+                except Exception:
+                    # If Ray crashes or the queue actor dies, stop draining
+                    break
+
                 if rec is None: break       # sentinel to stop thread
                 try:
                     self.logger.handle(rec) # routes to file+console handlers
@@ -317,7 +322,10 @@ class RunEQCCTPro():
                 self.logger.info(log_entry)
 
         # stop log forwarder
-        self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
+        try:
+            self.log_queue.put(None) # remember, log_queue is a Ray Queue actor, and will only exist while Ray is still active (cannot be after the .shutdown())
+        except Exception:
+            pass
         self._log_thread.join(timeout=2)
 
         ray.shutdown()
@@ -417,7 +425,7 @@ class EvaluateSystem():
                  conc_station_tasks_step_size: int = 1,
                  max_vram_mb:float = None,
                  gpu_vram_safety_cap:float = 0.90, 
-                 cudnn_headroom:float = 0.20,
+                 cudnn_headroom:float = 0.25,
                  ram_safety_cap:float = 0.90,
                  selected_gpus:list = None,
                  start_time:str = None, 
@@ -599,7 +607,12 @@ class EvaluateSystem():
 
     def _drain_worker_logs(self):
             while True:
-                rec = self.log_queue.get()  # blocks until a record arrives
+                try:
+                    rec = self.log_queue.get()  # blocks until a record arrives
+                except Exception:
+                    # If Ray crashes or the queue actor dies, stop draining
+                    break
+
                 if rec is None: break       # sentinel to stop thread
                 try:
                     self.logger.handle(rec) # routes to file+console handlers
@@ -618,9 +631,12 @@ class EvaluateSystem():
         else:
             gpus_to_use = self.selected_gpus if self.selected_gpus is not None else []
         gpus_norm = tuple(sorted(int(x) for x in gpus_to_use))
-        # Round VRAM to nearest 100MB to ensure stability across restarts despite small system fluctuations
-        vram_norm = int(round(float(gpu_memory_limit_mb) / 100.0) * 100) if gpu_memory_limit_mb not in ("", None) else ""
-        return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|vram={vram_norm}|model={model}"
+        
+        # NOTE: We exclude vram from the key used for trial skipping to ensure that
+        # changing safety buffers (which changes the calculated vram limit) doesn't
+        # cause 1000s of trials to be re-run. The combination of model, CPUs, GPUs,
+        # stations, and predictions is unique enough for benchmarking purposes.
+        return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|model={model}"
         
     def _load_existing_trial_keys(self, csv_path: str) -> set[str]:
         if not os.path.exists(csv_path):
@@ -691,6 +707,38 @@ class EvaluateSystem():
             for i in range(self.min_cpu_amount, self.cpu_count+1, self.cpu_test_step_size):
                 # Set CPU affinity and initialize Ray
                 cpus_to_use = self.cpu_id_list[:i]
+                
+                # Check if this entire Resource Block (CPU count) is already complete
+                all_trials_in_block_done = True
+                block_trial_keys = []
+                temp_model = "eqcct" if self.model_type != 'seisbench' else f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
+                
+                for timechunks in range(1, len(self.tasks_picker) + 1, self.conc_timechunk_tasks_step_size):
+                    for num_stations in self.stations2use_list:
+                        step = max(1, int(num_stations * 0.2))
+                        for predictions in range(step, num_stations + 1, step):
+                            key = self._trial_key(
+                                num_cpus=len(cpus_to_use),
+                                stations=num_stations,
+                                predictions=predictions,
+                                gpu_memory_limit_mb=None,
+                                timechunks=timechunks,
+                                model=temp_model,
+                                gpus=[]
+                            )
+                            block_trial_keys.append(key)
+                            if key not in planned_keys:
+                                all_trials_in_block_done = False
+                                break
+                        if not all_trials_in_block_done:
+                            break
+                    if not all_trials_in_block_done:
+                        break
+                
+                if all_trials_in_block_done and block_trial_keys:
+                    self.logger.info(f"[SKIP BLOCK] Already tested all {len(block_trial_keys)} configurations for {len(cpus_to_use)} CPU(s).")
+                    continue
+
                 process = psutil.Process(os.getpid())
                 process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
                 
@@ -909,7 +957,10 @@ class EvaluateSystem():
                                 self.logger.info(f"===== RIPPER MODE: Restarting Ray for fresh RAM state =====")
                                 
                                 # Stop the log drain thread gracefully
-                                self.log_queue.put(None)  # Sentinel to stop the drain thread
+                                try:
+                                    self.log_queue.put(None)  # Sentinel to stop the drain thread
+                                except Exception:
+                                    pass
                                 time.sleep(0.5)  # Give thread time to finish
                                 
                                 # Shutdown and reinitialize Ray
@@ -967,7 +1018,10 @@ class EvaluateSystem():
                                     self.logger.warning(f"Restarting Ray to prevent OOM...")
                                     
                                     # Stop the log drain thread gracefully
-                                    self.log_queue.put(None)  # Sentinel to stop the drain thread
+                                    try:
+                                        self.log_queue.put(None)  # Sentinel to stop the drain thread
+                                    except Exception:
+                                        pass
                                     time.sleep(0.5)  # Give thread time to finish
                                     
                                     # Shutdown and reinitialize Ray
@@ -1019,6 +1073,7 @@ class EvaluateSystem():
                                                             model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
                                                             seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
                                                             ram_safety_cap=self.ram_safety_cap,
+                                                            cudnn_headroom=self.cudnn_headroom,
                                                             ripper=self.ripper))
                                     
                                         break
@@ -1201,10 +1256,41 @@ class EvaluateSystem():
             quit()
 
         for gpu in range(len(self.selected_gpus)):
+            gpus_to_use = self.selected_gpus[:gpu+1]
             for cpu in range(self.min_cpu_amount, len(self.cpu_id_list)+1, self.cpu_test_step_size):
-                # Set CPU affinity and initialize Ray
-                cpus_to_use = self.cpu_id_list[:cpu] # 'cpu' is a count (e.g., 1, 2, 3). Slicing [:cpu] gets that many CPU IDs, we want :cpu bc we are using 0 index counting so 0-20 exclusive = 0-19 IDs = 20 CPUs to use explicitely. ([:n is exclusive])
-                gpus_to_use = self.selected_gpus[:gpu+1] # 'gpu' is an index (0, 1, 2). We need +1 to include the current GPU.
+                cpus_to_use = self.cpu_id_list[:cpu]
+                
+                # Check if this entire Resource Block (GPU count + CPU count) is already complete
+                # before we do any initialization (like Ray or calculating VRAM)
+                all_trials_in_block_done = True
+                block_trial_keys = []
+                
+                # Determine trial model name for key generation
+                temp_model = "eqcct" if self.model_type != 'seisbench' else f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
+                
+                for stations in self.stations2use_list:
+                    step = max(1, int(stations * 0.2))
+                    for predictions in range(step, stations + 1, step):
+                        key = self._trial_key(
+                            num_cpus=len(cpus_to_use),
+                            stations=stations,
+                            predictions=predictions,
+                            gpu_memory_limit_mb=None, # Not used in key anymore
+                            timechunks=1,
+                            model=temp_model,
+                            gpus=gpus_to_use
+                        )
+                        block_trial_keys.append(key)
+                        if key not in planned_keys:
+                            all_trials_in_block_done = False
+                            break
+                    if not all_trials_in_block_done:
+                        break
+                
+                if all_trials_in_block_done and block_trial_keys:
+                    self.logger.info(f"[SKIP BLOCK] Already tested all {len(block_trial_keys)} configurations for {len(gpus_to_use)} GPU(s) and {len(cpus_to_use)} CPU(s).")
+                    continue
+
                 # Set CPU affinity
                 process = psutil.Process(os.getpid())
                 process.cpu_affinity(cpus_to_use)  # Limit process to the given CPU IDs
@@ -1515,7 +1601,10 @@ class EvaluateSystem():
                         self.logger.info(f"===== {mode_label} MODE: Restarting Ray for fresh GPU state =====")
                         
                         # Stop the log drain thread gracefully
-                        self.log_queue.put(None)  # Sentinel to stop the drain thread
+                        try:
+                            self.log_queue.put(None)  # Sentinel to stop the drain thread
+                        except Exception:
+                            pass
                         time.sleep(0.5)  # Give thread time to finish
                         
                         # Shutdown and reinitialize Ray
@@ -1598,6 +1687,7 @@ class EvaluateSystem():
                                 model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
                                 seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
                                 ram_safety_cap=self.ram_safety_cap,
+                                cudnn_headroom=self.cudnn_headroom,
                                 ripper=self.ripper
                             )
                             
