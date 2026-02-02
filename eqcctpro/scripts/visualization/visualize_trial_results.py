@@ -1237,10 +1237,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     )
     
     # Calculate shared color scale limits
-    conc_min = min(df_ma[actor_col].min() if not df_ma.empty else 0, 
-                  df_rp[task_col].min() if not df_rp.empty else 0)
-    conc_max = max(df_ma[actor_col].max() if not df_ma.empty else 1, 
-                  df_rp[task_col].max() if not df_rp.empty else 1)
+    conc_min = min(df_ma['Generated Tasks'].min() if not df_ma.empty else 0, 
+                  df_rp['Generated Tasks'].min() if not df_rp.empty else 0)
+    conc_max = max(df_ma['Generated Tasks'].max() if not df_ma.empty else 1, 
+                  df_rp['Generated Tasks'].max() if not df_rp.empty else 1)
     
     # Calculate dtick for comparison colorbar
     if conc_max <= 15:
@@ -1258,7 +1258,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             mode='markers',
             marker=dict(
                 size=5,
-                color=df_ma[actor_col],
+                color=df_ma['Generated Tasks'],
                 colorscale='Turbo',
                 colorbar=dict(
                     title=dict(
@@ -1295,7 +1295,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             mode='markers',
             marker=dict(
                 size=5,
-                color=df_rp[task_col],
+                color=df_rp['Generated Tasks'],
                 colorscale='Turbo',
                 cmin=conc_min,
                 cmax=conc_max,
@@ -1307,7 +1307,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             showlegend=False,
             hovertemplate=rp_hover,
             customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col, picker_runtime_col,
-                             ripper_task_col, avg_model_load_time_col, waveform_proc_time_col,
+                             'Generated Tasks', avg_model_load_time_col, waveform_proc_time_col,
                              total_trial_time_col]].values
         ),
         row=1, col=2
@@ -1379,7 +1379,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             mode='markers',
             marker=dict(
                 size=5,
-                color=df_ma[actor_col],
+                color=df_ma['Generated Tasks'],
                 colorscale='Turbo',
                 colorbar=dict(
                     title=dict(
@@ -1416,7 +1416,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             mode='markers',
             marker=dict(
                 size=5,
-                color=df_rp[task_col],
+                color=df_rp['Generated Tasks'],
                 colorscale='Turbo',
                 cmin=conc_min,
                 cmax=conc_max,
@@ -1428,7 +1428,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             showlegend=False,
             hovertemplate=rp_hover,
             customdata=df_rp[['GPU Count', 'GPUs Used', task_col, actual_ram_col, picker_runtime_col,
-                             ripper_task_col, avg_model_load_time_col, waveform_proc_time_col,
+                             'Generated Tasks', avg_model_load_time_col, waveform_proc_time_col,
                              total_trial_time_col]].values
         ),
         row=1, col=2

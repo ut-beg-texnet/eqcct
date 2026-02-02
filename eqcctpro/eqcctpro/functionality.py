@@ -334,40 +334,58 @@ class RunEQCCTPro():
         # self.logger.info("------- END OF FILE -------")
         
     def run_eqcctpro(self):
-        # Set CPU affinity
-        process = psutil.Process(os.getpid())
-        process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
-        
-        self.chunk_time() # Generates the UTC times for each of the timesets in the given time range 
-        self.dt_task_generator() # Generates the task list so can know how many total tasks there are for our given time range 
-        
-        if self.use_gpu: # GPU
-            self.configure_gpu()
-            ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), logging_level=logging.ERROR, log_to_driver=False, _temp_dir=self.home_tmp_dir) # Ray initalization using GPUs 
-            self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
-            self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
-            self._log_thread.start() # Starts the thread
-            # Log some import info to user 
-            statement = f"Ray Successfully Initialized with {self.selected_gpus} GPU(s) and {len(self.cpu_id_list)} CPU(s) ({list(self.cpu_id_list)} CPU Affinity Binding)."
-            self.logger.info(f"{statement}")
-            self.logger.info(f"Analyzing {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
+        try:
+            # Set CPU affinity
+            process = psutil.Process(os.getpid())
+            process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
             
-            # Running parllelization
-            self.eqcctpro_parallelization()
+            self.chunk_time() # Generates the UTC times for each of the timesets in the given time range 
+            self.dt_task_generator() # Generates the task list so can know how many total tasks there are for our given time range 
+            
+            if self.use_gpu: # GPU
+                self.configure_gpu()
+                ray.init(ignore_reinit_error=True, num_gpus=len(self.selected_gpus), num_cpus=len(self.cpu_id_list), logging_level=logging.ERROR, log_to_driver=False, _temp_dir=self.home_tmp_dir) # Ray initalization using GPUs 
+                self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
+                self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
+                self._log_thread.start() # Starts the thread
+                # Log some import info to user 
+                statement = f"Ray Successfully Initialized with {self.selected_gpus} GPU(s) and {len(self.cpu_id_list)} CPU(s) ({list(self.cpu_id_list)} CPU Affinity Binding)."
+                self.logger.info(f"{statement}")
+                self.logger.info(f"Analyzing {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
+                
+                # Running parllelization
+                self.eqcctpro_parallelization()
 
-        else: # CPU
-            self.configure_cpu()
-            ray.init(ignore_reinit_error=True, num_cpus=len(self.cpu_id_list), logging_level=logging.ERROR, log_to_driver=False, _temp_dir=self.home_tmp_dir) # Ray initalization using CPUs
-            self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
-            self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
-            self._log_thread.start() # Starts the thread
-            # Log some import info to user
-            statement = f"Ray Successfully Initialized with {len(self.cpu_id_list)} CPU(s) ({list(self.cpu_id_list)} CPU Affinity Binding)."
-            self.logger.info(f"{statement}")
-            self.logger.info(f"Analyzing {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
-            
-            # Running parllelization
-            self.eqcctpro_parallelization()
+            else: # CPU
+                self.configure_cpu()
+                ray.init(ignore_reinit_error=True, num_cpus=len(self.cpu_id_list), logging_level=logging.ERROR, log_to_driver=False, _temp_dir=self.home_tmp_dir) # Ray initalization using CPUs
+                self.log_queue = Queue() # Create a Ray-safe queue to recieve LogRecord objects from workers so we can write them to file 
+                self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True) # Creates background thread whose only job is to get() records from self.log_queue and hand them over to the actual logger
+                self._log_thread.start() # Starts the thread
+                # Log some import info to user
+                statement = f"Ray Successfully Initialized with {len(self.cpu_id_list)} CPU(s) ({list(self.cpu_id_list)} CPU Affinity Binding)."
+                self.logger.info(f"{statement}")
+                self.logger.info(f"Analyzing {len(self.times_list)} time chunk(s) from {self.start_time} to {self.end_time} (dt={self.timechunk_dt}min, overlap={self.waveform_overlap}min).")
+                
+                # Running parllelization
+                self.eqcctpro_parallelization()
+        except KeyboardInterrupt:
+            self.logger.info("")
+            self.logger.info("="*80)
+            self.logger.info("INTERRUPTED BY USER (Ctrl+C). Performing emergency shutdown...")
+            self.logger.info("="*80)
+            try:
+                # Stop log thread if it exists
+                if hasattr(self, 'log_queue') and self.log_queue:
+                    try: self.log_queue.put(None)
+                    except: pass
+                if hasattr(self, '_log_thread') and self._log_thread:
+                    self._log_thread.join(timeout=1)
+                ray.shutdown()
+            except:
+                pass
+            self.logger.info("Shutdown complete. Exiting.")
+            sys.exit(0)
 
     def calculate_vram(self):
         """
@@ -1809,12 +1827,30 @@ class EvaluateSystem():
         self.logger.info(f" 2) Best Overall Usecase Configuration: {self.csv_dir}/best_overall_usecase_gpu.csv")
 
     def evaluate(self):
-        if self.eval_mode == "cpu":
-            self.evaluate_cpu()
-        elif self.eval_mode == "gpu":
-            self.evaluate_gpu()
-        else: 
-            exit()
+        try:
+            if self.eval_mode == "cpu":
+                self.evaluate_cpu()
+            elif self.eval_mode == "gpu":
+                self.evaluate_gpu()
+            else: 
+                exit()
+        except KeyboardInterrupt:
+            self.logger.info("")
+            self.logger.info("="*80)
+            self.logger.info("INTERRUPTED BY USER (Ctrl+C). Performing emergency shutdown...")
+            self.logger.info("="*80)
+            try:
+                # Stop log thread if it exists
+                if hasattr(self, 'log_queue') and self.log_queue:
+                    try: self.log_queue.put(None)
+                    except: pass
+                if hasattr(self, '_log_thread') and self._log_thread:
+                    self._log_thread.join(timeout=1)
+                ray.shutdown()
+            except:
+                pass
+            self.logger.info("Shutdown complete. Exiting.")
+            sys.exit(0)
         
     def calculate_vram(self):
         cap = float(self.gpu_vram_safety_cap)
