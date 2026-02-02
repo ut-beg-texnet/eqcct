@@ -1172,6 +1172,28 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
     
+    # 3b. VRAM Usage Comparison (GPU only)
+    if is_gpu and actual_vram_col in df_combined.columns:
+        vram_max = df_combined[actual_vram_col].max()
+        if pd.notna(vram_max) and vram_max > 0:
+            fig = px.box(
+                df_combined[df_combined[actual_vram_col] > 0],
+                x='Execution Mode',
+                y=actual_vram_col,
+                color='Execution Mode',
+                title=f"[{model_name} - {trial_type}] VRAM Usage: ModelActor Method vs Ripper Method",
+                labels={
+                    'Execution Mode': 'Execution Mode',
+                    actual_vram_col: 'Process Tree VRAM (MB)'
+                }
+            )
+            fig.update_traces(
+                hovertemplate="Execution Mode: %{x}<br>Process Tree VRAM (MB): %{y:.2f}<extra></extra>"
+            )
+            output_file = os.path.join(output_dir, f"comparison_vram_usage_{safe_model_name}_{trial_type.lower()}.html")
+            fig.write_html(output_file)
+            print(f"Saved: {output_file}")
+    
     # 5. Throughput Scaling by Concurrent Tasks (Line Chart) - Picker Throughput
     # Use the previously calculated 'Generated Tasks' and labels
     ma_by_task = df_ma.groupby(task_col).agg({
