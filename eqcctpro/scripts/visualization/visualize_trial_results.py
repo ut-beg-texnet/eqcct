@@ -1676,9 +1676,101 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     print(f"\nComparison visualization complete! Files saved to: {output_dir}/")
 
 
+def generate_aggregate_plots(all_data, output_dir):
+    """
+    Generate aggregate comparison plots across all models and execution modes.
+    """
+    if not all_data:
+        return
+
+    agg_df = pd.concat(all_data, ignore_index=True)
+    
+    # Define metrics to plot
+    metrics = [
+        ('Total Trial Time (s)', 'Mean Total Trial Time (s)', 'total_trial_time'),
+        ('Total Run time for Picker (s)', 'Mean Picking Time (s)', 'picking_time'),
+        ('Waveform Processing Time (s)', 'Mean Waveform Processing Time (s)', 'waveform_processing_time'),
+        ('Process Tree RAM (MB)', 'Mean RAM (MB)', 'ram_usage'),
+        ('Process Tree VRAM (MB)', 'Mean VRAM (MB)', 'vram_usage')
+    ]
+
+    aggregate_dir = os.path.join(output_dir, "aggregate_comparisons")
+    if not os.path.exists(aggregate_dir):
+        os.makedirs(aggregate_dir)
+
+    for trial_type in agg_df['Trial Type'].unique():
+        type_df = agg_df[agg_df['Trial Type'] == trial_type]
+        
+        for metric_col, metric_label, file_suffix in metrics:
+            if metric_col not in type_df.columns:
+                continue
+            
+            # Check if we have any non-null data for this metric
+            if type_df[metric_col].isna().all():
+                continue
+
+            # Group by Model, Execution Mode, and Effective Concurrency
+            plot_df = type_df.groupby(['Model', 'Execution Mode', 'Effective Concurrency'])[metric_col].mean().reset_index()
+            plot_df.columns = ['Model', 'Execution Mode', 'Effective Concurrency', metric_label]
+            
+            # Create a combined label for the legend
+            plot_df['Method Name'] = plot_df['Model'] + " (" + plot_df['Execution Mode'] + ")"
+            
+            # Prepare hover data
+            plot_df['Concurrency Label'] = plot_df['Execution Mode'].apply(
+                lambda x: 'Number of Actors' if x.lower() == 'modelactor' else 'Concurrent Tasks'
+            )
+            
+            fig = px.line(
+                plot_df,
+                x='Effective Concurrency',
+                y=metric_label,
+                color='Method Name',
+                markers=True,
+                title=f"Aggregate Comparison: {metric_label} vs Concurrency ({trial_type.upper()})",
+                labels={
+                    'Effective Concurrency': 'Number of Actors / Concurrent Tasks',
+                    'Method Name': 'Method'
+                },
+                hover_data={
+                    'Method Name': True,
+                    'Execution Mode': False,
+                    'Model': False,
+                    'Effective Concurrency': False,
+                    metric_label: ':.2f'
+                }
+            )
+            
+            # Customize hover template for conditional labels
+            fig.update_traces(
+                hovertemplate="<b>%{customdata[1]}</b><br>" + # Method Name
+                              "Method: %{customdata[1]}<br>" +
+                              "%{customdata[2]}: %{x}<br>" + # Dynamic Label: Value
+                              "Mean " + metric_label + ": %{y:.2f}<extra></extra>",
+                customdata=plot_df[['Model', 'Method Name', 'Concurrency Label']].values
+            )
+            
+            fig.update_layout(
+                xaxis=dict(dtick=10 if plot_df['Effective Concurrency'].max() > 20 else 1),
+                legend=dict(
+                    title_text="Method",
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=1.02,
+                    bgcolor='rgba(255,255,255,0.5)'
+                ),
+                margin=dict(r=250) # Increased margin for the legend and labels
+            )
+            
+            output_file = os.path.join(aggregate_dir, f"aggregate_{file_suffix}_{trial_type.lower()}.html")
+            fig.write_html(output_file)
+            print(f"Saved: {output_file}")
+
+
 def batch_visualize(results_root, output_dir="visualizations", desired_runtime=None):
     """
-    Batch visualize all result directories.
+    Batch visualize all result directories and generate aggregate comparison plots.
     """
     if not os.path.exists(results_root):
         print(f"Error: Results root not found: {results_root}")
@@ -1701,6 +1793,8 @@ def batch_visualize(results_root, output_dir="visualizations", desired_runtime=N
     
     print(f"Found {len(result_dirs)} result directories")
     
+    all_data = []
+
     # Process each directory
     for result_dir in sorted(result_dirs):
         dir_path = os.path.join(results_root, result_dir)
@@ -1713,12 +1807,38 @@ def batch_visualize(results_root, output_dir="visualizations", desired_runtime=N
         
         csv_path = csv_files[0]
         
+        # Load and collect data for aggregate plots
+        try:
+            df = pd.read_csv(csv_path)
+            if 'Trial Success' in df.columns:
+                df = df[df['Trial Success'] == 1.0].copy()
+            
+            trial_type = detect_trial_type(df)
+            execution_mode = detect_execution_mode(df)
+            concurrency_col = get_concurrency_column(df, execution_mode)
+            df['Effective Concurrency'] = df[concurrency_col].fillna(1)
+            
+            # Ensure model name is present
+            model_name = df['Model Used'].iloc[0] if 'Model Used' in df.columns else result_dir
+            df['Model'] = model_name
+            df['Trial Type'] = trial_type
+            df['Execution Mode'] = execution_mode.capitalize()
+            
+            all_data.append(df)
+        except Exception as e:
+            print(f"  Error processing {result_dir} for aggregate data: {e}")
+
         # Create output directory for this visualization
         vis_output = os.path.join(output_dir, result_dir)
         
         print(f"\nVisualizing: {result_dir}")
         visualize_trials(csv_path, output_dir=vis_output, desired_runtime=desired_runtime)
     
+    # Generate aggregate plots
+    if all_data:
+        print(f"\nGenerating aggregate comparisons...")
+        generate_aggregate_plots(all_data, output_dir)
+
     print(f"\n{'='*70}")
     print(f"Batch visualization complete! All files saved to: {output_dir}")
 
