@@ -593,7 +593,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=0.90, y=1,
+            x=1.02, y=0.0,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -603,6 +603,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             xanchor="left",
             yanchor="top"
         )
+        fig.update_layout(margin=dict(b=80))
 
     fig.update_layout(
         xaxis=dict(title='Total Number of Stations to Process', dtick=10),
@@ -684,31 +685,31 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 ))
                 fig.add_annotation(
                     xref="paper", yref="paper",
-                    x=0.90, y=1,
-                    text=f"Target: {desired_runtime}s",
-                    showarrow=False,
-                    font=dict(color="red", size=13, family="Arial Black"),
-                    bgcolor="rgba(255,255,255,0.8)",
-                    bordercolor="red",
-                    borderwidth=1,
-                    xanchor="left",
-                    yanchor="top"
-                )
-                
-            fig.update_layout(
-                xaxis=dict(title='Total Requested RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
-                yaxis=dict(title='Process Tree RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
-                legend=dict(
-                    yanchor="top",
-                    y=0.99,
-                    xanchor="left",
-                    x=0.01,
-                    bgcolor='rgba(255,255,255,0.5)'
-                )
+            x=1.02, y=0.0,
+            text=f"Target: {desired_runtime}s",
+            showarrow=False,
+            font=dict(color="red", size=13, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="red",
+            borderwidth=1,
+            xanchor="left",
+            yanchor="top"
+        )
+        fig.update_layout(margin=dict(b=80))
+        fig.update_layout(
+            xaxis=dict(title='Total Requested RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
+            yaxis=dict(title='Process Tree RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01,
+                bgcolor='rgba(255,255,255,0.5)'
             )
-            output_file = os.path.join(output_dir, f"requested_vs_actual_ram_2d_{execution_mode}.html")
-            fig.write_html(output_file)
-            print(f"Saved: {output_file}")
+        )
+        output_file = os.path.join(output_dir, f"requested_vs_actual_ram_2d_{execution_mode}.html")
+        fig.write_html(output_file)
+        print(f"Saved: {output_file}")
 
     # 3. Throughput analysis
     df['Throughput (Stations/s)'] = df[station_col] / df[runtime_col]
@@ -768,7 +769,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=0.90, y=1,
+            x=1.02, y=0.0,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -778,6 +779,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             xanchor="left",
             yanchor="top"
         )
+        fig.update_layout(margin=dict(b=80))
         
     fig.update_layout(
         xaxis=dict(title='Concurrent Tasks Requested'),
@@ -861,31 +863,31 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 ))
                 fig.add_annotation(
                     xref="paper", yref="paper",
-                    x=0.90, y=1,
-                    text=f"Target: {desired_runtime}s",
-                    showarrow=False,
-                    font=dict(color="red", size=13, family="Arial Black"),
-                    bgcolor="rgba(255,255,255,0.8)",
-                    bordercolor="red",
-                    borderwidth=1,
-                    xanchor="left",
-                    yanchor="top"
-                )
-                
-            fig.update_layout(
-                xaxis=dict(title='Total Requested VRAM (MB)'),
-                yaxis=dict(title='Process Tree VRAM (MB)'),
-                legend=dict(
-                    yanchor="top",
-                    y=0.99,
-                    xanchor="left",
-                    x=0.01,
-                    bgcolor='rgba(255,255,255,0.5)'
-                )
+            x=1.02, y=0.0,
+            text=f"Target: {desired_runtime}s",
+            showarrow=False,
+            font=dict(color="red", size=13, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="red",
+            borderwidth=1,
+            xanchor="left",
+            yanchor="top"
+        )
+        fig.update_layout(margin=dict(b=80))
+        fig.update_layout(
+            xaxis=dict(title='Total Requested VRAM (MB)'),
+            yaxis=dict(title='Process Tree VRAM (MB)'),
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01,
+                bgcolor='rgba(255,255,255,0.5)'
             )
-            output_file = os.path.join(output_dir, f"requested_vs_actual_vram_2d_{execution_mode}.html")
-            fig.write_html(output_file)
-            print(f"Saved: {output_file}")
+        )
+        output_file = os.path.join(output_dir, f"requested_vs_actual_vram_2d_{execution_mode}.html")
+        fig.write_html(output_file)
+        print(f"Saved: {output_file}")
 
     print(f"\nVisualization complete! All files saved to: {output_dir}")
 
@@ -1141,7 +1143,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=0.90, y=1,
+            x=1.02, y=0.0,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -1151,6 +1153,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             xanchor="left",
             yanchor="top"
         )
+        fig.update_layout(margin=dict(b=80))
         
     fig.update_layout(
         xaxis=dict(dtick=10)
@@ -1208,7 +1211,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=0.90, y=1,
+            x=1.02, y=0.0,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -1218,6 +1221,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             xanchor="left",
             yanchor="top"
         )
+        fig.update_layout(margin=dict(b=80))
 
     fig.update_layout(
         xaxis=dict(dtick=10)
@@ -2092,7 +2096,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=0.90, y=1,
+            x=1.02, y=0.0,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -2102,6 +2106,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             xanchor="left",
             yanchor="top"
         )
+        fig.update_layout(margin=dict(b=80))
     
     output_file = os.path.join(all_methods_dir, f"universal_comparison_total_runtime_{safe_model_name}.html")
     fig.write_html(output_file)
@@ -2151,7 +2156,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=0.90, y=1,
+            x=1.02, y=0.0,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -2161,6 +2166,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             xanchor="left",
             yanchor="top"
         )
+        fig.update_layout(margin=dict(b=80))
         
     output_file = os.path.join(all_methods_dir, f"universal_comparison_picker_runtime_{safe_model_name}.html")
     fig.write_html(output_file)
@@ -2380,17 +2386,18 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-                x=0.90, y=1,
-                text=f"Target: {desired_runtime}s",
-                showarrow=False,
-                font=dict(color="red", size=13, family="Arial Black"),
-                bgcolor="rgba(255,255,255,0.8)",
-                bordercolor="red",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top"
-            )
-            
+            x=1.02, y=0.0,
+            text=f"Target: {desired_runtime}s",
+            showarrow=False,
+            font=dict(color="red", size=13, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="red",
+            borderwidth=1,
+            xanchor="left",
+            yanchor="top"
+        )
+        fig.update_layout(margin=dict(b=80))
+
         output_file = os.path.join(hw_dir, f"{hw_type.lower()}_comparison_total_runtime.html")
         fig.write_html(output_file)
         
@@ -2432,17 +2439,18 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-                x=0.90, y=1,
-                text=f"Target: {desired_runtime}s",
-                showarrow=False,
-                font=dict(color="red", size=13, family="Arial Black"),
-                bgcolor="rgba(255,255,255,0.8)",
-                bordercolor="red",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top"
-            )
-            
+            x=1.02, y=0.0,
+            text=f"Target: {desired_runtime}s",
+            showarrow=False,
+            font=dict(color="red", size=13, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="red",
+            borderwidth=1,
+            xanchor="left",
+            yanchor="top"
+        )
+        fig.update_layout(margin=dict(b=80))
+
         output_file = os.path.join(hw_dir, f"{hw_type.lower()}_comparison_picker_runtime.html")
         fig.write_html(output_file)
 
@@ -2564,17 +2572,18 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-                x=0.90, y=1,
-                text=f"Target: {desired_runtime}s",
-                showarrow=False,
-                font=dict(color="red", size=13, family="Arial Black"),
-                bgcolor="rgba(255,255,255,0.8)",
-                bordercolor="red",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top"
-            )
-            
+            x=1.02, y=0.0,
+            text=f"Target: {desired_runtime}s",
+            showarrow=False,
+            font=dict(color="red", size=13, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="red",
+            borderwidth=1,
+            xanchor="left",
+            yanchor="top"
+        )
+        fig.update_layout(margin=dict(b=80))
+
         output_file = os.path.join(method_dir, f"hardware_comparison_total_runtime.html")
         fig.write_html(output_file)
         
@@ -2616,17 +2625,18 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-                x=0.90, y=1,
-                text=f"Target: {desired_runtime}s",
-                showarrow=False,
-                font=dict(color="red", size=13, family="Arial Black"),
-                bgcolor="rgba(255,255,255,0.8)",
-                bordercolor="red",
-                borderwidth=1,
-                xanchor="left",
-                yanchor="top"
-            )
-            
+            x=1.02, y=0.0,
+            text=f"Target: {desired_runtime}s",
+            showarrow=False,
+            font=dict(color="red", size=13, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="red",
+            borderwidth=1,
+            xanchor="left",
+            yanchor="top"
+        )
+        fig.update_layout(margin=dict(b=80))
+
         output_file = os.path.join(method_dir, f"hardware_comparison_picker_runtime.html")
         fig.write_html(output_file)
 
