@@ -515,9 +515,12 @@ python scripts/visualization/visualize_trial_results.py /path/to/results/cpu_tes
 # Batch visualization (creates separate folders per trial subdirectory)
 python scripts/visualization/visualize_trial_results.py --batch --results_root results/csv/ --output_dir batch_vis/
 
-# Compare ModelActor vs Ripper performance for a specific model
-# The --model argument acts as a search keyword for result directories
+# Compare ModelActor vs Ripper performance for a specific model (fixed hardware)
 python scripts/visualization/visualize_trial_results.py --compare --model phasenetlight --trial_type cpu
+
+# Universal Comparison (CPU vs GPU across both methods)
+# Omitting --trial_type triggers a comprehensive 4-way comparison
+python scripts/visualization/visualize_trial_results.py --compare --model eqcct --output_dir vis/universal/
 ```
 
 ### **Interactive Plot Features**
