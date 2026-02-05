@@ -54,18 +54,30 @@ import glob
 
 def parse_gpu_list(gpu_val):
     """Parse GPU list from various formats and return the count."""
-    if pd.isna(gpu_val):
+    if pd.isna(gpu_val) or gpu_val == '' or str(gpu_val).lower() == 'nan' or str(gpu_val).lower() == 'n/a':
         return 0
-    try:
-        parsed = ast.literal_eval(str(gpu_val))
-        if isinstance(parsed, list):
-            return len(parsed)
-        return int(parsed)
-    except:
+    
+    s = str(gpu_val).strip()
+    # Handle list format [0] or [0, 1]
+    if s.startswith('[') and s.endswith(']'):
         try:
-            return int(float(gpu_val))
+            import ast
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, list):
+                return len(parsed)
         except:
-            return 0
+            # Fallback for manually counting commas in [0, 1]
+            s = s[1:-1]
+            if not s.strip(): return 0
+            return len([p.strip() for p in s.split(',') if p.strip()])
+            
+    # Handle comma separated 0,1 or single number
+    try:
+        if ',' in s:
+            return len([p.strip() for p in s.split(',') if p.strip()])
+        return 1 if int(float(s)) >= 0 else 0
+    except:
+        return 0
 
 
 def detect_trial_type(df):
@@ -202,7 +214,10 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
     concurrency_col = get_concurrency_column(df, execution_mode)
     
     # Parse GPU count
-    df['GPU Count'] = df['GPUs Used'].apply(parse_gpu_list) if 'GPUs Used' in df.columns else 0
+    if 'GPUs Used' in df.columns:
+        df['GPU Count'] = df['GPUs Used'].apply(parse_gpu_list)
+    else:
+        df['GPU Count'] = 0
     
     # Auto-detect model name
     if model_name is None:
@@ -556,6 +571,9 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         size=point_size_runtime,
         symbol='GPU Count',
         symbol_map=symbol_map_dict,
+        custom_data=[cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, actual_ram_col, 
+                     'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                     waveform_proc_time_col, picker_runtime_col],
         title=f"[{model_name}] Total Trial Runtime vs Workload Size",
         labels={'GPU Count': 'GPUs Used'}
     )
@@ -575,10 +593,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             "Total Trial Runtime (s): %{y:.2f}<br>"
             "Process Tree RAM (MB): %{customdata[5]:.2f}<br>"
             "<extra></extra>"
-        ),
-        customdata=df[[cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, actual_ram_col, 
-                       'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
-                       waveform_proc_time_col, picker_runtime_col]].values
+        )
     )
 
     if desired_runtime is not None:
@@ -593,7 +608,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=1.02, y=0.0,
+            x=1.02, y=-0.1,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -642,6 +657,9 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 color='Effective Concurrency',
                 symbol='GPU Count',
                 symbol_map=symbol_map_dict,
+                custom_data=[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col,
+                             'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                             waveform_proc_time_col, picker_runtime_col],
                 title=f"[{model_name}] Requested vs Actual RAM",
                 labels={'GPU Count': 'GPUs Used'}
             )
@@ -661,10 +679,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "Total Trial Runtime (s): %{customdata[6]:.2f}<br>"
                     "Process Tree RAM (MB): %{y:.2f}<br>"
                     "<extra></extra>"
-                ),
-                customdata=valid_mem[[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col,
-                                     'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
-                                     waveform_proc_time_col, picker_runtime_col]].values
+                )
             )
             max_val = max(valid_mem[total_req_ram_col].max(), valid_mem[actual_ram_col].max())
             fig.add_trace(go.Scatter(
@@ -674,28 +689,22 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 name='Estimated Prediction RAM Cost'
             ))
             
-            # Add desired runtime line if provided
-            if desired_runtime is not None:
-                fig.add_trace(go.Scatter(
-                    x=[valid_mem[total_req_ram_col].min(), valid_mem[total_req_ram_col].max()],
-                    y=[desired_runtime, desired_runtime],
-                    mode='lines',
-                    line=dict(color='red', dash='dash', width=2),
-                    showlegend=False
-                ))
-                fig.add_annotation(
-                    xref="paper", yref="paper",
-            x=1.02, y=0.0,
-            text=f"Target: {desired_runtime}s",
-            showarrow=False,
-            font=dict(color="red", size=13, family="Arial Black"),
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="red",
-            borderwidth=1,
-            xanchor="left",
-            yanchor="top"
-        )
-        fig.update_layout(margin=dict(b=80))
+        # Add target info block (consistent positioning below color bar)
+        if desired_runtime is not None:
+            fig.add_annotation(
+                xref="paper", yref="paper",
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
+
         fig.update_layout(
             xaxis=dict(title='Total Requested RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
             yaxis=dict(title='Process Tree RAM (MB)', dtick=10000, range=[0, max_val * 1.05]),
@@ -732,6 +741,9 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
         size=point_size_throughput,
         symbol='GPU Count',
         symbol_map=symbol_map_dict,
+        custom_data=[cpu_col, 'GPU Count', 'GPUs Used', task_col, actor_col, runtime_col, actual_ram_col,
+                     'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                     waveform_proc_time_col, picker_runtime_col],
         title=f"[{model_name}] Throughput vs Concurrency",
         labels={'GPU Count': 'GPUs Used'}
     )
@@ -752,24 +764,14 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             "Process Tree RAM (MB): %{customdata[6]:.2f}<br>"
             "Throughput (Stations/s): %{y:.3f}<br>"
             "<extra></extra>"
-        ),
-        customdata=df[[cpu_col, 'GPU Count', 'GPUs Used', task_col, actor_col, runtime_col, actual_ram_col,
-                       'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
-                       waveform_proc_time_col, picker_runtime_col]].values
+        )
     )
     
-    # Add desired runtime line if provided
+    # Add target info block (consistent positioning below color bar)
     if desired_runtime is not None:
-        fig.add_trace(go.Scatter(
-            x=[df[task_col].min(), df[task_col].max()],
-            y=[desired_runtime, desired_runtime],
-            mode='lines',
-            line=dict(color='red', dash='dash', width=2),
-            showlegend=False
-        ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=1.02, y=0.0,
+            x=1.02, y=-0.1,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -780,7 +782,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
             yanchor="top"
         )
         fig.update_layout(margin=dict(b=80))
-        
+
     fig.update_layout(
         xaxis=dict(title='Concurrent Tasks Requested'),
         yaxis=dict(title='Throughput (Stations/s)'),
@@ -820,6 +822,9 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 color='Effective Concurrency',
                 symbol='GPU Count',
                 symbol_map=symbol_map_dict,
+                custom_data=[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col,
+                             'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                             waveform_proc_time_col, picker_runtime_col],
                 title=f"[{model_name}] Requested vs Actual VRAM",
                 labels={'GPU Count': 'GPUs Used'}
             )
@@ -839,10 +844,7 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                     "Total Trial Runtime (s): %{customdata[6]:.2f}<br>"
                     "Process Tree VRAM (MB): %{y:.2f}<br>"
                     "<extra></extra>"
-                ),
-                customdata=valid_vram[[station_col, cpu_col, 'GPU Count', 'GPUs Used', actor_col, task_col, runtime_col,
-                                      'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
-                                      waveform_proc_time_col, picker_runtime_col]].values
+                )
             )
             max_val = max(valid_vram[total_req_vram_col].max(), valid_vram[actual_vram_col].max())
             fig.add_trace(go.Scatter(
@@ -852,28 +854,22 @@ def visualize_trials(csv_path, model_name=None, output_dir="visualizations",
                 name='Estimated Prediction VRAM Cost'
             ))
             
-            # Add desired runtime line if provided
-            if desired_runtime is not None:
-                fig.add_trace(go.Scatter(
-                    x=[valid_vram[total_req_vram_col].min(), valid_vram[total_req_vram_col].max()],
-                    y=[desired_runtime, desired_runtime],
-                    mode='lines',
-                    line=dict(color='red', dash='dash', width=2),
-                    showlegend=False
-                ))
-                fig.add_annotation(
-                    xref="paper", yref="paper",
-            x=1.02, y=0.0,
-            text=f"Target: {desired_runtime}s",
-            showarrow=False,
-            font=dict(color="red", size=13, family="Arial Black"),
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="red",
-            borderwidth=1,
-            xanchor="left",
-            yanchor="top"
-        )
-        fig.update_layout(margin=dict(b=80))
+        # Add target info block (consistent positioning below color bar)
+        if desired_runtime is not None:
+            fig.add_annotation(
+                xref="paper", yref="paper",
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
+
         fig.update_layout(
             xaxis=dict(title='Total Requested VRAM (MB)'),
             yaxis=dict(title='Process Tree VRAM (MB)'),
@@ -1101,6 +1097,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         y=runtime_col,
         color='Execution Mode',
         size=runtime_col,
+        custom_data=['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Total Throughput (st/s)',
+                     'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                     waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
+                     avg_model_load_time_col, 'Picker Throughput (st/s)'],
         title=f"[{model_name} - {trial_type}] Runtime vs Workload Size: ModelActor Method vs Ripper Method",
         labels={
             station_col: 'Total Number of Stations to Process',
@@ -1126,10 +1126,6 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "Total Throughput (st/s): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
         ),
-        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Total Throughput (st/s)',
-                               'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
-                               waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
-                               avg_model_load_time_col, 'Picker Throughput (st/s)']].values
     )
     
     # Add desired runtime line if provided
@@ -1143,7 +1139,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=1.02, y=0.0,
+            x=1.02, y=-0.1,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -1169,6 +1165,10 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         y=picker_runtime_col,
         color='Execution Mode',
         size=picker_runtime_col,
+        custom_data=['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Total Throughput (st/s)',
+                     'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
+                     waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
+                     avg_model_load_time_col, 'Picker Throughput (st/s)'],
         title=f"[{model_name} - {trial_type}] Picking Time vs Workload Size: ModelActor Method vs Ripper Method",
         labels={
             station_col: 'Total Number of Stations to Process',
@@ -1194,10 +1194,6 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "Total Throughput (st/s): %{customdata[4]:.2f}<br>"
             "<extra></extra>"
         ),
-        customdata=df_combined[['Execution Mode', task_col, 'Generated Label', 'Generated Tasks', 'Total Throughput (st/s)',
-                               'Avg. ModelActor Creation Time (s)', actor_creation_time_col, 
-                               waveform_proc_time_col, picker_runtime_col, total_trial_time_col,
-                               avg_model_load_time_col, 'Picker Throughput (st/s)']].values
     )
 
     # Add desired runtime line if provided
@@ -1211,7 +1207,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         ))
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=1.02, y=0.0,
+            x=1.02, y=-0.1,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -1304,6 +1300,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         color='Execution Mode',
         error_y='std',
         markers=True,
+        custom_data=['Generated Label', 'Generated Tasks', 'std'],
         title=f"[{model_name} - {trial_type}] Picker Throughput Scaling: ModelActor Method vs Ripper Method",
         labels={
             task_col: 'Concurrent Tasks Requested',
@@ -1318,8 +1315,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
             "%{customdata[0]} %{customdata[1]:.0f}<br>"
             "Mean Picker Throughput (st/s): %{y:.2f} ± %{customdata[2]:.2f}<br>"
             "<extra></extra>"
-        ),
-        customdata=scaling_df[['Generated Label', 'Generated Tasks', 'std']].values
+        )
     )
     fig.update_layout(
         xaxis=dict(dtick=10)
@@ -1590,12 +1586,12 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     
     # 7. Summary Statistics Table - including new timing metrics
     # Helper function to safely format values
-    def safe_format(series, fmt=".2f", default="N/A"):
+    def safe_format(series, fmt=".3f", default="N/A"):
         if series.notna().any():
             return f"{series.mean():{fmt}}"
         return default
     
-    def safe_format_min(series, fmt=".2f", default="N/A"):
+    def safe_format_min(series, fmt=".3f", default="N/A"):
         if series.notna().any():
             return f"{series.min():{fmt}}"
         return default
@@ -1604,20 +1600,20 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     # ModelActor: max number of actors created
     ma_max_actors = int(df_ma[actor_col].max()) if actor_col in df_ma.columns else 0
     ma_max_actor_row = df_ma[df_ma[actor_col] == ma_max_actors].iloc[0] if ma_max_actors > 0 else None
-    ma_ram_at_max = f"{ma_max_actor_row[actual_ram_col]:.1f}" if ma_max_actor_row is not None and actual_ram_col in df_ma.columns else "N/A"
+    ma_ram_at_max = f"{ma_max_actor_row[actual_ram_col]:.3f}" if ma_max_actor_row is not None and actual_ram_col in df_ma.columns else "N/A"
     
     # Ripper: max number of concurrent tasks
     rp_max_tasks = int(df_rp[ripper_task_col].max()) if ripper_task_col in df_rp.columns else 0
     rp_max_task_row = df_rp[df_rp[ripper_task_col] == rp_max_tasks].iloc[0] if rp_max_tasks > 0 else None
-    rp_ram_at_max = f"{rp_max_task_row[actual_ram_col]:.1f}" if rp_max_task_row is not None and actual_ram_col in df_rp.columns else "N/A"
+    rp_ram_at_max = f"{rp_max_task_row[actual_ram_col]:.3f}" if rp_max_task_row is not None and actual_ram_col in df_rp.columns else "N/A"
     
     # Check if GPU trial for VRAM metrics
     is_gpu = trial_type.lower() == 'gpu'
     if is_gpu:
-        ma_vram_at_max = f"{ma_max_actor_row[actual_vram_col]:.1f}" if ma_max_actor_row is not None and actual_vram_col in df_ma.columns else "N/A"
-        rp_vram_at_max = f"{rp_max_task_row[actual_vram_col]:.1f}" if rp_max_task_row is not None and actual_vram_col in df_rp.columns else "N/A"
-        ma_mean_vram = f"{df_ma[actual_vram_col].mean():.1f}" if actual_vram_col in df_ma.columns else "N/A"
-        rp_mean_vram = f"{df_rp[actual_vram_col].mean():.1f}" if actual_vram_col in df_rp.columns else "N/A"
+        ma_vram_at_max = f"{ma_max_actor_row[actual_vram_col]:.3f}" if ma_max_actor_row is not None and actual_vram_col in df_ma.columns else "N/A"
+        rp_vram_at_max = f"{rp_max_task_row[actual_vram_col]:.3f}" if rp_max_task_row is not None and actual_vram_col in df_rp.columns else "N/A"
+        ma_mean_vram = f"{df_ma[actual_vram_col].mean():.3f}" if actual_vram_col in df_ma.columns else "N/A"
+        rp_mean_vram = f"{df_rp[actual_vram_col].mean():.3f}" if actual_vram_col in df_rp.columns else "N/A"
     
     # Build summary table with comprehensive timing metrics
     summary_metrics = [
@@ -1645,13 +1641,13 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     
     ma_values = [
         '',
-        f"{df_ma['Picker Throughput (st/s)'].mean():.2f}",
-        f"{df_ma['Picker Throughput (st/s)'].median():.2f}",
-        f"{df_ma['Picker Throughput (st/s)'].max():.2f}",
+        f"{df_ma['Picker Throughput (st/s)'].mean():.3f}",
+        f"{df_ma['Picker Throughput (st/s)'].median():.3f}",
+        f"{df_ma['Picker Throughput (st/s)'].max():.3f}",
         '',
-        f"{df_ma['Total Throughput (st/s)'].mean():.2f}",
-        f"{df_ma['Total Throughput (st/s)'].median():.2f}",
-        f"{df_ma['Total Throughput (st/s)'].max():.2f}",
+        f"{df_ma['Total Throughput (st/s)'].mean():.3f}",
+        f"{df_ma['Total Throughput (st/s)'].median():.3f}",
+        f"{df_ma['Total Throughput (st/s)'].max():.3f}",
         '',
         safe_format(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
         safe_format_min(df_ma[total_trial_time_col]) if total_trial_time_col in df_ma.columns else "N/A",
@@ -1660,7 +1656,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         '',
         safe_format(df_ma[actor_creation_time_col]) if actor_creation_time_col in df_ma.columns else "N/A",
         safe_format(df_ma[avg_model_load_time_col]) if avg_model_load_time_col in df_ma.columns else "N/A",
-        safe_format(df_ma[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_ma.columns else "N/A",
+        safe_format(df_ma[waveform_proc_time_col], ".3f") if waveform_proc_time_col in df_ma.columns else "N/A",
         '',
         f"{ma_max_actors} actors",
         ma_ram_at_max,
@@ -1668,13 +1664,13 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     
     rp_values = [
         '',
-        f"{df_rp['Picker Throughput (st/s)'].mean():.2f}",
-        f"{df_rp['Picker Throughput (st/s)'].median():.2f}",
-        f"{df_rp['Picker Throughput (st/s)'].max():.2f}",
+        f"{df_rp['Picker Throughput (st/s)'].mean():.3f}",
+        f"{df_rp['Picker Throughput (st/s)'].median():.3f}",
+        f"{df_rp['Picker Throughput (st/s)'].max():.3f}",
         '',
-        f"{df_rp['Total Throughput (st/s)'].mean():.2f}",
-        f"{df_rp['Total Throughput (st/s)'].median():.2f}",
-        f"{df_rp['Total Throughput (st/s)'].max():.2f}",
+        f"{df_rp['Total Throughput (st/s)'].mean():.3f}",
+        f"{df_rp['Total Throughput (st/s)'].median():.3f}",
+        f"{df_rp['Total Throughput (st/s)'].max():.3f}",
         '',
         safe_format(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
         safe_format_min(df_rp[total_trial_time_col]) if total_trial_time_col in df_rp.columns else "N/A",
@@ -1683,7 +1679,7 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
         '',
         "N/A (no actors)",  # Ripper mode doesn't create actors
         safe_format(df_rp[avg_model_load_time_col]) if avg_model_load_time_col in df_rp.columns else "N/A",
-        safe_format(df_rp[waveform_proc_time_col], ".2f") if waveform_proc_time_col in df_rp.columns else "N/A",
+        safe_format(df_rp[waveform_proc_time_col], ".3f") if waveform_proc_time_col in df_rp.columns else "N/A",
         '',
         f"{rp_max_tasks} tasks",
         rp_ram_at_max,
@@ -1702,11 +1698,11 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir="visuali
     ])
     ma_values.extend([
         '',
-        f"{df_ma[actual_ram_col].mean():.1f}",
+        f"{df_ma[actual_ram_col].mean():.3f}",
     ])
     rp_values.extend([
         '',
-        f"{df_rp[actual_ram_col].mean():.1f}",
+        f"{df_rp[actual_ram_col].mean():.3f}",
     ])
     
     # Add mean VRAM for GPU trials
@@ -1810,17 +1806,11 @@ def generate_aggregate_plots(all_data, output_dir):
                 y=metric_label,
                 color='Method Name',
                 markers=True,
+                custom_data=['Model', 'Method Name', 'Concurrency Label'],
                 title=f"Aggregate Comparison: {metric_label} vs Concurrency ({trial_type.upper()})",
                 labels={
                     'Effective Concurrency': 'Number of Actors / Concurrent Tasks',
                     'Method Name': 'Method'
-                },
-                hover_data={
-                    'Method Name': True,
-                    'Execution Mode': False,
-                    'Model': False,
-                    'Effective Concurrency': False,
-                    metric_label: ':.2f'
                 }
             )
             
@@ -1829,8 +1819,7 @@ def generate_aggregate_plots(all_data, output_dir):
                 hovertemplate="<b>%{customdata[1]}</b><br>" + # Method Name
                               "Method: %{customdata[1]}<br>" +
                               "%{customdata[2]}: %{x}<br>" + # Dynamic Label: Value
-                              "Mean " + metric_label + ": %{y:.2f}<extra></extra>",
-                customdata=plot_df[['Model', 'Method Name', 'Concurrency Label']].values
+                              "Mean " + metric_label + ": %{y:.2f}<extra></extra>"
             )
             
             fig.update_layout(
@@ -1932,8 +1921,11 @@ def batch_visualize(results_root, output_dir="visualizations", desired_runtime=N
 def find_all_model_files(results_root, model):
     """
     Find all 4 possible combinations of hardware and method for a given model.
+    Ensures consistency by picking the best variant (Exact > Original > Others).
     """
-    model = model.lower()
+    # Normalize model name: lower case and replace hyphens with underscores
+    model = model.lower().replace('-', '_')
+    user_parts = model.split('_')
     files = {
         'cpu_modelactor': None,
         'gpu_modelactor': None,
@@ -1944,27 +1936,74 @@ def find_all_model_files(results_root, model):
     if not os.path.exists(results_root):
         return files
         
+    matches = []
     for item in os.listdir(results_root):
-        item_path = os.path.join(results_root, item)
-        if not os.path.isdir(item_path):
-            continue
-            
         item_lower = item.lower()
         if not item_lower.startswith('eval_'):
             continue
             
-        if model not in item_lower:
+        # Also normalize directory name parts
+        parts = item_lower.replace('-', '_').split('_')
+        # Format: eval_{hw}_{model_parts...}_{method}
+        method_idx = -1
+        for i, p in enumerate(parts):
+            if p in ['modelactor', 'ripper']:
+                method_idx = i
+                break
+        if method_idx == -1:
             continue
-            
-        hardware = 'cpu' if 'cpu' in item_lower else 'gpu' if 'gpu' in item_lower else None
-        method = 'modelactor' if '_modelactor' in item_lower else 'ripper' if '_ripper' in item_lower else None
         
-        if hardware and method:
-            key = f"{hardware}_{method}"
-            csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
-            if csv_files:
-                files[key] = csv_files[0]
+        model_parts = parts[2:method_idx]
+        
+        # Check if user_parts is a prefix of model_parts
+        if model_parts[:len(user_parts)] == user_parts:
+            matches.append({
+                'path': os.path.join(results_root, item),
+                'model_parts': model_parts,
+                'hardware': parts[1] if parts[1] in ['cpu', 'gpu'] else None,
+                'method': parts[method_idx]
+            })
+            
+    if not matches:
+        # Fallback: exact substring match if the structured match fails
+        for item in os.listdir(results_root):
+            item_path = os.path.join(results_root, item)
+            item_lower = item.lower()
+            if not item_lower.startswith('eval_'): continue
+            
+            if model in item_lower.replace('-', '_'):
+                hardware = 'cpu' if 'cpu' in item_lower else 'gpu' if 'gpu' in item_lower else None
+                method = 'modelactor' if '_modelactor' in item_lower else 'ripper' if '_ripper' in item_lower else None
+                if hardware and method:
+                    key = f"{hardware}_{method}"
+                    csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
+                    if csv_files:
+                        files[key] = csv_files[0]
+        return files
+        
+    # Find the best model variant name among matches
+    variants = {}
+    for m in matches:
+        v_key = tuple(m['model_parts'])
+        if v_key not in variants:
+            score = 1
+            if list(m['model_parts']) == user_parts:
+                score = 3  # Top priority: Exact match
+            elif list(m['model_parts']) == user_parts + ['original']:
+                score = 2  # 2nd priority: 'original' suffix
+            variants[v_key] = score
                 
+    best_variant_key = max(variants, key=variants.get)
+    
+    # Now fill the files dict using only the best variant
+    for m in matches:
+        if tuple(m['model_parts']) == best_variant_key and m['hardware']:
+            key = f"{m['hardware']}_{m['method']}"
+            if key in files:
+                csv_files = glob.glob(os.path.join(m['path'], '*_test_results.csv'))
+                if csv_files:
+                    files[key] = csv_files[0]
+                    
     return files
 
 
@@ -2020,6 +2059,17 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
 
     # Preprocess all dataframes
     for key, df in dfs.items():
+        # Ensure GPU Count exists and is correctly parsed from string lists like '[0, 1]'
+        if 'GPU Count' not in df.columns:
+            if 'GPUs Used' in df.columns:
+                df['GPU Count'] = df['GPUs Used'].apply(parse_gpu_list)
+            else:
+                df['GPU Count'] = 0
+        else:
+            # Re-parse if it exists to handle potential string inconsistencies
+            if df['GPU Count'].dtype == object or df['GPU Count'].dtype == str:
+                df['GPU Count'] = df['GPUs Used'].apply(parse_gpu_list) if 'GPUs Used' in df.columns else 0
+        
         # Calculate throughputs
         df['Picker Throughput (st/s)'] = df[station_col] / df[picker_runtime_col]
         df['Total Throughput (st/s)'] = df[station_col] / df[total_trial_time_col]
@@ -2036,15 +2086,32 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             df['Generated Label'] = "Ripper Tasks"
 
         # Ensure numeric
-        for col in [total_trial_time_col, picker_runtime_col, station_col, cpu_col]:
+        for col in [total_trial_time_col, picker_runtime_col, station_col, cpu_col, 'GPU Count', 
+                    actual_ram_col, actual_vram_col, 'Picker Throughput (st/s)']:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # Combine for plotting
+    # Combined for plotting
     df_all = pd.concat(dfs.values(), ignore_index=True)
 
     # Helper for point size
     point_size = station_col if dot_growth else None
+
+    # Standard hover configuration for all comparative scatter plots
+    standard_hover = (
+        "<b>%{customdata[0]}</b><br>"
+        "Total Stations: %{x}<br>"
+        "%{customdata[2]}: %{customdata[1]}<br>"
+        "CPUs: %{customdata[5]} | GPUs: %{customdata[6]}<br>"
+        "Total Trial Runtime: %{customdata[4]:.3f}s<br>"
+        "Waveform Picking Time: %{customdata[3]:.3f}s<br>"
+        "Picker Throughput: %{customdata[9]:.3f} st/s<br>"
+        "RAM: %{customdata[7]:.3f} MB | VRAM: %{customdata[8]:.3f} MB<br>"
+        "<extra></extra>"
+    )
+    standard_customdata_cols = ['Label', 'Generated Tasks', 'Generated Label', picker_runtime_col, 
+                                total_trial_time_col, cpu_col, 'GPU Count', actual_ram_col, 
+                                actual_vram_col, 'Picker Throughput (st/s)']
 
     # =========================================================================
     # 1. ALL METHOD COMPARISONS (Root output_dir/All_Method_Comparisons)
@@ -2058,33 +2125,27 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         x=station_col,
         y=total_trial_time_col,
         color='Generated Tasks',
-        symbol='Label',
+        symbol='Execution Mode',
         size=point_size,
+        custom_data=standard_customdata_cols,
         title=f"[{model_name}] Total Trial Runtime vs Workload Size: Universal Comparison",
         labels={
             station_col: 'Total Number of Stations to Process',
             total_trial_time_col: 'Total Trial Runtime (s)',
-            'Generated Tasks': 'Effective Concurrency'
+            'Generated Tasks': 'Effective Concurrency',
+            'Execution Mode': 'Method'
         }
     )
     fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title="Effective Concurrency"))
     fig.update_traces(
         marker=dict(line=dict(width=0)),
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "Total Stations: %{x}<br>"
-            "Concurrency: %{customdata[1]}<br>"
-            "Total Trial Runtime: %{y:.2f}s<br>"
-            "Picker Runtime: %{customdata[2]:.2f}s<br>"
-            "CPUs: %{customdata[3]}<br>"
-            "<extra></extra>"
-        ),
-        customdata=df_all[['Label', 'Generated Tasks', picker_runtime_col, cpu_col]].values
+        hovertemplate=standard_hover
     )
     fig.update_layout(
         xaxis=dict(title='Total Number of Stations to Process', dtick=10),
         yaxis=dict(title='Total Trial Runtime (s)'),
         legend=dict(
+            title_text='Method',
             yanchor="top",
             y=0.99,
             xanchor="left",
@@ -2096,7 +2157,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=1.02, y=0.0,
+            x=1.02, y=-0.1,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -2118,33 +2179,27 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         x=station_col,
         y=picker_runtime_col,
         color='Generated Tasks',
-        symbol='Label',
+        symbol='Execution Mode',
         size=point_size,
+        custom_data=standard_customdata_cols,
         title=f"[{model_name}] Total Waveform Picking Time vs Workload Size: Universal Comparison",
         labels={
             station_col: 'Total Number of Stations to Process',
             picker_runtime_col: 'Total Waveform Picking Time (s)',
-            'Generated Tasks': 'Effective Concurrency'
+            'Generated Tasks': 'Effective Concurrency',
+            'Execution Mode': 'Method'
         }
     )
     fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title="Effective Concurrency"))
     fig.update_traces(
         marker=dict(line=dict(width=0)),
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "Total Stations: %{x}<br>"
-            "Concurrency: %{customdata[1]}<br>"
-            "Picker Runtime: %{y:.2f}s<br>"
-            "Total Trial Time: %{customdata[2]:.2f}s<br>"
-            "CPUs: %{customdata[3]}<br>"
-            "<extra></extra>"
-        ),
-        customdata=df_all[['Label', 'Generated Tasks', total_trial_time_col, cpu_col]].values
+        hovertemplate=standard_hover
     )
     fig.update_layout(
         xaxis=dict(title='Total Number of Stations to Process', dtick=10),
         yaxis=dict(title='Total Waveform Picking Time (s)'),
         legend=dict(
+            title_text='Method',
             yanchor="top",
             y=0.99,
             xanchor="left",
@@ -2156,7 +2211,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
         fig.add_annotation(
             xref="paper", yref="paper",
-            x=1.02, y=0.0,
+            x=1.02, y=-0.1,
             text=f"Target: {desired_runtime}s",
             showarrow=False,
             font=dict(color="red", size=13, family="Arial Black"),
@@ -2179,10 +2234,11 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         x='Generated Tasks',
         y='mean',
         color='Generated Tasks',
-        symbol='Label',
+        symbol='Execution Mode',
         error_y='std',
+        custom_data=['Label', 'std'],
         title=f"[{model_name}] Picker Throughput Scaling Comparison",
-        labels={'Generated Tasks': 'Effective Concurrency', 'mean': 'Mean Picker Throughput (st/s)'}
+        labels={'Generated Tasks': 'Effective Concurrency', 'mean': 'Mean Picker Throughput (st/s)', 'Execution Mode': 'Method'}
     )
     fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title="Effective Concurrency"))
     fig.update_traces(
@@ -2190,11 +2246,10 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         hovertemplate=(
             "<b>%{customdata[0]}</b><br>"
             "Effective Concurrency: %{x}<br>"
-            "Mean Throughput: %{y:.2f} st/s<br>"
-            "Std Dev: ±%{customdata[1]:.2f}<br>"
+            "Mean Throughput: %{y:.3f} st/s<br>"
+            "Std Dev: ±%{customdata[1]:.3f}<br>"
             "<extra></extra>"
-        ),
-        customdata=scaling_df[['Label', 'std']].values
+        )
     )
     fig.update_layout(
         xaxis=dict(title='Effective Concurrency', dtick=10),
@@ -2207,6 +2262,20 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             bgcolor='rgba(255,255,255,0.5)'
         )
     )
+    if desired_runtime:
+        fig.add_annotation(
+            xref="paper", yref="paper",
+            x=1.02, y=-0.1,
+            text=f"Target: {desired_runtime}s",
+            showarrow=False,
+            font=dict(color="red", size=13, family="Arial Black"),
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="red",
+            borderwidth=1,
+            xanchor="left",
+            yanchor="top"
+        )
+        fig.update_layout(margin=dict(b=80))
     output_file = os.path.join(all_methods_dir, f"universal_comparison_throughput_scaling_{safe_model_name}.html")
     fig.write_html(output_file)
     print(f"Saved: {output_file}")
@@ -2216,16 +2285,16 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
     # =========================================================================
     def get_summary_values(df, hw_type, method):
         if df is None or df.empty:
-            return ["N/A"] * 24 # Filler
+            return ["N/A"] * 26 # Filler
         
         # Re-implement safe_format helpers locally
-        def s_fmt(series, fmt=".2f"):
+        def s_fmt(series, fmt=".3f"):
             return f"{series.mean():{fmt}}" if series.notna().any() else "N/A"
-        def s_median(series, fmt=".2f"):
+        def s_median(series, fmt=".3f"):
             return f"{series.median():{fmt}}" if series.notna().any() else "N/A"
-        def s_max(series, fmt=".2f"):
+        def s_max(series, fmt=".3f"):
             return f"{series.max():{fmt}}" if series.notna().any() else "N/A"
-        def s_min(series, fmt=".2f"):
+        def s_min(series, fmt=".3f"):
             return f"{series.min():{fmt}}" if series.notna().any() else "N/A"
         
         # Max concurrency metrics - handle NaNs safely
@@ -2259,10 +2328,12 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
                 if not matching_rows.empty:
                     max_row = matching_rows.iloc[0]
             
-        ram_at_max = f"{max_row[actual_ram_col]:.1f}" if max_row is not None and actual_ram_col in df.columns and pd.notna(max_row[actual_ram_col]) else "N/A"
-        vram_at_max = f"{max_row[actual_vram_col]:.1f}" if max_row is not None and actual_vram_col in df.columns and pd.notna(max_row[actual_vram_col]) else "N/A"
+        ram_at_max = f"{max_row[actual_ram_col]:.3f}" if max_row is not None and actual_ram_col in df.columns and pd.notna(max_row[actual_ram_col]) else "N/A"
+        vram_at_max = f"{max_row[actual_vram_col]:.3f}" if max_row is not None and actual_vram_col in df.columns and pd.notna(max_row[actual_vram_col]) else "N/A"
 
         return [
+            '',
+            str(len(df)),
             '',
             s_fmt(df['Picker Throughput (st/s)']),
             s_median(df['Picker Throughput (st/s)']),
@@ -2285,11 +2356,13 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             ram_at_max,
             vram_at_max if hw_type == 'GPU' else "N/A",
             '',
-            s_fmt(df[actual_ram_col], ".1f") if actual_ram_col in df.columns else "N/A",
-            s_fmt(df[actual_vram_col], ".1f") if hw_type == 'GPU' and actual_vram_col in df.columns else "N/A"
+            s_fmt(df[actual_ram_col], ".3f") if actual_ram_col in df.columns else "N/A",
+            s_fmt(df[actual_vram_col], ".3f") if hw_type == 'GPU' and actual_vram_col in df.columns else "N/A"
         ]
 
     metrics = [
+        '--- General Metrics ---',
+        'Total Number of Trials',
         '--- Picker Throughput (st/Picker Runtime) ---',
         'Mean Picker Throughput (st/s)', 'Median Picker Throughput (st/s)', 'Max Picker Throughput (st/s)',
         '--- Total Throughput (st/Total Trial Time) ---',
@@ -2347,8 +2420,169 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             continue
             
         print(f"\nGenerating {hw_type}-specific comparisons in: {hw_dir}")
-        
-        # 1. Total Runtime vs Stations (Scatter)
+
+        # --- SPECIAL CASE: GPU Method-specific comparisons (per GPU Count) ---
+        if hw_type == 'GPU':
+            for method in ['ModelActor', 'Ripper']:
+                method_gpu_dir = os.path.join(hw_dir, method)
+                os.makedirs(method_gpu_dir, exist_ok=True)
+                df_method_gpu = df_hw[df_hw['Execution Mode'] == method].copy()
+                if df_method_gpu.empty: continue
+
+                # Ensure GPU Count is string for categorical legend
+                df_method_gpu = df_method_gpu.sort_values('GPU Count')
+                df_method_gpu['GPU Config'] = df_method_gpu['GPU Count'].fillna(0).astype(int).astype(str) + " GPU(s)"
+                
+                # Define consistent symbol map for GPU counts
+                gpu_symbol_map = {
+                    "0 GPU(s)": "circle",
+                    "1 GPU(s)": "circle",
+                    "2 GPU(s)": "diamond",
+                    "3 GPU(s)": "square",
+                    "4 GPU(s)": "cross",
+                    "5 GPU(s)": "x",
+                    "6 GPU(s)": "triangle-up",
+                    "7 GPU(s)": "triangle-down",
+                    "8 GPU(s)": "star"
+                }
+
+                # Set method-specific concurrency label
+                if method == 'ModelActor':
+                    conc_label_display = "ModelActor's Created"
+                else:
+                    conc_label_display = "Concurrent Tasks Employeed"
+
+                # 1. Total Runtime vs Stations Comparison (Scatter)
+                fig = px.scatter(
+                    df_method_gpu,
+                    x=station_col,
+                    y=total_trial_time_col,
+                    color='Generated Tasks',
+                    symbol='GPU Config',
+                    symbol_map=gpu_symbol_map,
+                    size=point_size,
+                    custom_data=standard_customdata_cols,
+                    title=f"[{model_name} - {method} - GPU] Total Trial Runtime vs GPU Count",
+                    labels={
+                        station_col: 'Total Number of Stations to Process', 
+                        total_trial_time_col: 'Total Trial Runtime (s)',
+                        'Generated Tasks': conc_label_display
+                    }
+                )
+                fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title=conc_label_display))
+                fig.update_traces(
+                    marker=dict(line=dict(width=0)),
+                    hovertemplate=standard_hover
+                )
+                fig.update_layout(xaxis=dict(dtick=10), legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor='rgba(255,255,255,0.5)'))
+                if desired_runtime:
+                    fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
+                    fig.add_annotation(
+                        xref="paper", yref="paper",
+                        x=1.02, y=-0.1,
+                        text=f"Target: {desired_runtime}s",
+                        showarrow=False,
+                        font=dict(color="red", size=13, family="Arial Black"),
+                        bgcolor="rgba(255,255,255,0.8)",
+                        bordercolor="red",
+                        borderwidth=1,
+                        xanchor="left",
+                        yanchor="top"
+                    )
+                    fig.update_layout(margin=dict(b=80))
+                fig.write_html(os.path.join(method_gpu_dir, "gpu_comparison_total_runtime.html"))
+
+                # 2. Picker Runtime vs Stations Comparison (Scatter)
+                fig = px.scatter(
+                    df_method_gpu,
+                    x=station_col,
+                    y=picker_runtime_col,
+                    color='Generated Tasks',
+                    symbol='GPU Config',
+                    symbol_map=gpu_symbol_map,
+                    size=point_size,
+                    custom_data=standard_customdata_cols,
+                    title=f"[{model_name} - {method} - GPU] Total Waveform Picking Time vs GPU Count",
+                    labels={
+                        station_col: 'Total Number of Stations to Process', 
+                        picker_runtime_col: 'Total Waveform Picking Time (s)',
+                        'Generated Tasks': conc_label_display
+                    }
+                )
+                fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title=conc_label_display))
+                fig.update_traces(
+                    marker=dict(line=dict(width=0)),
+                    hovertemplate=standard_hover
+                )
+                fig.update_layout(xaxis=dict(dtick=10), legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor='rgba(255,255,255,0.5)'))
+                if desired_runtime:
+                    fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
+                    fig.add_annotation(
+                        xref="paper", yref="paper",
+                        x=1.02, y=-0.1,
+                        text=f"Target: {desired_runtime}s",
+                        showarrow=False,
+                        font=dict(color="red", size=13, family="Arial Black"),
+                        bgcolor="rgba(255,255,255,0.8)",
+                        bordercolor="red",
+                        borderwidth=1,
+                        xanchor="left",
+                        yanchor="top"
+                    )
+                    fig.update_layout(margin=dict(b=80))
+                fig.write_html(os.path.join(method_gpu_dir, "gpu_comparison_picker_runtime.html"))
+
+                # 3. Throughput Scaling Comparison
+                scaling_df_gpu = df_method_gpu.groupby(['GPU Config', 'GPU Count'])['Picker Throughput (st/s)'].agg(['mean', 'std']).reset_index().sort_values('GPU Count')
+                fig = px.scatter(
+                    scaling_df_gpu,
+                    x='GPU Config',
+                    y='mean',
+                    color='GPU Config',
+                    symbol='GPU Config',
+                    symbol_map=gpu_symbol_map,
+                    error_y='std',
+                    custom_data=['std'],
+                    title=f"[{model_name} - {method} - GPU] Picker Throughput vs GPU Count",
+                    labels={'mean': 'Mean Picker Throughput (st/s)'}
+                )
+                fig.update_traces(
+                    marker=dict(size=12, line=dict(width=0)),
+                    hovertemplate="<b>%{x}</b><br>Mean Throughput: %{y:.3f} st/s<br>Std Dev: ±%{customdata[0]:.3f}<extra></extra>"
+                )
+                if desired_runtime:
+                    fig.add_annotation(
+                        xref="paper", yref="paper",
+                        x=1.02, y=-0.1,
+                        text=f"Target: {desired_runtime}s",
+                        showarrow=False,
+                        font=dict(color="red", size=13, family="Arial Black"),
+                        bgcolor="rgba(255,255,255,0.8)",
+                        bordercolor="red",
+                        borderwidth=1,
+                        xanchor="left",
+                        yanchor="top"
+                    )
+                    fig.update_layout(margin=dict(b=80))
+
+                # 4. GPU Count Comparison Table
+                unique_gpu_counts = sorted(df_method_gpu['GPU Count'].unique())
+                gpu_cols_data = []
+                gpu_headers = [f"<b>{int(c)} GPU(s)</b>" for c in unique_gpu_counts]
+                
+                for count in unique_gpu_counts:
+                    df_count = df_method_gpu[df_method_gpu['GPU Count'] == count]
+                    gpu_cols_data.append(get_summary_values(df_count, 'GPU', method))
+
+                fig = go.Figure(data=[go.Table(
+                    header=dict(values=['<b>Metric</b>'] + gpu_headers, fill_color='paleturquoise', align='left', font=dict(size=14)),
+                    cells=dict(values=[metrics] + gpu_cols_data, fill_color='lavender', align='left', font=dict(size=12))
+                )])
+                fig.update_layout(title=f"[{model_name} - {method}] GPU Scaling Table: performance vs GPU Count")
+                fig.write_html(os.path.join(method_gpu_dir, "gpu_comparison_table.html"))
+
+        # --- Standard Hardware Comparison Plots (CPU/GPU Root) ---
+        # 1. Total Runtime vs Stations Comparison (Scatter)
         fig = px.scatter(
             df_hw,
             x=station_col,
@@ -2356,6 +2590,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             color='Generated Tasks',
             symbol='Execution Mode',
             size=point_size,
+            custom_data=standard_customdata_cols,
             title=f"[{model_name} - {hw_type}] Total Trial Runtime vs Workload Size",
             labels={
                 station_col: 'Total Number of Stations to Process',
@@ -2366,16 +2601,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title="Effective Concurrency"))
         fig.update_traces(
             marker=dict(line=dict(width=0)),
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "Total Stations: %{x}<br>"
-                "Concurrency: %{customdata[1]}<br>"
-                "Total Trial Runtime: %{y:.2f}s<br>"
-                "Picker Runtime: %{customdata[2]:.2f}s<br>"
-                "CPUs: %{customdata[3]}<br>"
-                "<extra></extra>"
-            ),
-            customdata=df_hw[['Execution Mode', 'Generated Tasks', picker_runtime_col, cpu_col]].values
+            hovertemplate=standard_hover
         )
         fig.update_layout(
             xaxis=dict(title='Total Number of Stations to Process', dtick=10),
@@ -2386,22 +2612,22 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-            x=1.02, y=0.0,
-            text=f"Target: {desired_runtime}s",
-            showarrow=False,
-            font=dict(color="red", size=13, family="Arial Black"),
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="red",
-            borderwidth=1,
-            xanchor="left",
-            yanchor="top"
-        )
-        fig.update_layout(margin=dict(b=80))
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
 
         output_file = os.path.join(hw_dir, f"{hw_type.lower()}_comparison_total_runtime.html")
         fig.write_html(output_file)
         
-        # 2. Picker Runtime vs Stations (Scatter)
+        # 2. Picker Runtime vs Stations Comparison (Scatter)
         fig = px.scatter(
             df_hw,
             x=station_col,
@@ -2409,6 +2635,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             color='Generated Tasks',
             symbol='Execution Mode',
             size=point_size,
+            custom_data=standard_customdata_cols,
             title=f"[{model_name} - {hw_type}] Total Waveform Picking Time vs Workload Size",
             labels={
                 station_col: 'Total Number of Stations to Process',
@@ -2419,16 +2646,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title="Effective Concurrency"))
         fig.update_traces(
             marker=dict(line=dict(width=0)),
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "Total Stations: %{x}<br>"
-                "Concurrency: %{customdata[1]}<br>"
-                "Picker Runtime: %{y:.2f}s<br>"
-                "Total Trial Time: %{customdata[2]:.2f}s<br>"
-                "CPUs: %{customdata[3]}<br>"
-                "<extra></extra>"
-            ),
-            customdata=df_hw[['Execution Mode', 'Generated Tasks', total_trial_time_col, cpu_col]].values
+            hovertemplate=standard_hover
         )
         fig.update_layout(
             xaxis=dict(title='Total Number of Stations to Process', dtick=10),
@@ -2439,44 +2657,58 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-            x=1.02, y=0.0,
-            text=f"Target: {desired_runtime}s",
-            showarrow=False,
-            font=dict(color="red", size=13, family="Arial Black"),
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="red",
-            borderwidth=1,
-            xanchor="left",
-            yanchor="top"
-        )
-        fig.update_layout(margin=dict(b=80))
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
 
         output_file = os.path.join(hw_dir, f"{hw_type.lower()}_comparison_picker_runtime.html")
         fig.write_html(output_file)
 
         # 3. Throughput Scaling Comparison
-        scaling_df = df_hw.groupby(['Generated Tasks', 'Execution Mode'])['Picker Throughput (st/s)'].agg(['mean', 'std']).reset_index()
+        scaling_df_hw = df_hw.groupby(['Generated Tasks', 'Execution Mode'])['Picker Throughput (st/s)'].agg(['mean', 'std']).reset_index()
         fig = px.scatter(
-            scaling_df,
+            scaling_df_hw,
             x='Generated Tasks',
             y='mean',
             color='Generated Tasks',
             symbol='Execution Mode',
             error_y='std',
+            custom_data=['std'],
             title=f"[{model_name} - {hw_type}] Picker Throughput Scaling Comparison",
             labels={'Generated Tasks': 'Effective Concurrency', 'mean': 'Mean Picker Throughput (st/s)'}
         )
         fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title="Effective Concurrency"))
         fig.update_traces(
             marker=dict(size=12, line=dict(width=0)),
-            hovertemplate="<b>%{symbol}</b><br>Concurrency: %{x}<br>Throughput: %{y:.2f} st/s<br>Std Dev: ±%{customdata[0]:.2f}<extra></extra>",
-            customdata=scaling_df[['std']].values
+            hovertemplate="<b>%{symbol}</b><br>Concurrency: %{x}<br>Throughput: %{y:.3f} st/s<br>Std Dev: ±%{customdata[0]:.3f}<extra></extra>"
         )
         fig.update_layout(
             xaxis=dict(title='Effective Concurrency', dtick=10),
             yaxis=dict(title='Mean Picker Throughput (st/s)'),
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor='rgba(255,255,255,0.5)')
         )
+        if desired_runtime:
+            fig.add_annotation(
+                xref="paper", yref="paper",
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
         output_file = os.path.join(hw_dir, f"{hw_type.lower()}_comparison_throughput_scaling.html")
         fig.write_html(output_file)
 
@@ -2542,6 +2774,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             color='Generated Tasks',
             symbol='Hardware',
             size=point_size,
+            custom_data=standard_customdata_cols,
             title=f"[{model_name} - {method}] CPU vs GPU: Total Trial Runtime",
             labels={
                 station_col: 'Total Number of Stations to Process',
@@ -2552,16 +2785,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title=conc_label_display))
         fig.update_traces(
             marker=dict(line=dict(width=0)),
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "Total Stations: %{x}<br>"
-                + f"{conc_label_display}: %{{customdata[1]}}<br>" +
-                "Total Trial Runtime: %{y:.2f}s<br>"
-                "Picker Runtime: %{customdata[2]:.2f}s<br>"
-                "CPUs: %{customdata[3]}<br>"
-                "<extra></extra>"
-            ),
-            customdata=df_method[['Hardware', 'Generated Tasks', picker_runtime_col, cpu_col]].values
+            hovertemplate=standard_hover
         )
         fig.update_layout(
             xaxis=dict(title='Total Number of Stations to Process', dtick=10),
@@ -2572,17 +2796,17 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-            x=1.02, y=0.0,
-            text=f"Target: {desired_runtime}s",
-            showarrow=False,
-            font=dict(color="red", size=13, family="Arial Black"),
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="red",
-            borderwidth=1,
-            xanchor="left",
-            yanchor="top"
-        )
-        fig.update_layout(margin=dict(b=80))
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
 
         output_file = os.path.join(method_dir, f"hardware_comparison_total_runtime.html")
         fig.write_html(output_file)
@@ -2595,6 +2819,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             color='Generated Tasks',
             symbol='Hardware',
             size=point_size,
+            custom_data=standard_customdata_cols,
             title=f"[{model_name} - {method}] CPU vs GPU: Total Waveform Picking Time",
             labels={
                 station_col: 'Total Number of Stations to Process',
@@ -2605,16 +2830,7 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
         fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title=conc_label_display))
         fig.update_traces(
             marker=dict(line=dict(width=0)),
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "Total Stations: %{x}<br>"
-                + f"{conc_label_display}: %{{customdata[1]}}<br>" +
-                "Picker Runtime: %{y:.2f}s<br>"
-                "Total Trial Time: %{customdata[2]:.2f}s<br>"
-                "CPUs: %{customdata[3]}<br>"
-                "<extra></extra>"
-            ),
-            customdata=df_method[['Hardware', 'Generated Tasks', total_trial_time_col, cpu_col]].values
+            hovertemplate=standard_hover
         )
         fig.update_layout(
             xaxis=dict(title='Total Number of Stations to Process', dtick=10),
@@ -2625,44 +2841,58 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
             fig.add_hline(y=desired_runtime, line_dash="dash", line_color="red")
             fig.add_annotation(
                 xref="paper", yref="paper",
-            x=1.02, y=0.0,
-            text=f"Target: {desired_runtime}s",
-            showarrow=False,
-            font=dict(color="red", size=13, family="Arial Black"),
-            bgcolor="rgba(255,255,255,0.8)",
-            bordercolor="red",
-            borderwidth=1,
-            xanchor="left",
-            yanchor="top"
-        )
-        fig.update_layout(margin=dict(b=80))
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
 
         output_file = os.path.join(method_dir, f"hardware_comparison_picker_runtime.html")
         fig.write_html(output_file)
 
         # 3. Throughput Scaling Comparison
-        scaling_df = df_method.groupby(['Generated Tasks', 'Hardware'])['Picker Throughput (st/s)'].agg(['mean', 'std']).reset_index()
+        scaling_df_method = df_method.groupby(['Generated Tasks', 'Hardware'])['Picker Throughput (st/s)'].agg(['mean', 'std']).reset_index()
         fig = px.scatter(
-            scaling_df,
+            scaling_df_method,
             x='Generated Tasks',
             y='mean',
             color='Generated Tasks',
             symbol='Hardware',
             error_y='std',
+            custom_data=['std'],
             title=f"[{model_name} - {method}] CPU vs GPU: Picker Throughput Scaling",
             labels={'Generated Tasks': conc_label_display, 'mean': 'Mean Picker Throughput (st/s)'}
         )
         fig.update_coloraxes(colorscale='Turbo', colorbar=dict(dtick=10, title=conc_label_display))
         fig.update_traces(
             marker=dict(size=12, line=dict(width=0)),
-            hovertemplate="<b>%{symbol}</b><br>" + f"{conc_label_display}: %{{x}}<br>" + "Throughput: %{y:.2f} st/s<br>Std Dev: ±%{customdata[0]:.2f}<extra></extra>",
-            customdata=scaling_df[['std']].values
+            hovertemplate="<b>%{symbol}</b><br>" + f"{conc_label_display}: %{{x}}<br>" + "Throughput: %{y:.3f} st/s<br>Std Dev: ±%{customdata[0]:.3f}<extra></extra>"
         )
         fig.update_layout(
             xaxis=dict(title=conc_label_display, dtick=10),
             yaxis=dict(title='Mean Picker Throughput (st/s)'),
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor='rgba(255,255,255,0.5)')
         )
+        if desired_runtime:
+            fig.add_annotation(
+                xref="paper", yref="paper",
+                x=1.02, y=-0.1,
+                text=f"Target: {desired_runtime}s",
+                showarrow=False,
+                font=dict(color="red", size=13, family="Arial Black"),
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="red",
+                borderwidth=1,
+                xanchor="left",
+                yanchor="top"
+            )
+            fig.update_layout(margin=dict(b=80))
         output_file = os.path.join(method_dir, f"hardware_comparison_throughput_scaling.html")
         fig.write_html(output_file)
 
@@ -2696,42 +2926,86 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
 def find_comparison_files(results_root, model, trial_type):
     """
     Find ModelActor and Ripper CSV files for a given model and trial type.
+    Ensures consistency by picking the best variant (Exact > Original > Others).
     """
     trial_type = trial_type.lower()
-    model = model.lower()
+    # Normalize model name: lower case and replace hyphens with underscores
+    model = model.lower().replace('-', '_')
+    user_parts = model.split('_')
+    
+    if not os.path.exists(results_root):
+        return None, None
+        
+    matches = []
+    for item in os.listdir(results_root):
+        item_lower = item.lower()
+        if not item_lower.startswith('eval_') or trial_type not in item_lower:
+            continue
+            
+        # Also normalize directory name parts
+        parts = item_lower.replace('-', '_').split('_')
+        method_idx = -1
+        for i, p in enumerate(parts):
+            if p in ['modelactor', 'ripper']:
+                method_idx = i
+                break
+        if method_idx == -1:
+            continue
+        
+        model_parts = parts[2:method_idx]
+        
+        # Check if user_parts is a prefix of model_parts
+        if model_parts[:len(user_parts)] == user_parts:
+            matches.append({
+                'path': os.path.join(results_root, item),
+                'model_parts': model_parts,
+                'method': parts[method_idx]
+            })
+            
+    if not matches:
+        # Fallback: exact substring match
+        modelactor_csv = None
+        ripper_csv = None
+        for item in os.listdir(results_root):
+            item_path = os.path.join(results_root, item)
+            item_lower = item.lower()
+            if not item_lower.startswith('eval_') or trial_type not in item_lower: continue
+            
+            if model in item_lower.replace('-', '_'):
+                csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
+                if not csv_files: continue
+                if "_modelactor" in item_lower:
+                    modelactor_csv = csv_files[0]
+                elif "_ripper" in item_lower:
+                    ripper_csv = csv_files[0]
+        return modelactor_csv, ripper_csv
+        
+    # Find the best model variant among matches
+    variants = {}
+    for m in matches:
+        v_key = tuple(m['model_parts'])
+        if v_key not in variants:
+            score = 1
+            if list(m['model_parts']) == user_parts:
+                score = 3
+            elif list(m['model_parts']) == user_parts + ['original']:
+                score = 2
+            variants[v_key] = score
+                
+    best_variant_key = max(variants, key=variants.get)
     
     modelactor_csv = None
     ripper_csv = None
-    
-    # We look for directories that contain:
-    # 1. 'eval_'
-    # 2. the trial_type (cpu/gpu)
-    # 3. the model name substring
-    # 4. the execution mode (_modelactor or _ripper)
-    for item in os.listdir(results_root):
-        item_path = os.path.join(results_root, item)
-        if not os.path.isdir(item_path):
-            continue
-            
-        item_lower = item.lower()
-        if not item_lower.startswith('eval_'):
-            continue
-            
-        if trial_type not in item_lower:
-            continue
-            
-        if model not in item_lower:
-            continue
-            
-        if "_modelactor" in item_lower:
-            csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
-            if csv_files:
+    for m in matches:
+        if tuple(m['model_parts']) == best_variant_key:
+            csv_files = glob.glob(os.path.join(m['path'], '*_test_results.csv'))
+            if not csv_files:
+                continue
+            if m['method'] == 'modelactor':
                 modelactor_csv = csv_files[0]
-        elif "_ripper" in item_lower:
-            csv_files = glob.glob(os.path.join(item_path, '*_test_results.csv'))
-            if csv_files:
+            elif m['method'] == 'ripper':
                 ripper_csv = csv_files[0]
-    
+                
     return modelactor_csv, ripper_csv
 
 
