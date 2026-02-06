@@ -1536,18 +1536,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Create all actors in parallel (non-blocking .remote() calls)
             logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
-            model_actors = []
-            for i in range(n_actors):
-                # Use fractional GPU so Ray knows this actor needs GPU resources
-                # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
-                actor = SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
+            model_actors = [
+                SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
                     gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
                     use_gpu=True
-                )
-                model_actors.append(actor)
-            
+                ) for _ in range(n_actors)
+            ]
+
             # Wait for all actors to initialize in parallel
             logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
             try:
@@ -1597,18 +1594,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Create all actors in parallel (non-blocking .remote() calls)
             logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
-            model_actors = []
-            for i in range(n_actors):
-                # NO .options() - let Ray handle scheduling
-                # taskset already limits which CPUs Ray can see
-                actor = SeisBenchModelActor.remote(
+            model_actors = [
+                SeisBenchModelActor.remote(
                     parent_model_name=seisbench_parent_model,
                     child_model_name=seisbench_child_model,
                     gpus_to_use=False,
                     use_gpu=False
-                )
-                model_actors.append(actor)
-            
+                ) for _ in range(n_actors)
+            ]
+
             # Wait for all actors to initialize in parallel
             logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
             try:
@@ -1757,20 +1751,16 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Create all actors in parallel (non-blocking .remote() calls)
             logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
-            model_actors = []
-            for i in range(n_actors):
-                # Use fractional GPU so Ray knows this actor needs GPU resources
-                # CUDA_VISIBLE_DEVICES limits which GPUs are visible, num_gpus tells Ray to schedule with GPU
-                # TF memory growth is enabled in tf_environ, allowing multiple actors per GPU
-                actor = ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
+            model_actors = [
+                ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
                     gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
                     p_model_path=p_model, 
                     s_model_path=s_model, 
                     gpu_memory_limit_mb=per_actor_vram_mb,  # Per-actor VRAM limit via TF config
                     use_gpu=True
-                )
-                model_actors.append(actor)
-            
+                ) for _ in range(n_actors)
+            ]
+
             # Wait for all actors to initialize in parallel
             logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
             try:
@@ -1816,18 +1806,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Create all actors in parallel (non-blocking .remote() calls)
             logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
-            model_actors = []
-            for i in range(n_actors):
-                # NO .options() - let Ray handle scheduling
-                # taskset already limits which CPUs Ray can see
-                actor = ModelActor.remote(
+            model_actors = [
+                ModelActor.remote(
                     p_model_path=p_model, 
                     s_model_path=s_model, 
                     gpu_memory_limit_mb=None, 
                     use_gpu=False
-                )
-                model_actors.append(actor)
-            
+                ) for _ in range(n_actors)
+            ]
+
             # Wait for all actors to initialize in parallel
             logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
             try:
@@ -2412,13 +2399,32 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     waveform_load_time = time.time() - waveform_load_start
 
     try:
-        params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
-        pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-        
-        # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
-        # predP, predS = ray.get(model_actor.predict.remote(pred_generator))\
-        predP, predS = ray.get(model_actor.predict_from_arrays.remote(
-                            meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
+        # Load model ONLY if we don't have a shared model_actor (RIPPER mode)
+        if model_actor is None:
+            logger.info("RIPPER MODE: Loading EQCCT model inside task...")
+            # Configure GPU for this specific task process
+            if gpu:
+                from eqcctpro.tools import tf_environ
+                # Set a per-task VRAM limit if provided in args
+                vram_limit = args.get('gpu_memory_limit_mb')
+                tf_environ(gpu_id=0, vram_limit_mb=vram_limit, use_gpu=True, logger=logger)
+            
+            from eqcctpro.eqcct_tf_models import load_eqcct_model
+            model = load_eqcct_model(args['p_model'], args['s_model'])
+            logger.info("Model loaded inside task.")
+            
+            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+            predP, predS = model.predict(pred_generator, verbose=0)
+        else:
+            # Standard mode: Use the shared ModelActor
+            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+            
+            # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
+            # predP, predS = ray.get(model_actor.predict.remote(pred_generator))\
+            predP, predS = ray.get(model_actor.predict_from_arrays.remote(
+                                meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
         
         detection_memory = []
         prob_memory = []

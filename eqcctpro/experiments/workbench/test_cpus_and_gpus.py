@@ -12,6 +12,9 @@ csv_filepath = os.path.join(base_dir, 'results/csv')
 models_dir = os.path.join(base_dir, 'models/EQCCT')
 tmp_dir = '/lambda1a/skevofilaxc/tmp'
 
+# --- GPU Constants (RTX 6000 Ada: ~48GB per card) ---
+VRAM_PER_GPU = 46550  # MB
+
 # --- NOTE: RIPPER MODE - Use old task-based approach instead of ModelActors ---
 # RIPPER mode allows more flexible GPU memory sharing by loading the model inside each task
 # instead of using persistent ModelActors. This bypasses the MIN_FRACTIONAL_GPU constraints
@@ -41,9 +44,9 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'), # P Model name for EQCCT model (test_trainer_024.h5)
 #     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'), # S Model name for EQCCT model (test_trainer_021.h5)
 #     input_dir=input_mseed_directory_path,
-#     output_dir=os.path.join(output_pick_directory_path, 'eval_gpu_eqcct_modelactor'),
-#     log_filepath=os.path.join(output_pick_directory_path, 'eval_gpu_eqcct_modelactor', 'eqcctpro.log'),
-#     csv_dir=os.path.join(csv_filepath, 'eval_gpu_eqcct_modelactor'),
+#     output_dir=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct_modelactor'),
+#     log_filepath=os.path.join(output_pick_directory_path, 'eval_cpu_eqcct_modelactor', 'eqcctpro.log'),
+#     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct_modelactor'),
 #     cpu_id_list=range(0, 20),
 #     min_cpu_amount=5,
 #     cpu_test_step_size=3,
@@ -61,6 +64,8 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_cpu.evaluate()
 
 # --- Example B: Evaluate System capability using EQCCT Model (GPU) ---
+# selected_gpus = [0, 1]
+# num_gpus = len(selected_gpus)
 # eval_eqcct_gpu = EvaluateSystem(
 #     eval_mode='gpu',
 #     model_type='eqcct',
@@ -69,9 +74,9 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     input_dir=input_mseed_directory_path,
 #     output_dir=os.path.join(output_pick_directory_path, 'eval_gpu_eqcct_modelactor'),
 #     log_filepath=os.path.join(output_pick_directory_path, 'eval_gpu_eqcct_modelactor', 'eqcctpro.log'),
-#     csv_dir=os.path.join(csv_filepath, 'eval_gpu_eqcct_modelactor'), # eval_gpu_eqcct_modelactor | eval_gpu_eqcct_modelactor
-#     selected_gpus=[0, 1],
-#     max_vram_mb=93100,
+#     csv_dir=os.path.join(csv_filepath, 'eval_gpu_eqcct_modelactor'),
+#     selected_gpus=selected_gpus,
+#     max_vram_mb=num_gpus * VRAM_PER_GPU,
 #     cpu_id_list=range(20, 40),
 #     min_cpu_amount=5,
 #     cpu_test_step_size=3,
@@ -89,11 +94,13 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_gpu.evaluate()
 
 # --- Example C: Evaluate System capability using PhaseNet Model (CPU/GPU) ---
+# selected_gpus_phasenet = [0, 1]
+# num_gpus_phasenet = len(selected_gpus_phasenet)
+
 # eval_phasenet_original = EvaluateSystem(
-#     # eval_mode='cpu',
 #     eval_mode='gpu',
-#     selected_gpus=[0, 1],
-#     max_vram_mb=93100,
+#     selected_gpus=selected_gpus_phasenet,
+#     max_vram_mb=num_gpus_phasenet * VRAM_PER_GPU,
 #     model_type='seisbench',
 #     seisbench_parent_model='PhaseNet',
 #     seisbench_child_model='original',
@@ -118,11 +125,12 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_phasenet_original.evaluate()
 
 # --- Example D: Evaluate System capability using PhaseNetLight Model (CPU/GPU) ---
+# selected_gpus_pnl = [0, 1]
+# num_gpus_pnl = len(selected_gpus_pnl)
 # eval_phasenetlight_stead = EvaluateSystem(
-#     eval_mode='cpu',
-#     # eval_mode='gpu',
-#     # selected_gpus=[0, 1],
-#     # max_vram_mb=93100,
+#     eval_mode='gpu',
+#     selected_gpus=selected_gpus_pnl,
+#     max_vram_mb=num_gpus_pnl * VRAM_PER_GPU,
 #     model_type='seisbench',
 #     seisbench_parent_model='PhaseNetLight',
 #     seisbench_child_model='stead',
@@ -148,11 +156,12 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 
 
 # --- Example E: Evaluate System capability using EQTransformer Model (CPU/GPU) ---
+# selected_gpus_eqt = [0, 1]
+# num_gpus_eqt = len(selected_gpus_eqt)
 # eval_eqtransformer_original = EvaluateSystem(
-#     eval_mode='cpu',
-#     # eval_mode='gpu',
-#     # selected_gpus=[0, 1],
-#     # max_vram_mb=93100,
+#     eval_mode='gpu',
+#     selected_gpus=selected_gpus_eqt,
+#     max_vram_mb=num_gpus_eqt * VRAM_PER_GPU,
 #     model_type='seisbench',
 #     seisbench_parent_model='EQTransformer',
 #     seisbench_child_model='original',
@@ -177,18 +186,20 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqtransformer_original.evaluate()
 
 # --- Example F: Evaluate System capability using EQTransformer Model (CPU/GPU) ---
+# selected_gpus = [0, 1]  # or [0] for single GPU
+# num_gpus = len(selected_gpus)
+
 # eval_eqtransformer_original_nonconservative = EvaluateSystem(
-#     eval_mode='cpu',
-#     # eval_mode='gpu',
-#     # selected_gpus=[0, 1],
-#     # max_vram_mb=93100,
+#     eval_mode='gpu',
+#     selected_gpus=selected_gpus,
+#     max_vram_mb=num_gpus * VRAM_PER_GPU,
 #     model_type='seisbench',
 #     seisbench_parent_model='EQTransformer',
 #     seisbench_child_model='original_nonconservative',
 #     input_dir=input_mseed_directory_path,
-#     output_dir=os.path.join(output_pick_directory_path, 'eval_gpu_eqtransformer_nonconservative_modelactor'),
-#     log_filepath=os.path.join(output_pick_directory_path, 'eval_gpu_eqtransformer_nonconservative_modelactor', 'eqcctpro.log'),
-#     csv_dir=os.path.join(csv_filepath, 'eval_gpu_eqtransformer_nonconservative_modelactor'),
+#     output_dir=os.path.join(output_pick_directory_path, 'eval_gpu_eqtransformer_nonconservative_ripper'),
+#     log_filepath=os.path.join(output_pick_directory_path, 'eval_gpu_eqtransformer_nonconservative_ripper', 'eqcctpro.log'),
+#     csv_dir=os.path.join(csv_filepath, 'eval_gpu_eqtransformer_nonconservative_ripper'),
 #     cpu_id_list=range(100, 120),
 #     min_cpu_amount=5,
 #     cpu_test_step_size=3,
@@ -201,6 +212,6 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 #     tmp_dir=tmp_dir,
 #     start_time='2024-12-15 12:00:00',
 #     end_time='2024-12-15 12:01:00',
-#     ripper=False
+#     ripper=True
 # )
 # eval_eqtransformer_original_nonconservative.evaluate()

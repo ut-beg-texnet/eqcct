@@ -45,6 +45,7 @@ class RunEQCCTPro():
                 csv_dir: str = None,
                 best_usecase_config: bool = False,
                 vram_mb: float = None,
+                stations2use: int = None,
                 selected_gpus: list = None,
                 gpu_vram_safety_cap: float = 0.95,
                 cudnn_headroom: float = 0.25,
@@ -79,6 +80,7 @@ class RunEQCCTPro():
         self.csv_dir = csv_dir
         self.best_usecase_config = best_usecase_config
         self.vram_mb = vram_mb
+        self.stations2use = stations2use
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
         
         if cudnn_headroom > 0.80:
@@ -298,6 +300,7 @@ class RunEQCCTPro():
                                         P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
                                         number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=self.cpu_id_list, use_gpu=self.use_gpu, 
                                         gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, specific_stations=specific_stations_list, 
+                                        stations2use=self.stations2use,
                                         timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                         number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time,
                                         intra_threads=self.intra_threads, inter_threads=self.inter_threads,
