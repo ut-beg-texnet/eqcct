@@ -2164,7 +2164,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return f"{pos} {station}: Skipped (already exists - overwrite=False)."
+            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
 
     os.makedirs(save_dir, exist_ok=True)
     csvPr_gen = open(csv_filename, 'w')
@@ -2370,7 +2370,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return f"{pos} {station}: Skipped (already exists - overwrite=False)."
+            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
 
     os.makedirs(save_dir)
     csvPr_gen = open(csv_filename, 'w')
