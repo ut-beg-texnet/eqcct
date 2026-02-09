@@ -519,20 +519,23 @@ def build_station_list_from_dir(input_dir: str) -> list[str]:
     """
     Robustly discover stations under a timechunk directory.
     Accepts files like *.mseed/*.sac or one-dir-per-station structures.
+    Only includes stations that actually have waveform files.
     """
     stations = set()
 
     # 1) Files directly inside input_dir
     for p in glob.glob(os.path.join(input_dir, "*")):
         base = os.path.basename(p)
-        if os.path.isfile(p):
+        if os.path.isfile(p) and (base.endswith(".mseed") or base.endswith(".sac")):
             # file path — take stem without extension
             stations.add(os.path.splitext(base)[0])
 
     # 2) One subdir per station (e.g., input_dir/AT01/*.mseed)
     for p in glob.glob(os.path.join(input_dir, "*")):
         if os.path.isdir(p):
-            stations.add(os.path.basename(p))
+            # Check if this directory contains any mseed or sac files
+            if glob.glob(os.path.join(p, "*.mseed")) or glob.glob(os.path.join(p, "*.sac")):
+                stations.add(os.path.basename(p))
 
     # Filter out anything that looks like a timechunk id (safety)
     stations = [s for s in stations if not looks_like_timechunk_id(s)]

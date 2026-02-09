@@ -993,9 +993,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
     
     out_dir = os.path.join(os.getcwd(), str(args['output_dir']))    
     try:
-        if platform.system() == 'Windows': station_list = [ev.split(".")[0] for ev in listdir(args['input_dir']) if ev.split("\\")[-1] != ".DS_Store"]
-        else: station_list = [ev.split(".")[0] for ev in listdir(args['input_dir']) if ev.split("/")[-1] != ".DS_Store"]
-        station_list = sorted(set(station_list))
+        from eqcctpro.tools import build_station_list_from_dir
+        station_list = build_station_list_from_dir(args['input_dir'])
     except Exception as e:
         logger.info(f"{e}") 
         return # To-Do: Fix so that it has a valid return? 
@@ -2197,7 +2196,9 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
     except Exception as e:
         csvPr_gen.close()
-        return (f"{pos} {station}: FAILED reading mSEED: {str(e)}", None)
+        # Provide more specific error message
+        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
+        return (f"{pos} {station}: {err_msg}", None)
     waveform_load_time = time.time() - waveform_load_start
 
     try:
@@ -2394,8 +2395,10 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     waveform_load_start = time.time()
     try:
         meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
-    except Exception:
-        return (f"{pos} {station}: FAILED reading mSEED.", None)
+    except Exception as e:
+        # Provide more specific error message
+        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+        return (f"{pos} {station}: {err_msg}", None)
     waveform_load_time = time.time() - waveform_load_start
 
     try:
@@ -2549,8 +2552,10 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     waveform_load_start = time.time()
     try:
         meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
-    except Exception:
-        return (f"{pos} {station}: FAILED reading mSEED.", model_load_time, None)
+    except Exception as e:
+        # Provide more specific error message
+        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+        return (f"{pos} {station}: {err_msg}", model_load_time, None)
     waveform_load_time = time.time() - waveform_load_start
 
     try:
@@ -2680,7 +2685,9 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         stream, freqmin, freqmax = result
     except Exception as e:
         csvPr_gen.close()
-        return (f"{pos} {station}: FAILED reading mSEED: {str(e)}", model_load_time, None)
+        # Provide more specific error message
+        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+        return (f"{pos} {station}: {err_msg}", model_load_time, None)
     waveform_load_time = time.time() - waveform_load_start
     
     try:
