@@ -3896,10 +3896,32 @@ def compare_optimal_configs(model_name, files, output_dir):
     ]
     
     table_data = {'Metric': metrics}
-    for key, df_subset in dfs.items():
-        hardware, method = key.split('_')
-        label = f"{hardware.upper()} - {'ModelActor' if method == 'modelactor' else 'Ripper'}"
-        table_data[label] = get_optimal_summary(df_subset, label)
+    # Desired order: 
+    # 1. CPU - ModelActor
+    # 2. GPU (1) - ModelActor, GPU (2) - ModelActor...
+    # 3. CPU - Ripper
+    # 4. GPU (1) - Ripper, GPU (2) - Ripper...
+    
+    for method_key in ['modelactor', 'ripper']:
+        method_name = 'ModelActor' if method_key == 'modelactor' else 'Ripper'
+        
+        # CPU
+        cpu_key = f"cpu_{method_key}"
+        if cpu_key in dfs and not dfs[cpu_key].empty:
+            label = f"CPU - {method_name}"
+            table_data[label] = get_optimal_summary(dfs[cpu_key], label)
+            
+        # GPUs
+        gpu_key = f"gpu_{method_key}"
+        if gpu_key in dfs and not dfs[gpu_key].empty:
+            df_gpu = dfs[gpu_key]
+            unique_gpu_counts = sorted(df_gpu['GPU Count'].unique())
+            for gpu_count in unique_gpu_counts:
+                if gpu_count == 0: continue # Handled by CPU
+                gpu_df = df_gpu[df_gpu['GPU Count'] == gpu_count]
+                if gpu_df.empty: continue
+                label = f"GPU ({int(gpu_count)}) - {method_name}"
+                table_data[label] = get_optimal_summary(gpu_df, label)
     
     fig = go.Figure(data=[go.Table(
         header=dict(
