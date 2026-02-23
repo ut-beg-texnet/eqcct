@@ -2000,8 +2000,12 @@ class OptimalCPUConfigurationFinder:
                  log_file_path: str):
         
         self.eval_sys_results_dir = eval_sys_results_dir
-        if not self.eval_sys_results_dir or not os.path.isdir(self.eval_sys_results_dir): 
-            raise ValueError(f"Error: The provided directory path '{self.eval_sys_results_dir}' is invalid or does not exist.")
+        if not self.eval_sys_results_dir:
+            raise ValueError("Error: The eval_sys_results_dir must be provided.")
+            
+        if not os.path.isdir(self.eval_sys_results_dir):
+            os.makedirs(self.eval_sys_results_dir, exist_ok=True)
+            
         self.log_file_path = log_file_path
 
         # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
@@ -2024,7 +2028,8 @@ class OptimalCPUConfigurationFinder:
         """Finds the best overall CPU usecase configuation from eval results"""
         file_path = f"{self.eval_sys_results_dir}/best_overall_usecase_cpu.csv"
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+            self.logger.warning(f"Warning: The file '{file_path}' does not exist. Skipping best overall usecase search.")
+            return
 
         df_best_overall = pd.read_csv(file_path)
         # best_config_dict = df_best_overall.set_index(df_best_overall.columns[0]).to_dict()[df_best_overall.columns[1]]
@@ -2067,7 +2072,8 @@ class OptimalCPUConfigurationFinder:
 
         file_path = f"{self.eval_sys_results_dir}/optimal_configurations_cpu.csv"
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+            self.logger.warning(f"Warning: The file '{file_path}' does not exist. Skipping optimal configuration search.")
+            return
 
         df_optimal = pd.read_csv(file_path)
 
@@ -2114,8 +2120,12 @@ class OptimalGPUConfigurationFinder:
                  log_file_path: str):
         
         self.eval_sys_results_dir = eval_sys_results_dir
-        if not self.eval_sys_results_dir or not os.path.isdir(self.eval_sys_results_dir): 
-            raise ValueError(f"Error: The provided directory path '{self.eval_sys_results_dir}' is invalid or does not exist.")
+        if not self.eval_sys_results_dir:
+            raise ValueError("Error: The eval_sys_results_dir must be provided.")
+            
+        if not os.path.isdir(self.eval_sys_results_dir):
+            os.makedirs(self.eval_sys_results_dir, exist_ok=True)
+            
         self.log_file_path = log_file_path
 
         # Set up main logger and logger queue to retrive queued logs from Raylets to be passed to the main logger
@@ -2137,7 +2147,8 @@ class OptimalGPUConfigurationFinder:
         """Finds the best overall GPU configuration from evaluation results."""
         file_path = f"{self.eval_sys_results_dir}/best_overall_usecase_gpu.csv"
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+            self.logger.warning(f"Warning: The file '{file_path}' does not exist. Skipping best overall usecase search.")
+            return
 
         df = pd.read_csv(file_path)
         if df.empty:
@@ -2187,7 +2198,8 @@ class OptimalGPUConfigurationFinder:
 
         file_path = f"{self.eval_sys_results_dir}/optimal_configurations_gpu.csv"
         if not os.path.exists(file_path):
-            raise FileNotFoundError(f"[{datetime.now()}] Error: The file '{file_path}' does not exist. Ensure it is in the correct directory.")
+            self.logger.warning(f"Warning: The file '{file_path}' does not exist. Skipping optimal configuration search.")
+            return
 
         df_optimal = pd.read_csv(file_path)
 
