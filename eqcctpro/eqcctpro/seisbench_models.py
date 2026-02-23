@@ -1,10 +1,25 @@
 import obspy
 import numpy as np
 import seisbench.models as sbm
+import time
+import random
 from pathlib import Path
 
 class SeisBenchModels:
-    def __init__(self, parent_model_name, child_model_name):
+    def __init__(self, parent_model_name, child_model_name, validate_pretrained=True):
+        """
+        Parameters:
+        -----------
+        parent_model_name : str
+            SeisBench model family (e.g. 'EQTransformer', 'PhaseNet')
+        child_model_name : str
+            Pretrained variant name (e.g. 'original', 'stead')
+        validate_pretrained : bool
+            If True (default), call list_pretrained() to verify child_model_name
+            exists on the SeisBench server. Set to False when the caller has
+            already validated (e.g. Ray actors after driver-side validation) to
+            avoid redundant network calls and thundering-herd 500 errors.
+        """
         self.models = {}
         self.parent_model_list = ['PhaseNet', 'PhaseNetLight', 'EQTransformer', 'CRED', 'GPD', 'LFEDetect', 'OBSTransformer']  # List of available models from SeisBench
 
@@ -19,19 +34,34 @@ class SeisBenchModels:
         # Check if child model is valid - use getattr to dynamically access the model class
         try:
             model_class = getattr(sbm, self.parent_model_name)
-            available_models = model_class.list_pretrained()
-            if child_model_name not in available_models:
-                raise ValueError(
-                    f"Child model {child_model_name} not found in {parent_model_name}. "
-                    f"Please choose from {available_models}"
-                )
         except AttributeError:
             raise ValueError(
                 f"Model class {self.parent_model_name} not found in seisbench.models. "
                 f"Please check the model name."
             )
+
+        if validate_pretrained:
+            available_models = self._list_pretrained_with_retry(model_class)
+            if available_models is not None and child_model_name not in available_models:
+                raise ValueError(
+                    f"Child model {child_model_name} not found in {parent_model_name}. "
+                    f"Please choose from {available_models}"
+                )
+
         self.child_model_name = child_model_name
         self.model = None  # Will be loaded in load_model()
+
+    @staticmethod
+    def _list_pretrained_with_retry(model_class, max_retries=3):
+        """Fetch list_pretrained() with retries and jitter to handle transient server errors."""
+        for i in range(max_retries):
+            try:
+                if i > 0:
+                    time.sleep(random.uniform(1.0, 3.0))
+                return model_class.list_pretrained()
+            except Exception:
+                if i == max_retries - 1:
+                    return None
 
     def load_model(self):
         """

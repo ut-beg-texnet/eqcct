@@ -1401,6 +1401,17 @@ def mseed_predictor(input_dir='downloads_mseeds',
     safe_concurrent_predictions = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
     
     if model_type_lower == 'seisbench':
+        # --- Validate model name once on the driver (lightweight, no model loading) ---
+        # Actors will skip this network call (validate_pretrained=False) to avoid
+        # a thundering herd of concurrent list_pretrained() requests causing HTTP 500s.
+        logger.info(f"Validating SeisBench model name: {seisbench_parent_model}/{seisbench_child_model}...")
+        try:
+            from eqcctpro.seisbench_models import SeisBenchModels
+            SeisBenchModels(seisbench_parent_model, seisbench_child_model, validate_pretrained=True)
+            logger.info("SeisBench model name validated successfully.")
+        except Exception as e:
+            logger.warning(f"SeisBench model validation failed: {e}. Proceeding anyway, actors will attempt to load from cache.")
+
         # Create SeisBench model actors
         if use_gpu:
             # Get VRAM requirement for this SeisBench model
@@ -2083,10 +2094,10 @@ class SeisBenchModelActor:
             self.device = torch.device('cpu')
             self.logger.info("Using CPU device")
 
-        # Load the SeisBench model
+        # Load the SeisBench model (skip validation — driver already verified the model name)
         self.logger.info("Loading SeisBench model...")
         from eqcctpro.seisbench_models import SeisBenchModels
-        self.model_wrapper = SeisBenchModels(parent_model_name, child_model_name)
+        self.model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
         self.model_wrapper.load_model()
         
         # Move model to device if using GPU
@@ -2630,8 +2641,8 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     # ===== TIMING: Track model load time for ripper mode analysis =====
     model_load_start = time.time()
     
-    # Create and load the model
-    model_wrapper = SeisBenchModels(parent_model_name, child_model_name)
+    # Create and load the model (skip validation — driver already verified the model name)
+    model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
     model_wrapper.load_model()
     
     # Move model to device if using GPU

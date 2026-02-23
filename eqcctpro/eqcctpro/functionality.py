@@ -659,15 +659,40 @@ class EvaluateSystem():
         # stations, and predictions is unique enough for benchmarking purposes.
         return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|pred={int(predictions)}|timechunks={int(timechunks)}|model={model}"
         
-    def _load_existing_trial_keys(self, csv_path: str) -> set[str]:
+    def _station_key(self, *, num_cpus: int, stations: int, timechunks: int, model: str, gpus: list = None) -> str:
+        """Generate a station-level key that ignores prediction values.
+        
+        This is used to detect whether a (cpus, stations, gpus, timechunks, model) combo
+        has ANY trial data in the CSV, regardless of what specific prediction step values
+        were used. This is critical because the prediction step formula (int(stations * 0.2))
+        can produce different values depending on whether the station count was capped or not,
+        causing exact trial keys to mismatch across code versions.
+        """
+        if gpus is not None:
+            gpus_to_use = gpus
+        else:
+            gpus_to_use = self.selected_gpus if self.selected_gpus is not None else []
+        gpus_norm = tuple(sorted(int(x) for x in gpus_to_use))
+        return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|timechunks={int(timechunks)}|model={model}"
+
+    def _load_existing_trial_keys(self, csv_path: str) -> tuple[set[str], dict[str, set[int]]]:
+        """Load both exact trial keys and prediction-fuzzy keys from an existing CSV.
+        
+        Returns:
+            (planned_keys, station_pred_map) where:
+            - planned_keys: exact (cpus, gpus, stations, pred, timechunks, model) keys
+            - station_pred_map: mapping of station-level key to set of tested prediction counts.
+              station-level key format: cpus=X|gpus=Y|stations=Z|timechunks=W|model=M
+        """
         if not os.path.exists(csv_path):
-            return set()
+            return set(), {}
         try:
             df = pd.read_csv(csv_path, keep_default_na=False)
         except Exception:
-            return set()
+            return set(), {}
 
         keys = set()
+        station_pred_map = {}
         for _, row in df.iterrows():
             try:
                 num_cpus = int(float(row.get("Number of CPUs Allocated for Ray to Use", 0) or 0))
@@ -680,12 +705,47 @@ class EvaluateSystem():
                 row_gpus = _parse_gpus_field(row.get("GPUs Used")) or []
                 # Extract model info
                 model = row.get("Model Used", "eqcct") # Default to eqcct for legacy rows
-                # Pass the row's info directly to _trial_key
-                keys.add(self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, 
-                                       gpu_memory_limit_mb=vram_mb, timechunks=timechunks, model=model, gpus=row_gpus))
+                
+                # Exact trial key
+                t_key = self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, 
+                                       gpu_memory_limit_mb=vram_mb, timechunks=timechunks, model=model, gpus=row_gpus)
+                keys.add(t_key)
+                
+                # Station-level fuzzy map
+                s_key = self._station_key(num_cpus=num_cpus, stations=stations, 
+                                         timechunks=timechunks, model=model, gpus=row_gpus)
+                if s_key not in station_pred_map:
+                    station_pred_map[s_key] = set()
+                station_pred_map[s_key].add(predictions)
             except Exception:
                 continue
-        return keys
+        return keys, station_pred_map
+
+    def _is_trial_already_tested(self, *, num_cpus, stations, predictions, gpu_memory_limit_mb, timechunks, model, gpus, planned_keys, station_pred_map) -> bool:
+        """Check if a trial is already tested, with fuzzy matching for prediction counts.
+        
+        This handles cases where prediction step sizes differ slightly between runs
+        (e.g., 45 vs 46) due to station count capping changes.
+        """
+        # 1. Exact match check
+        key = self._trial_key(num_cpus=num_cpus, stations=stations, predictions=predictions, 
+                             gpu_memory_limit_mb=gpu_memory_limit_mb, timechunks=timechunks, model=model, gpus=gpus)
+        if key in planned_keys:
+            return True
+            
+        # 2. Fuzzy match check: look for any tested prediction count within 5% tolerance
+        s_key = self._station_key(num_cpus=num_cpus, stations=stations, timechunks=timechunks, model=model, gpus=gpus)
+        if s_key in station_pred_map:
+            tested_preds = station_pred_map[s_key]
+            # If we found an exact match in the pred set (different memory limit maybe), return True
+            if predictions in tested_preds:
+                return True
+            # Check for close matches (within 5% or +/- 2 stations)
+            tolerance = max(2, int(predictions * 0.05))
+            for tp in tested_preds:
+                if abs(tp - predictions) <= tolerance:
+                    return True
+        return False
 
     def evaluate_cpu(self): 
         """Evaluate system parallelization using CPUs"""
@@ -698,7 +758,13 @@ class EvaluateSystem():
         # Create test results csv 
         csv_filepath = f"{self.csv_dir}/cpu_test_results.csv"
         prepare_csv(csv_file_path=csv_filepath, logger=self.logger)
-        planned_keys = self._load_existing_trial_keys(csv_filepath)
+        planned_keys, station_pred_map = self._load_existing_trial_keys(csv_filepath)
+        
+        # Log summary of existing trials
+        if planned_keys:
+            self.logger.info(f"Loaded {len(planned_keys)} existing trial(s) from CSV.")
+        else:
+            self.logger.info("No existing trials found in CSV. Starting fresh evaluation.")
         
         # Resume from existing trial count if CSV has trials
         existing_trial_count = 0
@@ -714,6 +780,14 @@ class EvaluateSystem():
         self.chunk_time()
         self.dt_task_generator()
         
+        # Get actual station count from the first timechunk directory to ensure skip logic 
+        # accounts for stations being filtered out due to missing data.
+        from eqcctpro.tools import build_station_list_from_dir
+        mseed_timechunk_dir_name = self.tasks_picker[0][1]
+        timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+        available_stations = len(build_station_list_from_dir(timechunk_dir_path))
+        self.logger.info(f"Detected {available_stations} station(s) with available data. Trials requesting more than this will be capped for skip-logic consistency.")
+
         trial_num = existing_trial_count + 1  # Resume from where we left off
         log_queue = queue.Queue()  # Create a queue for log entries
         total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
@@ -729,26 +803,31 @@ class EvaluateSystem():
                 # Set CPU affinity and initialize Ray
                 cpus_to_use = self.cpu_id_list[:i]
                 
-                # Check if this entire Resource Block (CPU count) is already complete
+                # Check if this entire Resource Block (CPU count) is already complete.
+                # A block is done if every station count in our unique list already has
+                # its full set of prediction variants tested (matching +/- tolerance).
                 all_trials_in_block_done = True
-                block_trial_keys = []
                 temp_model = "eqcct" if self.model_type != 'seisbench' else f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
                 
+                # Pre-calculate unique stations after capping
+                unique_stations_list = sorted(list(set(min(s, available_stations) for s in self.stations2use_list)))
+                
                 for timechunks in range(1, len(self.tasks_picker) + 1, self.conc_timechunk_tasks_step_size):
-                    for num_stations in self.stations2use_list:
-                        step = max(1, int(num_stations * 0.2))
-                        for predictions in range(step, num_stations + 1, step):
-                            key = self._trial_key(
+                    for stations_capped in unique_stations_list:
+                        # Check if all prediction variants for this station exist
+                        step = max(1, int(stations_capped * 0.2))
+                        for predictions in range(step, stations_capped + 1, step):
+                            if not self._is_trial_already_tested(
                                 num_cpus=len(cpus_to_use),
-                                stations=num_stations,
+                                stations=stations_capped,
                                 predictions=predictions,
-                                gpu_memory_limit_mb=None,
+                                gpu_memory_limit_mb="",
                                 timechunks=timechunks,
                                 model=temp_model,
-                                gpus=[]
-                            )
-                            block_trial_keys.append(key)
-                            if key not in planned_keys:
+                                gpus=[],
+                                planned_keys=planned_keys,
+                                station_pred_map=station_pred_map
+                            ):
                                 all_trials_in_block_done = False
                                 break
                         if not all_trials_in_block_done:
@@ -756,8 +835,8 @@ class EvaluateSystem():
                     if not all_trials_in_block_done:
                         break
                 
-                if all_trials_in_block_done and block_trial_keys:
-                    self.logger.info(f"[SKIP BLOCK] Already tested all {len(block_trial_keys)} configurations for {len(cpus_to_use)} CPU(s).")
+                if all_trials_in_block_done:
+                    self.logger.info(f"[SKIP BLOCK] Already tested all station/prediction variants for {len(cpus_to_use)} CPU(s).")
                     continue
 
                 process = psutil.Process(os.getpid())
@@ -870,12 +949,15 @@ class EvaluateSystem():
                     continue
 
                 for timechunks in timechunks_list:
-                    for num_stations in self.stations2use_list: 
+                    # Use unique stations after capping to avoid redundant processing of 
+                    # station counts that all cap to the same "max available" (e.g., 230->228, 240->228).
+                    for num_stations_capped in unique_stations_list:
+                        
                         tested_concurrency = set() # Reset for each configuration
                         # Use a 20% step size for concurrency testing as requested
                         # This tests 20%, 40%, 60%, 80%, and 100% of the current total stations
-                        step = max(1, int(num_stations * 0.2))
-                        concurrent_predictions_list = sorted(list(set(range(step, num_stations + 1, step))))
+                        step = max(1, int(num_stations_capped * 0.2))
+                        concurrent_predictions_list = sorted(list(set(range(step, num_stations_capped + 1, step))))
                         
                         # ===== FEASIBILITY CHECK (CPU) =====
                         # Since actors are CAPPED to MEMORY in parallelization.py, all concurrency levels
@@ -892,33 +974,40 @@ class EvaluateSystem():
                         if invalid_predictions:
                             for inv_p in invalid_predictions:
                                 # Efficiency check: don't record if already tested/skipped
-                                key = self._trial_key(
+                                if self._is_trial_already_tested(
                                     num_cpus=len(cpus_to_use),
-                                    stations=num_stations,
+                                    stations=num_stations_capped,
                                     predictions=inv_p,
                                     gpu_memory_limit_mb="",
                                     timechunks=timechunks,
-                                    model=trial_model
-                                )
-                                if key in planned_keys:
+                                    model=trial_model,
+                                    gpus=[],
+                                    planned_keys=planned_keys,
+                                    station_pred_map=station_pred_map
+                                ):
                                     continue
-                                planned_keys.add(key)
                                 
+                                # Mark as tested (using exact key for internal tracking)
+                                key = self._trial_key(num_cpus=len(cpus_to_use), stations=num_stations_capped, 
+                                                    predictions=inv_p, gpu_memory_limit_mb="", 
+                                                    timechunks=timechunks, model=trial_model, gpus=[])
+                                planned_keys.add(key)
+
                                 # Calculate actual memory that would be used (capped to memory availability)
                                 actual_actors = min(inv_p, max_actors)
                                 est_ram = actual_actors * ram_per_actor
                                 
                                 error_msg = (f"[OOM PREVENTION] Cannot fit {actual_actors} actor(s) in RAM. "
-                                           f"Required: {est_ram:.0f}MB RAM. "
-                                           f"Available: {aggregate_ram_cap_mb:.0f}MB RAM.")
+                                            f"Required: {est_ram:.0f}MB RAM. "
+                                            f"Available: {aggregate_ram_cap_mb:.0f}MB RAM.")
                                 
-                                self.logger.warning(f"Recording OOM-risk trial skip for {num_stations} stations, {inv_p} tasks: {error_msg}")
+                                self.logger.warning(f"Recording OOM-risk trial skip for {num_stations_capped} stations, {inv_p} tasks: {error_msg}")
                                 
                                 # Build minimal trial data for CSV recording
                                 oom_comment = f"Requested {inv_p} actors, 0 created (RAM limited to {aggregate_ram_cap_mb:.0f} MB, {ram_per_actor:.0f} MB/actor) - Trial skipped"
                                 trial_data = {
                                     "Trial Number": trial_num,
-                                    "Number of Stations Used": num_stations,
+                                    "Number of Stations Used": num_stations_capped,
                                     "Number of CPUs Allocated for Ray to Use": len(cpus_to_use),
                                     "GPUs Used": "[]",
                                     "N ModelActors": 0,  # No actors created - OOM prevention
@@ -949,16 +1038,16 @@ class EvaluateSystem():
                                 update_csv_with_memory(csv_filepath, mem_data)
                                 trial_num += 1
                         
-                        if not valid_predictions and num_stations > 0:
+                        if not valid_predictions and num_stations_capped > 0:
                             # If even the first step (20%) is too much, try just 1 prediction or the max possible
                             if max_actors >= 1:
                                 valid_predictions = [min(step, max_actors)]
-                                self.logger.info(f"Station count {num_stations}: 20% step ({step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
+                                self.logger.info(f"Station count {num_stations_capped}: 20% step ({step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
                             else:
-                                self.logger.warning(f"Station count {num_stations}: Cannot spawn any ModelActors. Skipping.")
+                                self.logger.warning(f"Station count {num_stations_capped}: Cannot spawn any ModelActors. Skipping.")
                                 continue
                         elif len(valid_predictions) < len(concurrent_predictions_list):
-                            self.logger.info(f"Trimming concurrency for {num_stations} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors})")
+                            self.logger.info(f"Trimming concurrency for {num_stations_capped} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors})")
                         
                         concurrent_predictions_list = valid_predictions
                         
@@ -968,50 +1057,39 @@ class EvaluateSystem():
                         if not new_concurrent_values:
                             continue  # All concurrency values already tested
                         for num_concurrent_predictions in new_concurrent_values:
-                            tested_concurrency.add(num_concurrent_predictions)
-                            
-                            # ===== RIPPER MODE: Fresh Ray instance per trial =====
-                            # Ripper mode benefits from a clean RAM state at each trial start
-                            # This ensures no memory fragmentation from previous trials affects the current one
-                            if self.ripper:
-                                self.logger.info(f"")
-                                self.logger.info(f"===== RIPPER MODE: Restarting Ray for fresh RAM state =====")
-                                
-                                # Stop the log drain thread gracefully
-                                try:
-                                    self.log_queue.put(None)  # Sentinel to stop the drain thread
-                                except Exception:
-                                    pass
-                                time.sleep(0.5)  # Give thread time to finish
-                                
-                                # Shutdown and reinitialize Ray
-                                ray.shutdown()
-                                time.sleep(1.0)  # Allow RAM to be fully released
-                                
-                                # Reinitialize Ray with the same configuration (CPU mode)
-                                ray.init(ignore_reinit_error=True, num_cpus=len(cpus_to_use), 
-                                        logging_level=logging.FATAL, log_to_driver=False, _temp_dir=self.home_tmp_dir)
-                                self.log_queue = Queue()
-                                self._log_thread = threading.Thread(target=self._drain_worker_logs, daemon=True)
-                                self._log_thread.start()
-                                
-                                # Reset the high water mark since we cleared RAM
-                                actors_high_water_mark = 0
-                                self.logger.info(f"Ray restarted. RAM cleared for ripper trial.")
-                                self.logger.info(f"=============================================")
-                            
-                            key = self._trial_key(
+                            # Optimization: if the requested concurrency exceeds what can fit in memory,
+                            # cap it to the maximum actors possible and then stop testing higher 
+                            # concurrency levels for this configuration.
+                            stop_concurrency_marching = False
+                            if num_concurrent_predictions >= max_actors:
+                                if num_concurrent_predictions > max_actors:
+                                    self.logger.info(f"Capping concurrency: {num_concurrent_predictions} -> {max_actors} (RAM limit reached)")
+                                num_concurrent_predictions = max_actors
+                                stop_concurrency_marching = True
+
+                            # Efficiency check: skip if already tested (with +/- tolerance for prediction count)
+                            if self._is_trial_already_tested(
                                 num_cpus=len(cpus_to_use),
-                                stations=num_stations,
+                                stations=num_stations_capped,
                                 predictions=num_concurrent_predictions,
-                                gpu_memory_limit_mb="",   # CPU eval has no per-task VRAM cap
+                                gpu_memory_limit_mb="",
                                 timechunks=timechunks,
-                                model=trial_model
-                            )
-                            if key in planned_keys:
-                                self.logger.info(f"[SKIP] Already tested: {key}")
+                                model=trial_model,
+                                gpus=[],
+                                planned_keys=planned_keys,
+                                station_pred_map=station_pred_map
+                            ):
+                                self.logger.info(f"[SKIP] Already tested: cpus={len(cpus_to_use)}, stations={num_stations_capped}, pred={num_concurrent_predictions}")
+                                if stop_concurrency_marching:
+                                    break
                                 continue
+                            
+                            # Mark as tested (exact key)
+                            key = self._trial_key(num_cpus=len(cpus_to_use), stations=num_stations_capped, 
+                                                 predictions=num_concurrent_predictions, gpu_memory_limit_mb="", 
+                                                 timechunks=timechunks, model=trial_model, gpus=[])
                             planned_keys.add(key)
+                            tested_concurrency.add(num_concurrent_predictions)
                                     
                             mseed_timechunk_dir_name = self.tasks_picker[timechunks-1][1]
                             timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
@@ -1068,7 +1146,7 @@ class EvaluateSystem():
                             self.logger.info(f"------- Trial Number: {trial_num} -------")
                             self.logger.info(f"CPU(s): {len(cpus_to_use)}")
                             self.logger.info(f"Conc. Timechunks Being Analyzed: {timechunks} / Total Timechunks to be Analyzed: {len(self.tasks_picker)}")
-                            self.logger.info(f"Stations: {num_stations}")
+                            self.logger.info(f"Stations: {num_stations_capped}")
                             self.logger.info(f"Concurrent Predictions (N ModelActors): {num_concurrent_predictions}")
                             self.logger.info(f"Model RAM per Actor: {model_ram_per_actor_mb:.0f} MB")
                             self.logger.info(f"Requested Total RAM: {total_requested_ram_mb:.0f} MB ({n_model_actors} actors × {model_ram_per_actor_mb:.0f} MB + {task_overhead_ram_mb:.0f} MB overhead)")
@@ -1087,7 +1165,7 @@ class EvaluateSystem():
                                         tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_queue=self.log_queue, 
                                                             P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
                                                             number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=self.use_gpu, 
-                                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, stations2use=num_stations, 
+                                                            gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, stations2use=num_stations_capped, 
                                                             timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
                                                             number_of_concurrent_timechunk_predictions=max_pending_tasks, total_analysis_time=total_analysis_time, testing_gpu=False, 
                                                             test_csv_filepath=csv_filepath, intra_threads=self.intra_threads, inter_threads=self.inter_threads, timechunk_dt=self.timechunk_dt,
@@ -1186,6 +1264,9 @@ class EvaluateSystem():
                             freed_mb = mem_after.combined_rss_mb - mem_after_clean.combined_rss_mb
                             self.logger.info(f"[MEM] Freed ~{max(freed_mb, 0):.2f} MB; Post-clean total: {mem_after_clean.combined_rss_mb:.2f} MB")
                             self.logger.info("")
+
+                            if stop_concurrency_marching:
+                                break
                             
                         # tested_concurrency.update([x for x in concurrent_predictions_list if x <= num_stations])
                         tested_concurrency.update(new_concurrent_values)
@@ -1228,11 +1309,11 @@ class EvaluateSystem():
             normalize_gpu_csv_quoting(csv_filepath)
             self.logger.info("Normalized existing CSV entries for consistent 'GPUs Used' formatting.")
         
-        planned_keys = self._load_existing_trial_keys(csv_filepath)
+        planned_keys, station_pred_map = self._load_existing_trial_keys(csv_filepath)
         
         # Log summary of existing trials
         if planned_keys:
-            self.logger.info(f"Loaded {len(planned_keys)} existing trial(s) from CSV. These will be skipped.")
+            self.logger.info(f"Loaded {len(planned_keys)} existing trial(s) from CSV.")
             # Count trials by GPU configuration
             gpu_counts = {}
             for key in planned_keys:
@@ -1262,6 +1343,14 @@ class EvaluateSystem():
         self.chunk_time()
         self.dt_task_generator()
 
+        # Get actual station count from the first timechunk directory to ensure skip logic 
+        # accounts for stations being filtered out due to missing data.
+        from eqcctpro.tools import build_station_list_from_dir
+        mseed_timechunk_dir_name = self.tasks_picker[0][1]
+        timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+        available_stations = len(build_station_list_from_dir(timechunk_dir_path))
+        self.logger.info(f"Detected {available_stations} station(s) with available data. Trials requesting more than this will be capped for skip-logic consistency.")
+
         trial_num = existing_trial_count + 1  # Resume from where we left off
         log_queue = queue.Queue()  # Create a queue for log entries
         total_analysis_time = datetime.strptime(self.end_time, "%Y-%m-%d %H:%M:%S") - datetime.strptime(self.start_time, "%Y-%m-%d %H:%M:%S")
@@ -1281,35 +1370,37 @@ class EvaluateSystem():
             for cpu in range(self.min_cpu_amount, len(self.cpu_id_list)+1, self.cpu_test_step_size):
                 cpus_to_use = self.cpu_id_list[:cpu]
                 
-                # Check if this entire Resource Block (GPU count + CPU count) is already complete
-                # before we do any initialization (like Ray or calculating VRAM)
+                # Check if this entire Resource Block (GPU count + CPU count) is already complete.
+                # A block is done if every unique station count already has its expected
+                # prediction variants tested (matching +/- tolerance).
                 all_trials_in_block_done = True
-                block_trial_keys = []
-                
-                # Determine trial model name for key generation
                 temp_model = "eqcct" if self.model_type != 'seisbench' else f"{self.seisbench_parent_model}/{self.seisbench_child_model}"
                 
-                for stations in self.stations2use_list:
-                    step = max(1, int(stations * 0.2))
-                    for predictions in range(step, stations + 1, step):
-                        key = self._trial_key(
+                # Pre-calculate unique stations after capping
+                unique_stations_list = sorted(list(set(min(s, available_stations) for s in self.stations2use_list)))
+                
+                for stations_capped in unique_stations_list:
+                    # Check if all prediction variants for this station exist
+                    step = max(1, int(stations_capped * 0.2))
+                    for predictions in range(step, stations_capped + 1, step):
+                        if not self._is_trial_already_tested(
                             num_cpus=len(cpus_to_use),
-                            stations=stations,
+                            stations=stations_capped,
                             predictions=predictions,
-                            gpu_memory_limit_mb=None, # Not used in key anymore
+                            gpu_memory_limit_mb=None, # MB not used in key
                             timechunks=1,
                             model=temp_model,
-                            gpus=gpus_to_use
-                        )
-                        block_trial_keys.append(key)
-                        if key not in planned_keys:
+                            gpus=gpus_to_use,
+                            planned_keys=planned_keys,
+                            station_pred_map=station_pred_map
+                        ):
                             all_trials_in_block_done = False
                             break
                     if not all_trials_in_block_done:
                         break
                 
-                if all_trials_in_block_done and block_trial_keys:
-                    self.logger.info(f"[SKIP BLOCK] Already tested all {len(block_trial_keys)} configurations for {len(gpus_to_use)} GPU(s) and {len(cpus_to_use)} CPU(s).")
+                if all_trials_in_block_done:
+                    self.logger.info(f"[SKIP BLOCK] Already tested all station/prediction variants for {len(gpus_to_use)} GPU(s) and {len(cpus_to_use)} CPU(s).")
                     continue
 
                 # Set CPU affinity
@@ -1486,10 +1577,11 @@ class EvaluateSystem():
                     ray.shutdown()
                     continue
 
-                for stations in self.stations2use_list:
+                for stations_capped in unique_stations_list:
+                    
                     # Use a 20% step size for concurrency testing as requested
-                    step = max(1, int(stations * 0.2))
-                    concurrent_predictions_list = sorted(list(set(range(step, stations + 1, step))))
+                    step = max(1, int(stations_capped * 0.2))
+                    concurrent_predictions_list = sorted(list(set(range(step, stations_capped + 1, step))))
                     
                     # ===== FEASIBILITY CHECK =====
                     # Since actors are CAPPED to MEMORY in parallelization.py, all concurrency levels
@@ -1506,17 +1598,23 @@ class EvaluateSystem():
                     if invalid_predictions:
                         for inv_p in invalid_predictions:
                             # Efficiency check: don't record if already tested/skipped
-                            key = self._trial_key(
+                            if self._is_trial_already_tested(
                                 num_cpus=len(cpus_to_use),
-                                stations=stations,
+                                stations=stations_capped,
                                 predictions=inv_p,
                                 gpu_memory_limit_mb=int(round(model_vram_per_actor_mb)),
                                 timechunks=1,
                                 model=trial_model,
                                 gpus=gpus_to_use,
-                            )
-                            if key in planned_keys:
+                                planned_keys=planned_keys,
+                                station_pred_map=station_pred_map
+                            ):
                                 continue
+                            
+                            # Mark as tested (exact key)
+                            key = self._trial_key(num_cpus=len(cpus_to_use), stations=stations_capped, 
+                                                 predictions=inv_p, gpu_memory_limit_mb=int(round(model_vram_per_actor_mb)), 
+                                                 timechunks=1, model=trial_model, gpus=gpus_to_use)
                             planned_keys.add(key)
                             
                             # Calculate actual memory that would be used (capped to memory availability)
@@ -1528,13 +1626,13 @@ class EvaluateSystem():
                                        f"Required: {est_vram:.0f}MB VRAM / {est_ram:.0f}MB RAM. "
                                        f"Available: {aggregate_vram_cap_mb:.0f}MB VRAM / {aggregate_ram_cap_mb:.0f}MB RAM.")
                             
-                            self.logger.warning(f"Recording OOM-risk trial skip for {stations} stations, {inv_p} tasks: {error_msg}")
+                            self.logger.warning(f"Recording OOM-risk trial skip for {stations_capped} stations, {inv_p} tasks: {error_msg}")
                             
                             # Build minimal trial data for CSV recording
                             oom_comment = f"Requested {inv_p} actors, 0 created (VRAM limited to {aggregate_vram_cap_mb:.0f} MB, {model_vram_per_actor_mb:.0f} MB/actor) - Trial skipped"
                             trial_data = {
                                 "Trial Number": trial_num,
-                                "Number of Stations Used": stations,
+                                "Number of Stations Used": stations_capped,
                                 "Number of CPUs Allocated for Ray to Use": len(cpus_to_use),
                                 "GPUs Used": json.dumps(list(gpus_to_use)),
                                 "N ModelActors": 0,  # No actors created - OOM prevention
@@ -1568,49 +1666,58 @@ class EvaluateSystem():
                             update_csv_with_memory(csv_filepath, mem_data)
                             trial_num += 1
                     
-                    if not valid_predictions and stations > 0:
+                    if not valid_predictions and stations_capped > 0:
                         # If even the first step (20%) exceeds max actors (memory limit), try the max we can support
                         if max_actors >= 1:
                             valid_predictions = [min(step, max_actors)]
-                            self.logger.info(f"Station count {stations}: 20% step ({step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
+                            self.logger.info(f"Station count {stations_capped}: 20% step ({step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
                         else:
-                            self.logger.warning(f"Station count {stations}: Cannot spawn any ModelActors. Skipping.")
+                            self.logger.warning(f"Station count {stations_capped}: Cannot spawn any ModelActors. Skipping.")
                             continue
                     elif len(valid_predictions) < len(concurrent_predictions_list):
-                        self.logger.info(f"Trimming concurrency for {stations} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors})")
+                        self.logger.info(f"Trimming concurrency for {stations_capped} stations: {concurrent_predictions_list} → {valid_predictions} (max actors={max_actors})")
 
                     self.logger.info(f"")
-                    self.logger.info(f"Evaluating GPU(s) against {stations} TOTAL STATION(s)")
+                    self.logger.info(f"Evaluating GPU(s) against {stations_capped} TOTAL STATION(s)")
                     self.logger.info(f"Testing N ModelActors (concurrent predictions): {valid_predictions}")
                     
                     for predictions in valid_predictions:
+                        # Optimization: if the requested concurrency exceeds what can fit in memory,
+                        # cap it to the maximum actors possible and then stop testing higher 
+                        # concurrency levels for this configuration.
+                        stop_concurrency_marching = False
+                        if predictions >= max_actors:
+                            if predictions > max_actors:
+                                self.logger.info(f"Capping concurrency: {predictions} -> {max_actors} (memory limit reached)")
+                            predictions = max_actors
+                            stop_concurrency_marching = True
+
                         # ===== PRE-FLIGHT CHECKS: Skip if already tested =====
                         # Check these BEFORE restarting Ray to avoid unnecessary restarts
                         
                         # Efficiency check: avoid redundant tests for same (stations, predictions)
-                        config_key = (stations, predictions)
-                        if config_key in tested_gpu_configs:
-                            continue
-                        
-                        # Use model's known VRAM requirement as the gpu_memory_limit_mb (no tiers)
-                        gpu_memory_limit_mb = int(round(model_vram_per_actor_mb))
-
-                        key = self._trial_key(
+                        # Uses +/- tolerance for prediction count to handle step-size changes.
+                        if self._is_trial_already_tested(
                             num_cpus=len(cpus_to_use),
-                            stations=stations,
+                            stations=stations_capped,
                             predictions=predictions,
-                            gpu_memory_limit_mb=gpu_memory_limit_mb,
-                            timechunks=1,  # your GPU eval is explicitly "one timechunk at a time"
+                            gpu_memory_limit_mb=int(round(model_vram_per_actor_mb)),
+                            timechunks=1,
                             model=trial_model,
-                            gpus=gpus_to_use,  # Pass the actual GPUs being used in this iteration
-                        )
-                        if key in planned_keys:
-                            self.logger.info(f"[SKIP] Already tested: {key}")
-                            trials_skipped += 1
+                            gpus=gpus_to_use,
+                            planned_keys=planned_keys,
+                            station_pred_map=station_pred_map
+                        ):
+                            self.logger.info(f"[SKIP] Already tested: cpus={len(cpus_to_use)}, stations={stations_capped}, pred={predictions}")
+                            if stop_concurrency_marching:
+                                break
                             continue
                         
                         # Mark as tested/planned (before Ray restart to prevent redundant work)
-                        tested_gpu_configs.add(config_key)
+                        key = self._trial_key(num_cpus=len(cpus_to_use), stations=stations_capped, 
+                                             predictions=predictions, gpu_memory_limit_mb=int(round(model_vram_per_actor_mb)), 
+                                             timechunks=1, model=trial_model, gpus=gpus_to_use)
+                        tested_gpu_configs.add((stations_capped, predictions))
                         planned_keys.add(key)
                         
                         # ===== FRESH RAY INSTANCE PER TRIAL =====
@@ -1666,7 +1773,7 @@ class EvaluateSystem():
                         mseed_timechunk_dir_name = self.tasks_picker[0][1]
                         timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
                         
-                        self.logger.info(f"Stations: {stations}")
+                        self.logger.info(f"Stations: {stations_capped}")
                         self.logger.info(f"Concurrent Predictions (N ModelActors): {predictions}")
                         self.logger.info(f"Model VRAM per Actor: {model_vram_per_actor_mb:.0f} MB")
                         self.logger.info(f"Model RAM per Actor: {model_ram_per_actor_mb:.0f} MB")
@@ -1692,9 +1799,9 @@ class EvaluateSystem():
                                 ray_cpus=cpus_to_use, 
                                 use_gpu=self.use_gpu, 
                                 gpu_id=gpus_to_use, 
-                                gpu_memory_limit_mb=gpu_memory_limit_mb,  # Per-actor VRAM limit
+                                gpu_memory_limit_mb=model_vram_per_actor_mb,  # Per-actor VRAM limit
                                 total_vram_pool_mb=aggregate_vram_cap_mb,  # Total VRAM budget for all actors
-                                stations2use=stations, 
+                                stations2use=stations_capped, 
                                 timechunk_id=mseed_timechunk_dir_name, 
                                 waveform_overlap=self.waveform_overlap, 
                                 total_timechunks=len(self.tasks_picker), 

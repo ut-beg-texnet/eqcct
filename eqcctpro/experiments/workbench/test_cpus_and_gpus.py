@@ -9,7 +9,7 @@ from eqcctpro import RunEQCCTPro, EvaluateSystem, OptimalCPUConfigurationFinder,
 base_dir = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro'
 input_mseed_directory_path = os.path.join(base_dir, 'data/6_hours_tx2026burunl')
 output_pick_directory_path = os.path.join(base_dir, 'results/csv/logs')
-csv_filepath = os.path.join(base_dir, 'results/csv')
+csv_filepath = os.path.join(base_dir, 'results/trials')
 models_dir = os.path.join(base_dir, 'models/EQCCT')
 tmp_dir = '/lambda1a/skevofilaxc/tmp'
 

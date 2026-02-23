@@ -17,6 +17,11 @@ Features:
 - Comprehensive hover details including created actors, CPUs, and precise memory values
 - Batch visualization: Automatically processes all trial directories into separate folders
 - Comparison mode: Side-by-side ModelActor vs Ripper performance dashboards
+- Optimal Configurations: 3D visualizations and comparison tables for optimal_configurations_*.csv files
+    - 3D scatter plots: CPUs (x) vs Stations (y) vs Runtime/Picking Time (z)
+    - Rainbow (Turbo) color scale for number of concurrent tasks
+    - Different marker shapes for GPU count
+    - Summary comparison tables
 
 Usage:
 ------
@@ -29,6 +34,15 @@ python visualize_trial_results.py --batch --results_root results/csv/ --output_d
 # Compare ModelActor vs Ripper for a specific model
 python visualize_trial_results.py --compare --model eqcct --trial_type cpu --results_root results/csv/
 
+# Optimal Configurations Visualization
+python visualize_trial_results.py --optimal <optimal_config_csv_path> --output_dir vis/optimal/
+
+# Batch optimal configurations visualization
+python visualize_trial_results.py --optimal --batch --results_root results/trials/ --output_dir vis/optimal/
+
+# Compare optimal configs across hardware and methods for a model
+python visualize_trial_results.py --optimal --compare --model eqcct --results_root results/trials/
+
 Examples:
 ---------
 # Single file visualization with desired runtime threshold
@@ -39,6 +53,12 @@ python visualize_trial_results.py results/csv/eval_gpu_eqcct_modelactor/gpu_test
 
 # ModelActor vs Ripper comparison
 python visualize_trial_results.py --compare --model phasenet_original --trial_type cpu
+
+# Single optimal config visualization
+python visualize_trial_results.py --optimal results/trials/eval_cpu_eqcct_modelactor/optimal_configurations_cpu.csv
+
+# Compare optimal configs for eqcct model
+python visualize_trial_results.py --optimal --compare --model eqcct --results_root results/trials/
 """
 
 import pandas as pd
@@ -2923,6 +2943,990 @@ def compare_hardware_and_methods(model_name, files, output_dir, desired_runtime=
     print(f"\nHardware and Method comparisons complete!")
 
 
+# =============================================================================
+# OPTIMAL CONFIGURATIONS VISUALIZATION
+# =============================================================================
+
+def visualize_optimal_configurations(csv_path, model_name=None, output_dir="visualizations"):
+    """
+    Visualize optimal configurations CSV files with 3D scatter plots and summary tables.
+    
+    Creates:
+    - 3D scatter plots: CPUs (x) vs Stations (y) vs Runtime/Picking Time (z)
+    - Rainbow (Turbo) color scale for number of concurrent tasks
+    - Different marker shapes for GPU count
+    - Summary comparison table
+    
+    Parameters:
+    -----------
+    csv_path : str
+        Path to the optimal_configurations_cpu.csv or optimal_configurations_gpu.csv file
+    model_name : str, optional
+        Name to display in plot titles. Auto-detected if not provided.
+    output_dir : str
+        Directory to save HTML visualization files.
+    """
+    if not os.path.exists(csv_path):
+        print(f"Error: Path not found at {csv_path}")
+        return
+    
+    # If csv_path is a directory, try to find the optimal config CSV inside it
+    if os.path.isdir(csv_path):
+        csv_files = glob.glob(os.path.join(csv_path, 'optimal_configurations_*.csv'))
+        if not csv_files:
+            print(f"Error: No 'optimal_configurations_*.csv' file found in directory {csv_path}")
+            return
+        csv_path = csv_files[0]
+        print(f"Detected optimal config CSV file in directory: {csv_path}")
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    print(f"Loading optimal configurations from {csv_path}...")
+    df = pd.read_csv(csv_path)
+    
+    # Column definitions (same as test_results)
+    cpu_col = 'Number of CPUs Allocated for Ray to Use'
+    task_col = 'Number of Concurrent Station Tasks'
+    actor_col = 'N ModelActors'
+    ripper_task_col = 'Actual Ripper Concurrent Tasks'
+    station_col = 'Number of Stations Used'
+    total_trial_time_col = 'Total Trial Time (s)'
+    picker_runtime_col = 'Total Run time for Picker (s)'
+    actual_ram_col = 'Process Tree RAM (MB)'
+    actual_vram_col = 'Process Tree VRAM (MB)'
+    actor_creation_time_col = 'Actor Creation Time (s)'
+    waveform_proc_time_col = 'Waveform Processing Time (s)'
+    
+    # Detect trial type and execution mode
+    trial_type = detect_trial_type(df)
+    is_gpu_trial = trial_type == 'gpu'
+    execution_mode = detect_execution_mode(df)
+    concurrency_col = get_concurrency_column(df, execution_mode)
+    
+    # Parse GPU count
+    if 'GPUs Used' in df.columns:
+        df['GPU Count'] = df['GPUs Used'].apply(parse_gpu_list)
+    else:
+        df['GPU Count'] = 0
+    
+    # Auto-detect model name
+    if model_name is None:
+        model_name = df['Model Used'].iloc[0] if 'Model Used' in df.columns else "Unknown"
+        model_name = f"{model_name}-{'GPU' if is_gpu_trial else 'CPU'}-{execution_mode.upper()}-Optimal"
+    
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    
+    print(f"Detected trial type: {trial_type.upper()}")
+    print(f"Detected execution mode: {execution_mode.upper()}")
+    print(f"Model: {model_name}")
+    print(f"Optimal configurations loaded: {len(df)} rows")
+    
+    # Convert numeric columns
+    numeric_cols = [cpu_col, task_col, actor_col, ripper_task_col, station_col,
+                    total_trial_time_col, actor_creation_time_col,
+                    waveform_proc_time_col, picker_runtime_col,
+                    actual_ram_col, actual_vram_col]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # Create unified concurrency column
+    df['Effective Concurrency'] = df[concurrency_col].fillna(1)
+    
+    # Calculate dynamic dtick for colorbar
+    max_conc = df['Effective Concurrency'].max()
+    if max_conc <= 15:
+        cbar_dtick = 1
+    elif max_conc <= 20:
+        cbar_dtick = 5
+    else:
+        cbar_dtick = 10
+    
+    # Symbol map for GPU count (3D scatter compatible symbols)
+    # 0 GPUs (CPU) gets circle, GPU trials get different shapes
+    symbol_map_dict = {
+        0: 'circle',         # CPU (0 GPUs)
+        1: 'diamond',        # 1 GPU
+        2: 'square',         # 2 GPUs
+        3: 'cross',          # 3 GPUs
+        4: 'x',              # 4 GPUs
+        5: 'circle-open',    # 5 GPUs
+        6: 'diamond-open',   # 6 GPUs
+        7: 'square-open',    # 7 GPUs
+        8: 'cross-open'      # 8 GPUs
+    }
+    df['Marker Symbol'] = df['GPU Count'].apply(lambda x: symbol_map_dict.get(int(min(x, 8)), 'circle'))
+    
+    # Calculate additional metrics
+    if actor_creation_time_col in df.columns and actor_col in df.columns:
+        df['Avg. ModelActor Creation Time (s)'] = df[actor_creation_time_col] / df[actor_col].replace(0, np.nan)
+    else:
+        df['Avg. ModelActor Creation Time (s)'] = np.nan
+    
+    # Calculate throughputs
+    df['Picker Throughput (st/s)'] = df[station_col] / df[picker_runtime_col].replace(0, np.nan)
+    df['Total Throughput (st/s)'] = df[station_col] / df[total_trial_time_col].replace(0, np.nan)
+    
+    # Colorbar title
+    cbar_title = "N Model Actors" if execution_mode == "modelactor" else "Concurrent Tasks"
+    
+    # =========================================================================
+    # 3D SCATTER PLOTS
+    # =========================================================================
+    plot_configs = [
+        {
+            'z_col': total_trial_time_col,
+            'title': 'Optimal Config: Total Trial Runtime vs Resources',
+            'z_label': 'Total Trial Runtime (s)',
+            'file_name': 'optimal_runtime_3d'
+        },
+        {
+            'z_col': picker_runtime_col,
+            'title': 'Optimal Config: Total Waveform Picking Time vs Resources',
+            'z_label': 'Total Waveform Picking Time (s)',
+            'file_name': 'optimal_picking_time_3d'
+        },
+    ]
+    
+    for config in plot_configs:
+        if config['z_col'] not in df.columns:
+            continue
+        
+        if df[config['z_col']].isna().all() or (df[config['z_col']] == 0).all():
+            continue
+        
+        fig = go.Figure()
+        
+        # Prepare hover template based on execution mode
+        if execution_mode == 'modelactor':
+            actor_hover = (
+                "Number of ModelActor's Created: %{customdata[3]}<br>"
+                "Avg. ModelActor Creation Time (s): %{customdata[6]:.2f}<br>"
+                "Total Actor Creation Time (s): %{customdata[7]:.2f}<br>"
+            )
+        else:
+            actor_hover = ""
+        
+        # Add dummy traces for symbol legend showing GPU count
+        unique_gpus = sorted(df['GPU Count'].unique())
+        for gpu_count in unique_gpus:
+            symbol = symbol_map_dict.get(int(min(gpu_count, 8)), 'circle')
+            if gpu_count == 0:
+                label = "CPU (0 GPUs)"
+            else:
+                label = f"{int(gpu_count)} GPU{'s' if gpu_count > 1 else ''}"
+            
+            fig.add_trace(go.Scatter3d(
+                x=[None], y=[None], z=[None],
+                mode='markers',
+                marker=dict(
+                    symbol=symbol,
+                    color='rgba(100,100,100,0.7)',
+                    size=8,
+                    line=dict(width=1, color='black')
+                ),
+                name=label,
+                legendgroup="Hardware",
+                legendgrouptitle=dict(
+                    text="Hardware",
+                    font=dict(size=14)
+                ),
+                showlegend=True
+            ))
+        
+        # Prepare custom data
+        customdata_cols = ['GPU Count', 'GPUs Used', task_col, actor_col, total_trial_time_col, actual_ram_col,
+                          'Avg. ModelActor Creation Time (s)', actor_creation_time_col,
+                          waveform_proc_time_col, picker_runtime_col]
+        customdata = []
+        for col in customdata_cols:
+            if col in df.columns:
+                customdata.append(df[col].values)
+            else:
+                customdata.append(np.full(len(df), np.nan))
+        customdata = np.column_stack(customdata)
+        
+        # Add main scatter trace
+        fig.add_trace(go.Scatter3d(
+            x=df[cpu_col],
+            y=df[station_col],
+            z=df[config['z_col']],
+            mode='markers',
+            marker=dict(
+                size=6,
+                color=df['Effective Concurrency'],
+                colorscale='Turbo',
+                colorbar=dict(
+                    title=dict(
+                        text=cbar_title,
+                        font=dict(size=14)
+                    ),
+                    dtick=cbar_dtick,
+                    x=1.1,
+                    y=0.5,
+                    len=0.9,
+                    yanchor='middle'
+                ),
+                cmin=df['Effective Concurrency'].min(),
+                cmax=df['Effective Concurrency'].max(),
+                opacity=0.8,
+                symbol=df['Marker Symbol'],
+                line=dict(width=0)
+            ),
+            name='',
+            showlegend=False,
+            hovertemplate=(
+                "<b>Optimal Configuration</b><br>"
+                "Total Number of Stations: %{y}<br>"
+                "CPUs: %{x}<br>"
+                "GPUs: %{customdata[0]}<br>"
+                "GPU IDs: %{customdata[1]}<br>"
+                "Concurrent Tasks Requested: %{customdata[2]}<br>"
+                + actor_hover +
+                "Avg. Waveform Processing Time (s): %{customdata[8]:.2f}<br>"
+                "Total Waveform Picking Time (s): %{customdata[9]:.2f}<br>"
+                "Total Trial Runtime (s): %{customdata[4]:.2f}<br>"
+                "Process Tree RAM (MB): %{customdata[5]:.2f}<br>"
+                "<extra></extra>"
+            ),
+            customdata=customdata
+        ))
+        
+        x_range = [0, df[cpu_col].max() * 1.1]
+        y_range = [0, df[station_col].max() * 1.1]
+        
+        fig.update_layout(
+            title=dict(
+                text=f"[{model_name}]<br>{config['title']}",
+                x=0.5,
+                xanchor='center'
+            ),
+            scene=dict(
+                xaxis=dict(title='CPUs Allocated', range=x_range, dtick=1),
+                yaxis=dict(title='Total Number of Stations', range=y_range, dtick=10),
+                zaxis=dict(title=config['z_label']),
+                aspectmode='manual',
+                aspectratio=dict(x=1, y=1, z=0.8)
+            ),
+            margin=dict(l=0, r=0, b=0, t=60),
+            legend=dict(
+                x=1.05,
+                y=0.95,
+                xanchor='right',
+                yanchor='top',
+                bgcolor='rgba(255,255,255,0.5)',
+                font=dict(size=12)
+            ),
+            showlegend=True
+        )
+        
+        output_file = os.path.join(output_dir, f"{config['file_name']}_{execution_mode}.html")
+        fig.write_html(output_file)
+        print(f"Saved: {output_file}")
+    
+    # =========================================================================
+    # SUMMARY TABLE
+    # =========================================================================
+    generate_optimal_config_table(df, model_name, execution_mode, is_gpu_trial, output_dir)
+    
+    print(f"\nOptimal configuration visualization complete! Files saved to: {output_dir}")
+    return df
+
+
+def generate_optimal_config_table(df, model_name, execution_mode, is_gpu_trial, output_dir):
+    """
+    Generate a summary table for optimal configurations.
+    Groups data by station count and shows the optimal configuration for each.
+    """
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    
+    cpu_col = 'Number of CPUs Allocated for Ray to Use'
+    station_col = 'Number of Stations Used'
+    total_trial_time_col = 'Total Trial Time (s)'
+    picker_runtime_col = 'Total Run time for Picker (s)'
+    actual_ram_col = 'Process Tree RAM (MB)'
+    actual_vram_col = 'Process Tree VRAM (MB)'
+    actor_col = 'N ModelActors'
+    task_col = 'Number of Concurrent Station Tasks'
+    ripper_task_col = 'Actual Ripper Concurrent Tasks'
+    
+    actor_creation_time_col = 'Actor Creation Time (s)'
+    avg_model_load_time_col = 'Avg Model Load Time (s)'
+    
+    # Group by station count and get the best config for each
+    grouped = df.groupby(station_col).agg({
+        cpu_col: 'first',
+        'GPU Count': 'first',
+        actor_col: 'first' if actor_col in df.columns else lambda x: 0,
+        task_col: 'first' if task_col in df.columns else lambda x: 0,
+        total_trial_time_col: 'first',
+        picker_runtime_col: 'first',
+        actual_ram_col: 'first',
+        'Picker Throughput (st/s)': 'first',
+        'Total Throughput (st/s)': 'first',
+        actor_creation_time_col: 'first' if actor_creation_time_col in df.columns else lambda x: np.nan,
+        avg_model_load_time_col: 'first' if avg_model_load_time_col in df.columns else lambda x: np.nan
+    }).reset_index()
+    
+    # Add VRAM for GPU trials
+    if actual_vram_col in df.columns:
+        grouped_vram = df.groupby(station_col)[actual_vram_col].first().reset_index()
+        grouped = grouped.merge(grouped_vram, on=station_col, how='left')
+    
+    # Create table data
+    if execution_mode == 'modelactor':
+        conc_col_name = 'N ModelActors'
+        conc_values = grouped[actor_col].fillna(0).astype(int).tolist()
+    else:
+        if ripper_task_col in df.columns:
+            ripper_grouped = df.groupby(station_col)[ripper_task_col].first().reset_index()
+            grouped = grouped.merge(ripper_grouped, on=station_col, how='left', suffixes=('', '_ripper'))
+            conc_col_name = 'Concurrent Tasks'
+            conc_values = grouped[ripper_task_col].fillna(grouped[task_col]).fillna(0).astype(int).tolist()
+        else:
+            conc_col_name = 'Concurrent Tasks'
+            conc_values = grouped[task_col].fillna(0).astype(int).tolist()
+    
+    table_headers = [
+        '<b>Stations</b>',
+        '<b>CPUs</b>',
+        '<b>GPUs</b>',
+        f'<b>{conc_col_name}</b>',
+        '<b>Total Runtime (s)</b>',
+        '<b>Picking Time (s)</b>',
+        '<b>RAM (MB)</b>'
+    ]
+    
+    table_values = [
+        grouped[station_col].astype(int).tolist(),
+        grouped[cpu_col].astype(int).tolist(),
+        grouped['GPU Count'].astype(int).tolist(),
+        conc_values,
+        [f"{v:.2f}" for v in grouped[total_trial_time_col]],
+        [f"{v:.2f}" for v in grouped[picker_runtime_col]],
+        [f"{v:.1f}" for v in grouped[actual_ram_col]]
+    ]
+    
+    # Add VRAM column
+    if actual_vram_col in grouped.columns:
+        table_headers.append('<b>VRAM (MB)</b>')
+        table_values.append([f"{v:.1f}" if pd.notna(v) else "N/A" for v in grouped[actual_vram_col]])
+        
+    # Add Actor Creation Time
+    if actor_creation_time_col in grouped.columns and execution_mode == 'modelactor':
+        table_headers.append('<b>Actor Creation (s)</b>')
+        table_values.append([f"{v:.2f}" if pd.notna(v) else "N/A" for v in grouped[actor_creation_time_col]])
+        
+    # Add Model Load Time
+    if avg_model_load_time_col in grouped.columns:
+        table_headers.append('<b>Model Load (s)</b>')
+        table_values.append([f"{v:.2f}" if pd.notna(v) else "N/A" for v in grouped[avg_model_load_time_col]])
+        
+    # Add throughput at the end
+    table_headers.append('<b>Throughput (st/s)</b>')
+    table_values.append([f"{v:.3f}" for v in grouped['Picker Throughput (st/s)']])
+    
+    fig = go.Figure(data=[go.Table(
+        header=dict(
+            values=table_headers,
+            fill_color='paleturquoise',
+            align='left',
+            font=dict(size=13)
+        ),
+        cells=dict(
+            values=table_values,
+            fill_color='lavender',
+            align='left',
+            font=dict(size=11)
+        )
+    )])
+    
+    fig.update_layout(
+        title=f"[{model_name}] Optimal Configurations Summary Table",
+        height=min(800, 100 + len(grouped) * 30)
+    )
+    
+    output_file = os.path.join(output_dir, f"optimal_config_table_{execution_mode}.html")
+    fig.write_html(output_file)
+    print(f"Saved: {output_file}")
+
+
+def batch_visualize_optimal(results_root, output_dir="visualizations"):
+    """
+    Batch visualize all optimal configuration files in result directories.
+    Creates a subfolder structure similar to batch_visualize.
+    """
+    if not os.path.exists(results_root):
+        print(f"Error: Results root not found: {results_root}")
+        return
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    print(f"\n{'='*70}")
+    print("BATCH VISUALIZATION OF OPTIMAL CONFIGURATIONS")
+    print(f"{'='*70}")
+    print(f"Results root: {results_root}")
+    
+    # Find all result directories with optimal_configurations files
+    result_dirs = []
+    for item in os.listdir(results_root):
+        item_path = os.path.join(results_root, item)
+        if os.path.isdir(item_path) and item.startswith('eval_'):
+            optimal_files = glob.glob(os.path.join(item_path, 'optimal_configurations_*.csv'))
+            if optimal_files:
+                result_dirs.append((item, optimal_files[0]))
+    
+    print(f"Found {len(result_dirs)} directories with optimal configurations")
+    
+    all_optimal_dfs = []
+    
+    for result_dir, csv_path in sorted(result_dirs):
+        vis_output = os.path.join(output_dir, result_dir, "optimal_configs")
+        
+        print(f"\nVisualizing optimal configs: {result_dir}")
+        df = visualize_optimal_configurations(csv_path, output_dir=vis_output)
+        if df is not None:
+            df['Source Directory'] = result_dir
+            all_optimal_dfs.append(df)
+    
+    # Generate aggregate optimal configuration comparison
+    if all_optimal_dfs:
+        print(f"\nGenerating aggregate optimal configuration comparisons...")
+        generate_aggregate_optimal_plots(all_optimal_dfs, output_dir)
+    
+    print(f"\n{'='*70}")
+    print(f"Batch optimal configuration visualization complete! Files saved to: {output_dir}")
+
+
+def generate_aggregate_optimal_plots(all_dfs, output_dir):
+    """
+    Generate aggregate comparison plots across all optimal configurations.
+    """
+    if not all_dfs:
+        return
+    
+    aggregate_dir = os.path.join(output_dir, "aggregate_optimal_comparisons")
+    if not os.path.exists(aggregate_dir):
+        os.makedirs(aggregate_dir)
+    
+    # Combine all dataframes
+    for df in all_dfs:
+        if 'Model Used' in df.columns:
+            df['Model'] = df['Model Used']
+        df['Trial Type'] = 'GPU' if df['GPU Count'].max() > 0 else 'CPU'
+    
+    agg_df = pd.concat(all_dfs, ignore_index=True)
+    
+    station_col = 'Number of Stations Used'
+    cpu_col = 'Number of CPUs Allocated for Ray to Use'
+    total_trial_time_col = 'Total Trial Time (s)'
+    picker_runtime_col = 'Total Run time for Picker (s)'
+    
+    # Create comparison scatter plots
+    for trial_type in agg_df['Trial Type'].unique():
+        type_df = agg_df[agg_df['Trial Type'] == trial_type]
+        
+        # Throughput comparison by model
+        if 'Picker Throughput (st/s)' in type_df.columns:
+            plot_df = type_df.groupby(['Model', 'Source Directory'])['Picker Throughput (st/s)'].mean().reset_index()
+            
+            fig = px.bar(
+                plot_df,
+                x='Source Directory',
+                y='Picker Throughput (st/s)',
+                color='Model',
+                title=f"Optimal Configuration Throughput Comparison ({trial_type})",
+                labels={'Picker Throughput (st/s)': 'Mean Picker Throughput (st/s)'}
+            )
+            fig.update_layout(
+                xaxis_tickangle=-45,
+                legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+            )
+            
+            output_file = os.path.join(aggregate_dir, f"aggregate_optimal_throughput_{trial_type.lower()}.html")
+            fig.write_html(output_file)
+            print(f"Saved: {output_file}")
+        
+        # Runtime comparison by station count
+        runtime_df = type_df.groupby(['Model', station_col])[total_trial_time_col].mean().reset_index()
+        
+        fig = px.line(
+            runtime_df,
+            x=station_col,
+            y=total_trial_time_col,
+            color='Model',
+            markers=True,
+            title=f"Optimal Config: Mean Runtime vs Station Count ({trial_type})",
+            labels={
+                station_col: 'Number of Stations',
+                total_trial_time_col: 'Mean Total Runtime (s)'
+            }
+        )
+        fig.update_layout(
+            xaxis=dict(dtick=10),
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=1.02)
+        )
+        
+        output_file = os.path.join(aggregate_dir, f"aggregate_optimal_runtime_{trial_type.lower()}.html")
+        fig.write_html(output_file)
+        print(f"Saved: {output_file}")
+
+
+def find_optimal_config_files(results_root, model):
+    """
+    Find optimal configuration files for a given model.
+    Returns dict with keys: 'cpu_modelactor', 'gpu_modelactor', 'cpu_ripper', 'gpu_ripper'
+    """
+    model = model.lower().replace('-', '_')
+    user_parts = model.split('_')
+    files = {
+        'cpu_modelactor': None,
+        'gpu_modelactor': None,
+        'cpu_ripper': None,
+        'gpu_ripper': None
+    }
+    
+    if not os.path.exists(results_root):
+        return files
+    
+    for item in os.listdir(results_root):
+        item_lower = item.lower()
+        if not item_lower.startswith('eval_'):
+            continue
+        
+        item_path = os.path.join(results_root, item)
+        if not os.path.isdir(item_path):
+            continue
+        
+        parts = item_lower.replace('-', '_').split('_')
+        
+        method_idx = -1
+        for i, p in enumerate(parts):
+            if p in ['modelactor', 'ripper']:
+                method_idx = i
+                break
+        if method_idx == -1:
+            continue
+        
+        model_parts = parts[2:method_idx]
+        
+        if model_parts[:len(user_parts)] == user_parts:
+            hardware = parts[1] if parts[1] in ['cpu', 'gpu'] else None
+            method = parts[method_idx]
+            
+            if hardware and method:
+                key = f"{hardware}_{method}"
+                optimal_files = glob.glob(os.path.join(item_path, 'optimal_configurations_*.csv'))
+                if optimal_files:
+                    files[key] = optimal_files[0]
+    
+    return files
+
+
+def compare_optimal_configs(model_name, files, output_dir):
+    """
+    Compare optimal configurations across hardware (CPU/GPU) and methods (ModelActor/Ripper).
+    """
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    print(f"\n{'='*70}")
+    print(f"OPTIMAL CONFIGURATION COMPARISON: {model_name}")
+    print(f"{'='*70}")
+    
+    # Load dataframes
+    dfs = {}
+    for key, path in files.items():
+        if path:
+            print(f"Loading {key}: {path}")
+            df = pd.read_csv(path)
+            
+            hardware, method = key.split('_')
+            hw_str = hardware.upper()
+            method_str = method.capitalize() if method == 'ripper' else 'ModelActor'
+            
+            df['Hardware'] = hw_str
+            df['Execution Mode'] = method_str
+            df['Label'] = f"{hw_str} - {method_str}"
+            
+            # Parse GPU count
+            if 'GPUs Used' in df.columns:
+                df['GPU Count'] = df['GPUs Used'].apply(parse_gpu_list)
+            else:
+                df['GPU Count'] = 0
+            
+            dfs[key] = df
+    
+    if not dfs:
+        print("Error: No optimal configuration data found for comparison.")
+        return
+    
+    # Column definitions
+    cpu_col = 'Number of CPUs Allocated for Ray to Use'
+    station_col = 'Number of Stations Used'
+    total_trial_time_col = 'Total Trial Time (s)'
+    picker_runtime_col = 'Total Run time for Picker (s)'
+    actual_ram_col = 'Process Tree RAM (MB)'
+    actual_vram_col = 'Process Tree VRAM (MB)'
+    actor_creation_time_col = 'Actor Creation Time (s)'
+    avg_model_load_time_col = 'Avg Model Load Time (s)'
+    actor_col = 'N ModelActors'
+    task_col = 'Number of Concurrent Station Tasks'
+    
+    # Preprocess dataframes
+    for key, df in dfs.items():
+        df['Picker Throughput (st/s)'] = df[station_col] / df[picker_runtime_col].replace(0, np.nan)
+        df['Total Throughput (st/s)'] = df[station_col] / df[total_trial_time_col].replace(0, np.nan)
+        
+        if 'modelactor' in key:
+            df['Effective Concurrency'] = df[actor_col]
+        else:
+            ripper_col = 'Actual Ripper Concurrent Tasks'
+            if ripper_col in df.columns and df[ripper_col].notna().any():
+                df['Effective Concurrency'] = df[ripper_col]
+            else:
+                df['Effective Concurrency'] = df[task_col]
+        
+        for col in [total_trial_time_col, picker_runtime_col, station_col, cpu_col, actual_ram_col, 
+                    actual_vram_col, actor_creation_time_col, avg_model_load_time_col]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
+    # Combined dataframe
+    df_all = pd.concat(dfs.values(), ignore_index=True)
+    
+    # Combined symbol map: encodes both Execution Mode AND GPU Count
+    # Format: (Execution Mode, GPU Count) -> symbol
+    # ModelActor uses filled shapes, Ripper uses open shapes
+    # Different GPU counts use different base shapes
+    combined_symbol_map = {
+        # ModelActor (filled shapes)
+        ('ModelActor', 0): 'circle',        # CPU ModelActor (0 GPUs)
+        ('ModelActor', 1): 'diamond',       # 1 GPU ModelActor
+        ('ModelActor', 2): 'square',        # 2 GPUs ModelActor
+        ('ModelActor', 3): 'cross',         # 3 GPUs ModelActor
+        ('ModelActor', 4): 'x',             # 4 GPUs ModelActor
+        # Ripper (open shapes)
+        ('Ripper', 0): 'circle-open',       # CPU Ripper (0 GPUs)
+        ('Ripper', 1): 'diamond-open',      # 1 GPU Ripper
+        ('Ripper', 2): 'square-open',       # 2 GPUs Ripper
+        ('Ripper', 3): 'cross-open',        # 3 GPUs Ripper (note: cross-open may not exist, fallback)
+        ('Ripper', 4): 'x-open',            # 4 GPUs Ripper (note: x-open may not exist, fallback)
+    }
+    
+    # Apply combined symbol mapping
+    def get_combined_symbol(row):
+        mode = row['Execution Mode']
+        gpu_count = int(row['GPU Count'])
+        # Clamp GPU count to max 4 for symbol mapping
+        gpu_count = min(gpu_count, 4)
+        key = (mode, gpu_count)
+        return combined_symbol_map.get(key, 'circle')
+    
+    df_all['Marker Symbol'] = df_all.apply(get_combined_symbol, axis=1)
+    
+    # Calculate colorbar dtick
+    max_conc = df_all['Effective Concurrency'].max()
+    if max_conc <= 15:
+        cbar_dtick = 1
+    elif max_conc <= 20:
+        cbar_dtick = 5
+    else:
+        cbar_dtick = 10
+    
+    # Get unique combinations for legend
+    unique_combos = df_all[['Execution Mode', 'GPU Count', 'Marker Symbol']].drop_duplicates()
+    unique_combos = unique_combos.sort_values(['Execution Mode', 'GPU Count'], ascending=[False, True])
+    
+    # =========================================================================
+    # 3D COMPARISON PLOT: All Methods Together - Total Runtime
+    # =========================================================================
+    fig = go.Figure()
+    
+    # Add legend traces for each unique combination of Execution Mode + GPU Count
+    for _, row in unique_combos.iterrows():
+        mode = row['Execution Mode']
+        gpu_count = int(row['GPU Count'])
+        symbol = row['Marker Symbol']
+        
+        if gpu_count == 0:
+            label = f"{mode} (CPU)"
+        else:
+            label = f"{mode} ({gpu_count} GPU{'s' if gpu_count > 1 else ''})"
+        
+        fig.add_trace(go.Scatter3d(
+            x=[None], y=[None], z=[None],
+            mode='markers',
+            marker=dict(
+                symbol=symbol,
+                color='rgba(100,100,100,0.7)',
+                size=8,
+                line=dict(width=1, color='black')
+            ),
+            name=label,
+            legendgroup="Config",
+            legendgrouptitle=dict(
+                text="Method & Hardware",
+                font=dict(size=14)
+            ),
+            showlegend=True
+        ))
+    
+    # Add main scatter trace with color scale for concurrency
+    fig.add_trace(go.Scatter3d(
+        x=df_all[cpu_col],
+        y=df_all[station_col],
+        z=df_all[total_trial_time_col],
+        mode='markers',
+        marker=dict(
+            size=6,
+            color=df_all['Effective Concurrency'],
+            colorscale='Turbo',
+            colorbar=dict(
+                title=dict(
+                    text="Concurrent Tasks",
+                    font=dict(size=14)
+                ),
+                dtick=cbar_dtick,
+                x=1.15,
+                y=0.5,
+                len=0.9,
+                yanchor='middle'
+            ),
+            cmin=df_all['Effective Concurrency'].min(),
+            cmax=df_all['Effective Concurrency'].max(),
+            opacity=0.8,
+            symbol=df_all['Marker Symbol'],
+            line=dict(width=0)
+        ),
+        name='',
+        showlegend=False,
+        hovertemplate=(
+            "<b>Optimal Configuration</b><br>"
+            "Method: %{customdata[0]}<br>"
+            "Stations: %{y}<br>"
+            "CPUs: %{x}<br>"
+            "GPUs: %{customdata[1]}<br>"
+            "Concurrent Tasks: %{customdata[2]:.0f}<br>"
+            "Runtime: %{z:.2f}s<br>"
+            "<extra></extra>"
+        ),
+        customdata=np.column_stack([df_all['Label'], df_all['GPU Count'], df_all['Effective Concurrency']])
+    ))
+    
+    fig.update_layout(
+        title=dict(
+            text=f"[{model_name}] Optimal Configurations Comparison<br>Total Runtime vs Resources",
+            x=0.5,
+            xanchor='center'
+        ),
+        scene=dict(
+            xaxis=dict(title='CPUs Allocated', dtick=1),
+            yaxis=dict(title='Number of Stations', dtick=10),
+            zaxis=dict(title='Total Runtime (s)'),
+            aspectmode='manual',
+            aspectratio=dict(x=1, y=1, z=0.8)
+        ),
+        legend=dict(
+            x=1.05,
+            y=0.95,
+            xanchor='right',
+            yanchor='top',
+            bgcolor='rgba(255,255,255,0.5)',
+            font=dict(size=12)
+        ),
+        showlegend=True
+    )
+    
+    output_file = os.path.join(output_dir, f"optimal_comparison_runtime_3d_{safe_model_name}.html")
+    fig.write_html(output_file)
+    print(f"Saved: {output_file}")
+    
+    # =========================================================================
+    # 3D COMPARISON PLOT: Picking Time
+    # =========================================================================
+    fig = go.Figure()
+    
+    # Add legend traces for each unique combination of Execution Mode + GPU Count
+    for _, row in unique_combos.iterrows():
+        mode = row['Execution Mode']
+        gpu_count = int(row['GPU Count'])
+        symbol = row['Marker Symbol']
+        
+        if gpu_count == 0:
+            label = f"{mode} (CPU)"
+        else:
+            label = f"{mode} ({gpu_count} GPU{'s' if gpu_count > 1 else ''})"
+        
+        fig.add_trace(go.Scatter3d(
+            x=[None], y=[None], z=[None],
+            mode='markers',
+            marker=dict(
+                symbol=symbol,
+                color='rgba(100,100,100,0.7)',
+                size=8,
+                line=dict(width=1, color='black')
+            ),
+            name=label,
+            legendgroup="Config",
+            legendgrouptitle=dict(
+                text="Method & Hardware",
+                font=dict(size=14)
+            ),
+            showlegend=True
+        ))
+    
+    # Add main scatter trace with color scale for concurrency
+    fig.add_trace(go.Scatter3d(
+        x=df_all[cpu_col],
+        y=df_all[station_col],
+        z=df_all[picker_runtime_col],
+        mode='markers',
+        marker=dict(
+            size=6,
+            color=df_all['Effective Concurrency'],
+            colorscale='Turbo',
+            colorbar=dict(
+                title=dict(
+                    text="Concurrent Tasks",
+                    font=dict(size=14)
+                ),
+                dtick=cbar_dtick,
+                x=1.15,
+                y=0.5,
+                len=0.9,
+                yanchor='middle'
+            ),
+            cmin=df_all['Effective Concurrency'].min(),
+            cmax=df_all['Effective Concurrency'].max(),
+            opacity=0.8,
+            symbol=df_all['Marker Symbol'],
+            line=dict(width=0)
+        ),
+        name='',
+        showlegend=False,
+        hovertemplate=(
+            "<b>Optimal Configuration</b><br>"
+            "Method: %{customdata[0]}<br>"
+            "Stations: %{y}<br>"
+            "CPUs: %{x}<br>"
+            "GPUs: %{customdata[1]}<br>"
+            "Concurrent Tasks: %{customdata[2]:.0f}<br>"
+            "Picking Time: %{z:.2f}s<br>"
+            "<extra></extra>"
+        ),
+        customdata=np.column_stack([df_all['Label'], df_all['GPU Count'], df_all['Effective Concurrency']])
+    ))
+    
+    fig.update_layout(
+        title=dict(
+            text=f"[{model_name}] Optimal Configurations Comparison<br>Picking Time vs Resources",
+            x=0.5,
+            xanchor='center'
+        ),
+        scene=dict(
+            xaxis=dict(title='CPUs Allocated', dtick=1),
+            yaxis=dict(title='Number of Stations', dtick=10),
+            zaxis=dict(title='Picking Time (s)'),
+            aspectmode='manual',
+            aspectratio=dict(x=1, y=1, z=0.8)
+        ),
+        legend=dict(
+            x=1.05,
+            y=0.95,
+            xanchor='right',
+            yanchor='top',
+            bgcolor='rgba(255,255,255,0.5)',
+            font=dict(size=12)
+        ),
+        showlegend=True
+    )
+    
+    output_file = os.path.join(output_dir, f"optimal_comparison_picking_3d_{safe_model_name}.html")
+    fig.write_html(output_file)
+    print(f"Saved: {output_file}")
+    
+    # =========================================================================
+    # COMPARISON TABLE
+    # =========================================================================
+    def get_optimal_summary(df_subset, label):
+        if df_subset is None or df_subset.empty:
+            return ['N/A'] * 13
+        
+        # Determine execution mode from label
+        is_modelactor = 'ModelActor' in label
+        
+        vram_mean = f"{df_subset[actual_vram_col].mean():.1f}" if actual_vram_col in df_subset.columns else "N/A"
+        creation_time_mean = f"{df_subset[actor_creation_time_col].mean():.2f}" if (actor_creation_time_col in df_subset.columns and is_modelactor) else "N/A"
+        load_time_mean = f"{df_subset[avg_model_load_time_col].mean():.2f}" if avg_model_load_time_col in df_subset.columns else "N/A"
+        
+        return [
+            f"{df_subset[total_trial_time_col].min():.2f}",
+            f"{df_subset[total_trial_time_col].mean():.2f}",
+            f"{df_subset[picker_runtime_col].min():.2f}",
+            f"{df_subset[picker_runtime_col].mean():.2f}",
+            f"{df_subset['Picker Throughput (st/s)'].max():.3f}",
+            f"{df_subset['Picker Throughput (st/s)'].mean():.3f}",
+            f"{df_subset[actual_ram_col].min():.1f}",
+            f"{df_subset[actual_ram_col].mean():.1f}",
+            vram_mean,
+            creation_time_mean,
+            load_time_mean,
+            f"{df_subset['Effective Concurrency'].mean():.1f}",
+            str(len(df_subset))
+        ]
+    
+    metrics = [
+        'Min Total Runtime (s)',
+        'Mean Total Runtime (s)',
+        'Min Picking Time (s)',
+        'Mean Picking Time (s)',
+        'Max Throughput (st/s)',
+        'Mean Throughput (st/s)',
+        'Min RAM (MB)',
+        'Mean RAM (MB)',
+        'Mean VRAM (MB)',
+        'Mean Actor Creation (s)',
+        'Mean Model Load (s)',
+        'Mean Concurrency',
+        'Configuration Count'
+    ]
+    
+    table_data = {'Metric': metrics}
+    for key, df_subset in dfs.items():
+        hardware, method = key.split('_')
+        label = f"{hardware.upper()} - {'ModelActor' if method == 'modelactor' else 'Ripper'}"
+        table_data[label] = get_optimal_summary(df_subset, label)
+    
+    fig = go.Figure(data=[go.Table(
+        header=dict(
+            values=['<b>Metric</b>'] + [f'<b>{k}</b>' for k in table_data.keys() if k != 'Metric'],
+            fill_color='paleturquoise',
+            align='left',
+            font=dict(size=13)
+        ),
+        cells=dict(
+            values=[table_data[k] for k in table_data.keys()],
+            fill_color='lavender',
+            align='left',
+            font=dict(size=11)
+        )
+    )])
+    
+    fig.update_layout(
+        title=f"[{model_name}] Optimal Configurations Comparison Table"
+    )
+    
+    output_file = os.path.join(output_dir, f"optimal_comparison_table_{safe_model_name}.html")
+    fig.write_html(output_file)
+    print(f"Saved: {output_file}")
+    
+    print(f"\nOptimal configuration comparison complete! Files saved to: {output_dir}")
+
+
 def find_comparison_files(results_root, model, trial_type):
     """
     Find ModelActor and Ripper CSV files for a given model and trial type.
@@ -3031,6 +4035,16 @@ Examples:
   # Universal Comparison (CPU vs GPU across both methods)
   # triggered by omitting --trial_type
   python visualize_trial_results.py --compare --model eqcct --results_root results/csv/ --output_dir vis/universal/
+
+  # Optimal Configurations Visualization
+  # Single file
+  python visualize_trial_results.py --optimal results/trials/eval_cpu_eqcct_modelactor/optimal_configurations_cpu.csv
+
+  # Batch optimal visualization
+  python visualize_trial_results.py --optimal --batch --results_root results/trials/ --output_dir vis/optimal/
+
+  # Compare optimal configs across hardware and methods for a model
+  python visualize_trial_results.py --optimal --compare --model eqcct --results_root results/trials/
         """
     )
     
@@ -3062,9 +4076,39 @@ Examples:
     parser.add_argument('--trial_type', type=str, default=None, choices=['cpu', 'gpu'],
                        help='Trial type for comparison (cpu or gpu)')
     
+    # Optimal configurations mode
+    parser.add_argument('--optimal', action='store_true',
+                       help='Visualize optimal configuration files (optimal_configurations_*.csv)')
+    
     args = parser.parse_args()
     
-    if args.batch:
+    if args.optimal:
+        # Optimal configurations visualization mode
+        if args.batch:
+            # Batch optimal visualization
+            batch_visualize_optimal(args.results_root, args.output_dir)
+        elif args.compare:
+            # Compare optimal configs across hardware and methods
+            if not args.model:
+                print("Error: --optimal --compare requires the --model argument")
+                parser.print_help()
+            else:
+                files = find_optimal_config_files(args.results_root, args.model)
+                if any(files.values()):
+                    compare_optimal_configs(args.model, files, args.output_dir)
+                else:
+                    print(f"Error: Could not find any optimal configuration files for model '{args.model}' in {args.results_root}")
+        elif args.csv_path:
+            # Single optimal config file visualization
+            visualize_optimal_configurations(
+                csv_path=args.csv_path,
+                model_name=args.model,
+                output_dir=args.output_dir
+            )
+        else:
+            print("Error: --optimal requires either a csv_path, --batch, or --compare with --model")
+            parser.print_help()
+    elif args.batch:
         # Batch visualization mode
         batch_visualize(args.results_root, args.output_dir, 
                         desired_runtime=args.desired_runtime,
