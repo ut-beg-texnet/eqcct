@@ -15,5 +15,7 @@ Utility scripts for analysis and visualization of EQCCTPro outputs.
     - **`--compare`**: 
         - If `--trial_type` is provided: Compares ModelActor vs. Ripper side-by-side for that hardware.
         - If `--trial_type` is omitted: Performs a **Universal Comparison** (CPU vs GPU across both methods), generating combined plots and separate hardware comparison tables for ModelActor and Ripper.
+    - **`--optimal`**: Visualizes optimal configuration files (`optimal_configurations_*.csv`). Use `--optimal --compare --batch` to run the CPU vs GPU comparison for all models in one command.
+- **`batch_optimal_comparison.sh`**: Shell script alternative for batch optimal config comparison. Edit the `MODELS` array to customize which models are compared.
 - **`visualize_gpu_plotly.py`**: (Legacy) Generates interactive visualizations of GPU usage and detection results.
 - **`gpu_usage_monitor.py`**: Tools for real-time monitoring of GPU resources during execution.

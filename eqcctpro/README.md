@@ -521,7 +521,21 @@ python scripts/visualization/visualize_trial_results.py --compare --model phasen
 # Universal Comparison (CPU vs GPU across both methods)
 # Omitting --trial_type triggers a comprehensive 4-way comparison
 python scripts/visualization/visualize_trial_results.py --compare --model eqcct --output_dir vis/universal/
+
+# Optimal Configuration Visualization (from optimal_configurations_*.csv files)
+# Single model comparison (CPU vs GPU, ModelActor vs Ripper)
+python scripts/visualization/visualize_trial_results.py --optimal --compare --model eqcct --results_root results/trials/ --output_dir vis/optimal_comparisons/
+
+# Batch optimal comparison (all models, auto-discovers from results/trials/)
+python scripts/visualization/visualize_trial_results.py --optimal --compare --batch --results_root results/trials/ --output_dir visualizations/optimal_comparisons/
+
+# Batch optimal comparison via shell script (alternative; edit MODELS in script for custom list)
+./scripts/visualization/batch_optimal_comparison.sh results/trials/ visualizations/optimal_comparisons/
 ```
+
+### **Optimal Configuration Plots**
+- **3D Scatter**: CPUs (x) vs Stations (y) vs Runtime/Picking Time (z), with rainbow color scale for concurrent tasks and marker shapes for GPU count and execution mode.
+- **Comparison Table**: GPU columns separated by count (e.g., GPU (1), GPU (2)), plus Mean VRAM, Actor Creation Time, and Model Load Time.
 
 ### **Interactive Plot Features**
 - **3D Resource Plots**: Explore the relationship between **CPUs**, **Total Stations**, and **Runtime/RAM/VRAM** in interactive 3D space.

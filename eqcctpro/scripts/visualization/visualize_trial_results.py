@@ -37,11 +37,14 @@ python visualize_trial_results.py --compare --model eqcct --trial_type cpu --res
 # Optimal Configurations Visualization
 python visualize_trial_results.py --optimal <optimal_config_csv_path> --output_dir vis/optimal/
 
-# Batch optimal configurations visualization
+# Batch optimal configurations visualization (individual per-trial)
 python visualize_trial_results.py --optimal --batch --results_root results/trials/ --output_dir vis/optimal/
 
-# Compare optimal configs across hardware and methods for a model
+# Compare optimal configs for a single model (CPU vs GPU, ModelActor vs Ripper)
 python visualize_trial_results.py --optimal --compare --model eqcct --results_root results/trials/
+
+# Batch optimal comparison (all models, auto-discovers from results_root)
+python visualize_trial_results.py --optimal --compare --batch --results_root results/trials/ --output_dir vis/optimal_comparisons/
 
 Examples:
 ---------
@@ -3474,6 +3477,84 @@ def generate_aggregate_optimal_plots(all_dfs, output_dir):
         print(f"Saved: {output_file}")
 
 
+def discover_models_with_optimal_configs(results_root):
+    """
+    Discover all unique model names that have optimal configuration files.
+    Returns a sorted list of model strings (e.g., ['eqcct', 'phasenet_original']).
+    """
+    if not os.path.exists(results_root):
+        return []
+    
+    seen_models = set()
+    
+    for item in os.listdir(results_root):
+        item_lower = item.lower()
+        if not item_lower.startswith('eval_'):
+            continue
+        
+        item_path = os.path.join(results_root, item)
+        if not os.path.isdir(item_path):
+            continue
+        
+        optimal_files = glob.glob(os.path.join(item_path, 'optimal_configurations_*.csv'))
+        if not optimal_files:
+            continue
+        
+        parts = item_lower.replace('-', '_').split('_')
+        method_idx = -1
+        for i, p in enumerate(parts):
+            if p in ['modelactor', 'ripper']:
+                method_idx = i
+                break
+        if method_idx == -1:
+            continue
+        
+        model_parts = parts[2:method_idx]
+        model_name = '_'.join(model_parts)
+        seen_models.add(model_name)
+    
+    return sorted(seen_models)
+
+
+def batch_compare_optimal_configs(results_root, output_dir="visualizations"):
+    """
+    Run optimal configuration comparison for all models found in results_root.
+    Each model's comparison is saved to output_dir/<model_name>/.
+    """
+    if not os.path.exists(results_root):
+        print(f"Error: Results root not found: {results_root}")
+        return
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    models = discover_models_with_optimal_configs(results_root)
+    
+    if not models:
+        print(f"No models with optimal configuration files found in {results_root}")
+        return
+    
+    print(f"\n{'='*70}")
+    print("BATCH OPTIMAL CONFIGURATION COMPARISON")
+    print(f"{'='*70}")
+    print(f"Results root: {results_root}")
+    print(f"Output dir: {output_dir}")
+    print(f"Found {len(models)} model(s): {', '.join(models)}")
+    
+    for model in models:
+        files = find_optimal_config_files(results_root, model)
+        if not any(files.values()):
+            print(f"  Skipping {model}: No optimal config files found")
+            continue
+        
+        model_output = os.path.join(output_dir, model)
+        print(f"\nComparing optimal configs for: {model}")
+        compare_optimal_configs(model, files, model_output)
+    
+    print(f"\n{'='*70}")
+    print(f"Batch optimal comparison complete! Files saved to: {output_dir}")
+
+
 def find_optimal_config_files(results_root, model):
     """
     Find optimal configuration files for a given model.
@@ -4062,11 +4143,14 @@ Examples:
   # Single file
   python visualize_trial_results.py --optimal results/trials/eval_cpu_eqcct_modelactor/optimal_configurations_cpu.csv
 
-  # Batch optimal visualization
+  # Batch optimal visualization (individual per-trial)
   python visualize_trial_results.py --optimal --batch --results_root results/trials/ --output_dir vis/optimal/
 
-  # Compare optimal configs across hardware and methods for a model
+  # Compare optimal configs for a single model
   python visualize_trial_results.py --optimal --compare --model eqcct --results_root results/trials/
+
+  # Batch optimal comparison (all models, CPU vs GPU, ModelActor vs Ripper)
+  python visualize_trial_results.py --optimal --compare --batch --results_root results/trials/ --output_dir vis/optimal_comparisons/
         """
     )
     
@@ -4107,12 +4191,16 @@ Examples:
     if args.optimal:
         # Optimal configurations visualization mode
         if args.batch:
-            # Batch optimal visualization
-            batch_visualize_optimal(args.results_root, args.output_dir)
+            if args.compare:
+                # Batch optimal comparison: run comparison for all models
+                batch_compare_optimal_configs(args.results_root, args.output_dir)
+            else:
+                # Batch optimal visualization (individual per-trial)
+                batch_visualize_optimal(args.results_root, args.output_dir)
         elif args.compare:
-            # Compare optimal configs across hardware and methods
+            # Compare optimal configs for a single model
             if not args.model:
-                print("Error: --optimal --compare requires the --model argument")
+                print("Error: --optimal --compare requires the --model argument (or use --batch for all models)")
                 parser.print_help()
             else:
                 files = find_optimal_config_files(args.results_root, args.model)
