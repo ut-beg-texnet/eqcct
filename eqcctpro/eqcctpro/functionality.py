@@ -954,10 +954,13 @@ class EvaluateSystem():
                     for num_stations_capped in unique_stations_list:
                         
                         tested_concurrency = set() # Reset for each configuration
-                        # Use a 20% step size for concurrency testing as requested
-                        # This tests 20%, 40%, 60%, 80%, and 100% of the current total stations
-                        step = max(1, int(num_stations_capped * 0.2))
-                        concurrent_predictions_list = sorted(list(set(range(step, num_stations_capped + 1, step))))
+                        # Automatic 20% concurrency stepping if step_size is 0
+                        if self.conc_station_tasks_step_size == 0:
+                            current_step = max(1, int(num_stations_capped * 0.2))
+                        else:
+                            current_step = self.conc_station_tasks_step_size
+
+                        concurrent_predictions_list = sorted(list(set(range(self.min_conc_stations, num_stations_capped + 1, current_step))))
                         
                         # ===== FEASIBILITY CHECK (CPU) =====
                         # Since actors are CAPPED to MEMORY in parallelization.py, all concurrency levels
@@ -1380,9 +1383,14 @@ class EvaluateSystem():
                 unique_stations_list = sorted(list(set(min(s, available_stations) for s in self.stations2use_list)))
                 
                 for stations_capped in unique_stations_list:
+                    # Automatic 20% concurrency stepping if step_size is 0
+                    if self.conc_station_tasks_step_size == 0:
+                        current_step = max(1, int(stations_capped * 0.2))
+                    else:
+                        current_step = self.conc_station_tasks_step_size
+
                     # Check if all prediction variants for this station exist
-                    step = max(1, int(stations_capped * 0.2))
-                    for predictions in range(step, stations_capped + 1, step):
+                    for predictions in range(self.min_conc_stations, stations_capped + 1, current_step):
                         if not self._is_trial_already_tested(
                             num_cpus=len(cpus_to_use),
                             stations=stations_capped,
@@ -1398,7 +1406,7 @@ class EvaluateSystem():
                             break
                     if not all_trials_in_block_done:
                         break
-                
+
                 if all_trials_in_block_done:
                     self.logger.info(f"[SKIP BLOCK] Already tested all station/prediction variants for {len(gpus_to_use)} GPU(s) and {len(cpus_to_use)} CPU(s).")
                     continue

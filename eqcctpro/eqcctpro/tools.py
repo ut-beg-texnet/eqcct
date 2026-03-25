@@ -907,12 +907,19 @@ update_csv updates a completed trial after the code has exited the mseed_predict
 If the trial either was a success or had errors, we update the last row with the success/error information of the trial. 
 """
 def update_csv(csv_filepath, success, error_message):
-    df = pd.read_csv(csv_filepath)
+    df = pd.read_csv(csv_filepath, keep_default_na=False)
     if "Error Message" not in df.columns:
         df["Error Message"] = ""
 
     # Ensure string dtype
     df["Error Message"] = df["Error Message"].astype("string")
+
+    if df.empty:
+        logging.getLogger("eqcctpro").warning(
+            "update_csv: %s has no data rows; skipping Trial Success update (no trial row to patch).",
+            csv_filepath,
+        )
+        return
 
     last_idx = df.index[-1] # Get last row id number
     df.loc[last_idx, 'Trial Success'] = success # Access value at row last_idx, column 'Trial Success' 

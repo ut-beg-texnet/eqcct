@@ -10,6 +10,7 @@ import ast
 import math
 import time
 import json
+import glob
 import queue 
 import obspy
 import psutil
@@ -353,25 +354,25 @@ def parse_time_range(time_string):
     except ValueError as e:
         return None, None, None #Error handling.
     
-def _mseed2nparray(args, files_list, station):
-    ' read miniseed files and from a list of string names and returns 3 dictionaries of numpy arrays, meta data, and time slice info'
-          
-    st = obspy.Stream()
-    # Read and process files
-    for file in files_list:
-        temp_st = obspy.read(file)
+def _eqcct_stream_to_nparray(args, st, station, files_list=None):
+    """
+    EQCCT preprocessing from an in-memory ObsPy Stream for a single station
+    (taper, bandpass, resample, windowing). Used by disk path and RIPPER ray.get path.
+    """
+    if st is None or len(st) == 0:
+        return None
+    st = obspy.Stream(traces=[tr.copy() for tr in st])
+    try:
+        st.merge(fill_value=0)
+    except Exception:
         try:
-            temp_st.merge(fill_value=0)
+            st.merge(fill_value=0)
         except Exception:
-            temp_st.merge(fill_value=0)
-        temp_st.detrend('demean')
-        if temp_st:
-            st += temp_st
-        else:
-            return None  # No data to process, return early
+            pass
+    if len(st) == 0:
+        return None
 
-    # Apply taper and bandpass filter
-    max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts) # 5s of data will be tapered
+    max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)
     st.taper(max_percentage=max_percentage, type='cosine')
     freqmin = 1.0
     freqmax = 45.0
@@ -380,40 +381,40 @@ def _mseed2nparray(args, files_list, station):
             df_filters = args["stations_filters"]
             freqmin = df_filters[df_filters.sta == station].iloc[0]["hp"]
             freqmax = df_filters[df_filters.sta == station].iloc[0]["lp"]
-        except:
+        except Exception:
             pass
     st.filter(type='bandpass', freqmin=freqmin, freqmax=freqmax, corners=2, zerophase=True)
 
-    # Interpolate if necessary
     if any(tr.stats.sampling_rate != 100.0 for tr in st):
         try:
             st.interpolate(100, method="linear")
-        except:
+        except Exception:
             st = _resampling(st)
 
-    # Trim stream to the common start and end times
     st.trim(min(tr.stats.starttime for tr in st), max(tr.stats.endtime for tr in st), pad=True, fill_value=0)
     start_time = st[0].stats.starttime
     end_time = st[0].stats.endtime
 
-    # Prepare metadata
+    if files_list:
+        trace_name = f"{files_list[0].split('/')[-2]}/{files_list[0].split('/')[-1]}"
+    else:
+        trace_name = f"{station}/ray_object_store"
+
     meta = {
         "start_time": start_time,
         "end_time": end_time,
-        "trace_name": f"{files_list[0].split('/')[-2]}/{files_list[0].split('/')[-1]}"
+        "trace_name": trace_name,
     }
-                
-    # Prepare component mapping and types
+
     data_set = {}
     st_times = []
     components = {tr.stats.channel[-1]: tr for tr in st}
     time_shift = int(60 - (args['overlap'] * 60))
 
-    # Define preferred components for each column
     components_list = [
-        ['E', '1'],  # Column 0
-        ['N', '2'],  # Column 1
-        ['Z']        # Column 2
+        ['E', '1'],
+        ['N', '2'],
+        ['Z'],
     ]
 
     current_time = start_time
@@ -427,11 +428,10 @@ def _mseed2nparray(args, files_list, station):
                 if comp in components:
                     tr = components[comp].copy().slice(current_time, window_end)
                     data = tr.data[:6000]
-                    # Pad with zeros if data is shorter than 6000 samples
                     if len(data) < 6000:
                         data = np.pad(data, (0, 6000 - len(data)), 'constant')
                     npz_data[:, col_idx] = data
-                    break  # Stop after finding the first available component
+                    break
 
         key = str(current_time).replace('T', ' ').replace('Z', '')
         data_set[key] = npz_data
@@ -439,7 +439,6 @@ def _mseed2nparray(args, files_list, station):
 
     meta["trace_start_time"] = st_times
 
-    # Metadata population with default placeholders for now
     try:
         meta.update({
             "receiver_code": st[0].stats.station,
@@ -458,8 +457,47 @@ def _mseed2nparray(args, files_list, station):
             "receiver_longitude": 0,
             "receiver_elevation_m": 0
         })
-                    
+
     return meta, data_set, freqmin, freqmax
+
+
+def _mseed2nparray(args, files_list, station):
+    ' read miniseed files and from a list of string names and returns 3 dictionaries of numpy arrays, meta data, and time slice info'
+
+    st = obspy.Stream()
+    for file in files_list:
+        temp_st = obspy.read(file)
+        try:
+            temp_st.merge(fill_value=0)
+        except Exception:
+            temp_st.merge(fill_value=0)
+        temp_st.detrend('demean')
+        if temp_st:
+            st += temp_st
+
+    if not st or len(st) == 0:
+        return None
+    return _eqcct_stream_to_nparray(args, st, station, files_list=files_list)
+
+
+def _load_ripper_mseed_stream(input_dir: str, station_list: list) -> obspy.Stream:
+    """
+    Read all station miniSEED once on the driver (scmlpick-style) for ray.put.
+    Traces are read, merged per file, demeaned — same as the start of per-task disk reads.
+    """
+    full = obspy.Stream()
+    for station in station_list:
+        files_list = sorted(glob.glob(os.path.join(input_dir, str(station), "*mseed")))
+        for file in files_list:
+            temp_st = obspy.read(file)
+            try:
+                temp_st.merge(fill_value=0)
+            except Exception:
+                temp_st.merge(fill_value=0)
+            temp_st.detrend('demean')
+            if temp_st:
+                full += temp_st
+    return full
 
 
 def _output_writter_prediction(meta, csvPr, Ppicks, Pprob, Spicks, Sprob, detection_memory,prob_memory,predict_writer, idx, cq, cqq):
@@ -878,7 +916,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
               ram_safety_cap=None,
               cudnn_headroom=0.20,
               # Ripper mode - uses old task-based approach instead of ModelActors
-              ripper=False): 
+              ripper=False,
+              # If set, use this exact station order/count (deterministic benchmarks).
+              # Skips random.sample(stations2use) and specific_stations filtering.
+              fixed_station_list=None):
     
     """ 
     
@@ -1002,15 +1043,19 @@ def mseed_predictor(input_dir='downloads_mseeds',
     logger.info(f"------- Data Preprocessing for EQCCTPro -------")
     logger.info(f"{len(station_list)} station(s) in {args['input_dir']}")
     
-    if stations2use and stations2use <= len(station_list):  # For System Evaluation Execution
+    if fixed_station_list is not None:
+        station_list = list(fixed_station_list)
+    elif stations2use and stations2use <= len(station_list):  # For System Evaluation Execution
         station_list = random.sample(station_list, stations2use)  # Randomly choose stations from the sample size 
         # log.write(f"Using {len(station_list)} station(s) after selection.")
 
-    if specific_stations is not None: station_list = [x for x in station_list if x in specific_stations] # For "One Use Run" Over a Given Set of Stations (Just Run EQCCTPro on specific_stations)
-    else: station_list = station_list # someone put None thinking that they would be able to run the whole directory in one go
+    if specific_stations is not None and fixed_station_list is None:
+        station_list = [x for x in station_list if x in specific_stations] # For "One Use Run" Over a Given Set of Stations (Just Run EQCCTPro on specific_stations)
+    else:
+        station_list = station_list  # someone put None thinking that they would be able to run the whole directory in one go
     logger.info(f"Using {len(station_list)} selected station(s): {station_list}.") 
 
-    if not station_list or any(looks_like_timechunk_id(x) for x in station_list):
+    if not station_list or (fixed_station_list is None and any(looks_like_timechunk_id(x) for x in station_list)):
         # Rebuild from the actual contents of the timechunk dir
         station_list = build_station_list_from_dir(args['input_dir'])
         logger.info(f"Station list rebuilt from directory because it contained a timechunk id or was empty.") 
@@ -1021,12 +1066,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
     
     # =====================================================================
     # RIPPER MODE: Use old task-based approach (model loaded per task)
-    # This bypasses ModelActors and allows more flexible GPU sharing
-    # 
-    # IMPORTANT: Unlike ModelActor mode (1 actor per GPU with round-robin),
+    # This bypasses ModelActors and allows more flexible GPU sharing.
+    #
+    # Scheduling matches scmlpick ``run_picker`` (bounded queue + ray.wait drain +
+    # backfill). Unlike ModelActor mode (1 actor per GPU with round-robin),
     # ripper mode launches concurrent tasks that each load their own model.
-    # To prevent OOM, we must limit concurrent tasks based on available VRAM.
-    # 
+    # To prevent OOM, we limit in-flight tasks (max_pending_tasks) from VRAM/RAM.
+    #
     # The same automatic Ray restart mechanism applies at EvaluateSystem level
     # for OOM prevention between trials.
     # =====================================================================
@@ -1183,32 +1229,31 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 actual_free_ram_mb = None
             
             if actual_free_ram_mb is not None:
-                # Apply headroom factor for CPU ripper mode
-                # NOTE: CPU ripper mode creates/destroys models per-task, which causes RAM churn.
-                # Lower values (0.70-0.80) are safer but reduce concurrency.
-                # higher values (0.90) maximize concurrency but may cause OOM if system
-                # has other processes competing for RAM.
-                # Use user-defined ram_safety_cap if available, otherwise default to 0.80
-                ripper_ram_headroom = ram_safety_cap if ram_safety_cap is not None else 0.80
-                usable_ram_mb = actual_free_ram_mb * ripper_ram_headroom
+                # Budget = fraction of TOTAL installed RAM (same idea as get_available_ram_mb).
+                # Using only psutil.available * cap wrongly caps Ripper when much RAM is
+                # cached/freeable but not currently in the "available" counter — e.g. requesting
+                # 150 tasks while "available" implies ~140 tasks worth of headroom.
+                ripper_ram_cap = ram_safety_cap if ram_safety_cap is not None else 0.95
+                usable_ram_mb = system_ram_total_mb * ripper_ram_cap
                 max_safe_concurrent = max(1, int(usable_ram_mb / ram_per_task_mb))
                 
                 # Cap max_pending_tasks to the RAM-safe limit
                 requested_concurrency = number_of_concurrent_station_predictions
                 if requested_concurrency > max_safe_concurrent:
-                    logger.warning(f"RIPPER RAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
-                                 f"but RAM only allows {max_safe_concurrent} "
-                                 f"(Available: {actual_free_ram_mb:.0f} MB × {ripper_ram_headroom:.0%} / {ram_per_task_mb:.0f} MB per task)")
+                    logger.warning(
+                        f"RIPPER RAM LIMIT: Requested {requested_concurrency} concurrent tasks, "
+                        f"but RAM budget only allows {max_safe_concurrent} "
+                        f"({ripper_ram_cap:.0%} of total {system_ram_total_mb:.0f} MB / {ram_per_task_mb:.0f} MB per task)"
+                    )
                     max_pending_tasks = max_safe_concurrent
                 else:
                     max_pending_tasks = requested_concurrency
                 
-                logger.info(f"RAM-aware concurrency: {max_pending_tasks} concurrent tasks "
-                           f"(Available: {actual_free_ram_mb:.0f} MB, Usable: {usable_ram_mb:.0f} MB, "
-                           f"per-task: {ram_per_task_mb:.0f} MB)")
-        
-        # Submit tasks to ray in a queue (old methodology)
-        tasks_queue = []
+                logger.info(
+                    f"RAM-aware concurrency: {max_pending_tasks} concurrent tasks "
+                    f"(Total RAM: {system_ram_total_mb:.0f} MB, budget {ripper_ram_cap:.0%} → {usable_ram_mb:.0f} MB, "
+                    f"currently available: {actual_free_ram_mb:.0f} MB, per-task estimate: {ram_per_task_mb:.0f} MB)"
+                )
         
         # ===== TIMING: End of setup, start of processing =====
         setup_end_time = time.time()
@@ -1235,68 +1280,65 @@ def mseed_predictor(input_dir='downloads_mseeds',
         logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
         logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
 
-        # ===== TIMING: Collect model and waveform load times for averaging =====
-        model_load_times = []
-        waveform_load_times = []
-        
-        # Concurrent Prediction(s) Parallel Processing - RIPPER MODE
-        try: 
-            for i in range(len(tasks_predictor)):
-                while True:
-                    if len(tasks_queue) < max_pending_tasks:
-                        if model_type_lower == 'seisbench':
-                            # SeisBench ripper mode
-                            if use_gpu is False:
-                                tasks_queue.append(ripper_parallel_predict_seisbench.remote(
-                                    tasks_predictor[i], False, None,
-                                    parent_model_name=seisbench_parent_model,
-                                    child_model_name=seisbench_child_model,
-                                    Detection_threshold=Detection_threshold))
-                            else:
-                                # CRITICAL: Use max_pending_tasks for GPU allocation, not the original request
-                                # This ensures Ray distributes tasks evenly across GPUs
-                                gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
-                                tasks_queue.append(ripper_parallel_predict_seisbench.options(
-                                    num_gpus=gpu_allocation_per_task, num_cpus=0).remote(
-                                    tasks_predictor[i], True, gpu_memory_limit_mb,
-                                    parent_model_name=seisbench_parent_model,
-                                    child_model_name=seisbench_child_model,
-                                    Detection_threshold=Detection_threshold))
-                        else:
-                            # EQCCT ripper mode
-                            if use_gpu is False:
-                                tasks_queue.append(ripper_parallel_predict_eqcct.remote(
-                                    tasks_predictor[i], False, None))
-                            else:
-                                # CRITICAL: Use max_pending_tasks for GPU allocation, not the original request
-                                # This ensures Ray distributes tasks evenly across GPUs
-                                gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
-                                tasks_queue.append(ripper_parallel_predict_eqcct.options(
-                                    num_gpus=gpu_allocation_per_task, num_cpus=0).remote(
-                                    tasks_predictor[i], True, gpu_memory_limit_mb))
-                        break
-                    else:
-                        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-                        for finished_task in tasks_finished:
-                            result = ray.get(finished_task)
-                            log_entry, ml_time, wf_time = result  # Unpack tuple: (log_message, model_load_time, waveform_load_time)
-                            logger.info(f'{log_entry}')
-                            if ml_time is not None:
-                                model_load_times.append(ml_time)
-                            if wf_time is not None:
-                                waveform_load_times.append(wf_time)
+        # scmlpick-style in-memory refs: one ray.put for the full Stream and one for args so each
+        # .remote() only ships ObjectRefs, not N copies of waveforms / config.
+        merged_stream = _load_ripper_mseed_stream(args["input_dir"], station_list)
+        if len(merged_stream) == 0:
+            logger.warning(
+                "RIPPER: no traces preloaded from disk; tasks will read mSEED per station (no shared object store Stream)."
+            )
+            tasks_predictor_ripper = tasks_predictor
+        else:
+            logger.info(
+                f"RIPPER: ray.put shared Stream ({len(merged_stream)} trace(s)) and args for {len(station_list)} station task(s)."
+            )
+            args_ref = ray.put(args)
+            stream_ref = ray.put(merged_stream)
+            tasks_predictor_ripper = [
+                [f"({i+1}/{len(station_list)})", station_list[i], out_dir, args_ref, stream_ref]
+                for i in range(len(station_list))
+            ]
 
-            # After adding all the tasks to queue, process what's left
-            while tasks_queue:
-                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-                for finished_task in tasks_finished:
-                    result = ray.get(finished_task)
-                    log_entry, ml_time, wf_time = result  # Unpack tuple: (log_message, model_load_time, waveform_load_time)
-                    logger.info(f'{log_entry}')
-                    if ml_time is not None:
-                        model_load_times.append(ml_time)
-                    if wf_time is not None:
-                        waveform_load_times.append(wf_time)
+        # Concurrent Prediction(s) Parallel Processing - RIPPER MODE
+        # Same scheduling pattern as scmlpick run_picker: seed queue, wait(1), backfill.
+        try:
+            def _ripper_submit_index(i: int):
+                if model_type_lower == "seisbench":
+                    if use_gpu is False:
+                        return ripper_parallel_predict_seisbench.remote(
+                            tasks_predictor_ripper[i],
+                            False,
+                            None,
+                            parent_model_name=seisbench_parent_model,
+                            child_model_name=seisbench_child_model,
+                            Detection_threshold=Detection_threshold,
+                        )
+                    gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
+                    return ripper_parallel_predict_seisbench.options(
+                        num_gpus=gpu_allocation_per_task, num_cpus=0
+                    ).remote(
+                        tasks_predictor_ripper[i],
+                        True,
+                        gpu_memory_limit_mb,
+                        parent_model_name=seisbench_parent_model,
+                        child_model_name=seisbench_child_model,
+                        Detection_threshold=Detection_threshold,
+                    )
+                if use_gpu is False:
+                    return ripper_parallel_predict_eqcct.remote(
+                        tasks_predictor_ripper[i], False, None
+                    )
+                gpu_allocation_per_task = len(gpu_id) / max_pending_tasks
+                return ripper_parallel_predict_eqcct.options(
+                    num_gpus=gpu_allocation_per_task, num_cpus=0
+                ).remote(tasks_predictor_ripper[i], True, gpu_memory_limit_mb)
+
+            model_load_times, waveform_load_times = _run_ripper_parallel_queue_scmlpick(
+                logger=logger,
+                tasks_predictor=tasks_predictor_ripper,
+                max_tasks_queue=max_pending_tasks,
+                submit_index=_ripper_submit_index,
+            )
             logger.info("")
             
             # Calculate average model load time
@@ -1366,7 +1408,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 "Model Used": model_used,
                 "Trial Success": "",
                 "Error Message": str(""),
-                "Comments": "[RIPPER MODE] Task-based approach (no ModelActors)",
+                "Comments": "[RIPPER MODE] Task-based approach (no ModelActors); scmlpick-style task queue",
             }
             append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
             logger.info(f"Successfully saved trial data to CSV at {test_csv_filepath}")
@@ -1879,12 +1921,32 @@ def mseed_predictor(input_dir='downloads_mseeds',
     logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
     logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
 
+    # scmlpick-style shared refs: one copy of waveforms + args in the object store (same as RIPPER).
+    station_codes_for_stream = [tasks_predictor[i][1] for i in range(len(tasks_predictor))]
+    merged_stream_ma = _load_ripper_mseed_stream(args["input_dir"], station_codes_for_stream)
+    if len(merged_stream_ma) == 0:
+        logger.warning(
+            "ModelActor mode: no traces preloaded; tasks will read mSEED from disk per station."
+        )
+        tasks_predictor_ma = tasks_predictor
+    else:
+        logger.info(
+            f"ModelActor mode: ray.put shared Stream ({len(merged_stream_ma)} trace(s)) and args for "
+            f"{len(tasks_predictor)} station task(s)."
+        )
+        args_ref_ma = ray.put(args)
+        stream_ref_ma = ray.put(merged_stream_ma)
+        tasks_predictor_ma = [
+            [tasks_predictor[i][0], tasks_predictor[i][1], tasks_predictor[i][2], args_ref_ma, stream_ref_ma]
+            for i in range(len(tasks_predictor))
+        ]
+
     # ===== TIMING: Collect waveform load times for averaging =====
     waveform_load_times = []
 
     # Concurrent Prediction(s) Parallel Processing
     try: 
-        for i in range(len(tasks_predictor)):
+        for i in range(len(tasks_predictor_ma)):
             while True:
                 # Add new task to queue while max is not reached
                 if len(tasks_queue) < max_pending_tasks:
@@ -1895,19 +1957,19 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     if model_type_lower == 'seisbench':
                         # SeisBench models use parallel_predict_seisbench
                         if use_gpu is False:
-                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
+                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
                         elif use_gpu is True:
                             # Don't allocate GPUs to workers, only to model actors
                             # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
-                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
+                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
                     else:
                         # EQCCT models use parallel_predict (original)
                         if use_gpu is False:
-                            tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor[i], model_actor, False))
+                            tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
                         elif use_gpu is True:
                             # Don't allocate GPUs to workers, only to model actors
                             # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
-                            tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor[i], model_actor, True))
+                            tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
                     break
                 # If there are more tasks than maximum, just process them
                 else:
@@ -2151,17 +2213,24 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     """
     Prediction function for SeisBench models.
     Uses mseed2stream_3c for preprocessing and SeisBenchModelActor for predictions.
+    ``predict_args`` may be ``(pos, station, out_dir, args)`` or 5-tuple with
+    ``args_ref`` / ``stream_ref`` (Ray ObjectRefs, scmlpick-style).
     """
     import glob
     import shutil
     import csv
     import logging
     from logging.handlers import QueueHandler
-    from pathlib import Path
-    from eqcctpro.seisbench_models import mseed2stream_3c
-    
-    pos, station, out_dir, args = predict_args
-    
+    from eqcctpro.seisbench_models import mseed2stream_3c, process_raw_station_stream_3c
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
     # Set up logger to forward to the main listener
     logger = logging.getLogger(f"eqcctpro.worker.{station}")
     logger.setLevel(logging.INFO)
@@ -2194,20 +2263,31 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     csvPr_gen.flush()
     
     start_Predicting = time.time()
-    files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-    
-    if not files_list:
-        csvPr_gen.close()
-        return (f"{pos} {station}: FAILED - No mSEED files found.", None)
-    
+
     # ===== TIMING: Track waveform loading time =====
     waveform_load_start = time.time()
     try:
-        # Use SeisBench preprocessing
-        stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
+        if use_shared_stream:
+            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+            st_sel = obspy.Stream(
+                traces=[
+                    tr.copy()
+                    for tr in full_st
+                    if str(tr.stats.station).strip() == str(station).strip()
+                ]
+            )
+            if len(st_sel) == 0:
+                csvPr_gen.close()
+                return (f"{pos} {station}: FAILED - No traces for station in shared Stream.", None)
+            stream3c, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
+        else:
+            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+            if not files_list:
+                csvPr_gen.close()
+                return (f"{pos} {station}: FAILED - No mSEED files found.", None)
+            stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
     except Exception as e:
         csvPr_gen.close()
-        # Provide more specific error message
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
         return (f"{pos} {station}: {err_msg}", None)
     waveform_load_time = time.time() - waveform_load_start
@@ -2336,7 +2416,9 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
 @ray.remote
 def parallel_predict(predict_args, model_actor, gpu=False):
     """
-    Modified to use shared ModelActor instead of loading model per task
+    Uses shared ModelActor for EQCCT inference.
+    ``predict_args`` may be ``(pos, station, out_dir, args)`` or 5-tuple with
+    Ray ObjectRefs for args and merged mSEED Stream (scmlpick-style).
     """
     import glob
     import shutil
@@ -2369,11 +2451,19 @@ def parallel_predict(predict_args, model_actor, gpu=False):
         pass
 
     from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
-    pos, station, out_dir, args = predict_args
-    
-    # NOTE: We removed the model loading code that was causing OOM errors
-    # The model is now shared via the model_actor
-    
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
+    logger = logging.getLogger(f"eqcctpro.worker.{station}")
+
+    # NOTE: Model is shared via model_actor when model_actor is not None
+
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
 
@@ -2400,14 +2490,31 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     csvPr_gen.flush()
     
     start_Predicting = time.time()
-    files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-    
+
     # ===== TIMING: Track waveform loading time =====
     waveform_load_start = time.time()
     try:
-        meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
+        if use_shared_stream:
+            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+            st_sel = obspy.Stream(
+                traces=[
+                    tr.copy()
+                    for tr in full_st
+                    if str(tr.stats.station).strip() == str(station).strip()
+                ]
+            )
+            if len(st_sel) == 0:
+                return (f"{pos} {station}: FAILED no traces for station in shared Stream.", None)
+            packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+            if packed is None:
+                return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
+            meta, data_set, hp, lp = packed
+        else:
+            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+            meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
+            if meta is None:
+                return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
     except Exception as e:
-        # Provide more specific error message
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
         return (f"{pos} {station}: {err_msg}", None)
     waveform_load_time = time.time() - waveform_load_start
@@ -2466,9 +2573,71 @@ def parallel_predict(predict_args, model_actor, gpu=False):
 # RIPPER MODE FUNCTIONS - Task-based approach (old methodology)
 # These functions load the model inside each task, then release it.
 # This allows dynamic GPU memory sharing but has model loading overhead.
+#
+# Task scheduling in mseed_predictor (ripper=True) follows the same pattern as
+# scmlpick ``run_picker`` (scmlpick/seiscomp/bin/scmlpick): seed up to
+# ``max_tasks_queue`` in-flight ``ray.remote`` calls, then ``ray.wait`` with
+# ``num_returns=1`` and backfill the queue while more jobs remain.
 # =====================================================================
 
-@ray.remote(max_calls=1)
+
+def _run_ripper_parallel_queue_scmlpick(
+    *,
+    logger,
+    tasks_predictor: list,
+    max_tasks_queue: int,
+    submit_index,
+):
+    """
+    Bounded Ripper task pool matching scmlpick's run_picker loop:
+    prefill min(max_tasks_queue, total), drain with ray.wait(..., 1), backfill.
+    ``submit_index(i)`` must return an ObjectRef for tasks_predictor[i].
+    """
+    total_tasks = len(tasks_predictor)
+    model_load_times: list = []
+    waveform_load_times: list = []
+
+    if total_tasks == 0:
+        return model_load_times, waveform_load_times
+
+    tasks_queue: list = []
+    idx_iter = iter(range(total_tasks))
+
+    for _ in range(min(max_tasks_queue, total_tasks)):
+        try:
+            i = next(idx_iter)
+            tasks_queue.append(submit_index(i))
+        except StopIteration:
+            break
+
+    while tasks_queue:
+        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+        for finished_task in tasks_finished:
+            try:
+                result = ray.get(finished_task)
+            except ray.exceptions.RayTaskError as e:
+                logger.warning("RIPPER task failed: %s", e.as_instanceof_cause())
+                continue
+            except ray.exceptions.RayError as e:
+                logger.warning("RIPPER Ray error: %s", e)
+                continue
+            log_entry, ml_time, wf_time = result
+            logger.info("%s", log_entry)
+            if ml_time is not None:
+                model_load_times.append(ml_time)
+            if wf_time is not None:
+                waveform_load_times.append(wf_time)
+        try:
+            while len(tasks_queue) < max_tasks_queue:
+                i = next(idx_iter)
+                tasks_queue.append(submit_index(i))
+        except StopIteration:
+            pass
+
+    return model_load_times, waveform_load_times
+
+
+@ray.remote(max_calls=1, max_retries=1)
 def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=None):
     """
     RIPPER MODE: Old task-based parallel_predict for EQCCT models.
@@ -2476,7 +2645,8 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     This allows more flexible GPU memory sharing than the ModelActor approach.
     
     Args:
-        predict_args: Tuple of (pos, station, out_dir, args)
+        predict_args: ``(pos, station, out_dir, args)`` or
+            ``(pos, station, out_dir, args_ref, stream_ref)`` (Ray ObjectRefs, scmlpick-style).
         gpu: Whether to use GPU
         gpu_memory_limit_mb: VRAM limit per task in MB
     """
@@ -2522,8 +2692,15 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
         pass
 
     from eqcctpro.eqcct_tf_models import Patches, PatchEncoder, StochasticDepth, PreLoadGeneratorTest, load_eqcct_model
-    pos, station, out_dir, args = predict_args
-    
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
     # RIPPER MODE: Load the model inside this task (old approach)
     # ===== TIMING: Track model load time for ripper mode analysis =====
     model_load_start = time.time()
@@ -2557,14 +2734,37 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     csvPr_gen.flush()
     
     start_Predicting = time.time()
-    files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-    
+
     # ===== TIMING: Track waveform loading time =====
     waveform_load_start = time.time()
     try:
-        meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
+        if use_shared_stream:
+            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+            st_sel = obspy.Stream(
+                traces=[
+                    tr.copy()
+                    for tr in full_st
+                    if str(tr.stats.station).strip() == str(station).strip()
+                ]
+            )
+            if len(st_sel) == 0:
+                return (
+                    f"{pos} {station}: FAILED no traces for station in shared Stream.",
+                    model_load_time,
+                    None,
+                )
+            packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+        else:
+            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+            packed = _mseed2nparray(args, files_list, station)
+        if packed is None:
+            return (
+                f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).",
+                model_load_time,
+                None,
+            )
+        meta, data_set, hp, lp = packed
     except Exception as e:
-        # Provide more specific error message
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
         return (f"{pos} {station}: {err_msg}", model_load_time, None)
     waveform_load_time = time.time() - waveform_load_start
@@ -2607,7 +2807,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
         return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
 
 
-@ray.remote(max_calls=1)
+@ray.remote(max_calls=1, max_retries=1)
 def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_mb=None, 
                                        parent_model_name=None, child_model_name=None,
                                        Detection_threshold=0.3):
@@ -2617,7 +2817,8 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     This allows more flexible GPU memory sharing than the ModelActor approach.
     
     Args:
-        predict_args: Tuple of (pos, station, out_dir, args)
+        predict_args: ``(pos, station, out_dir, args)`` or
+            ``(pos, station, out_dir, args_ref, stream_ref)`` (Ray ObjectRefs).
         gpu: Whether to use GPU
         gpu_memory_limit_mb: VRAM limit per task in MB (not used for PyTorch, but kept for API compatibility)
         parent_model_name: SeisBench parent model name (e.g., 'PhaseNet')
@@ -2629,11 +2830,17 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     import csv
     import logging
     import sys
-    
-    pos, station, out_dir, args = predict_args
-    
+
+    if len(predict_args) == 5:
+        pos, station, out_dir, args_ref, stream_ref = predict_args
+        args = ray.get(args_ref) if isinstance(args_ref, ray.ObjectRef) else args_ref
+        use_shared_stream = True
+    else:
+        pos, station, out_dir, args = predict_args
+        use_shared_stream = False
+
     # RIPPER MODE: Load the SeisBench model inside this task using SeisBenchModels class
-    from eqcctpro.seisbench_models import SeisBenchModels, mseed2stream_3c
+    from eqcctpro.seisbench_models import SeisBenchModels, mseed2stream_3c, process_raw_station_stream_3c
     import torch
     
     device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
@@ -2682,25 +2889,40 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     csvPr_gen.flush()
     
     start_Predicting = time.time()
-    files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-    
+
     # ===== TIMING: Track waveform loading time =====
     waveform_load_start = time.time()
     try:
-        # Use mseed2stream_3c for SeisBench preprocessing - returns (stream, freqmin, freqmax)
-        result = mseed2stream_3c(args, files_list, station)
-        if result is None:
-            csvPr_gen.close()
-            return (f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).", model_load_time, None)
-        
-        stream, freqmin, freqmax = result
+        if use_shared_stream:
+            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+            st_sel = obspy.Stream(
+                traces=[
+                    tr.copy()
+                    for tr in full_st
+                    if str(tr.stats.station).strip() == str(station).strip()
+                ]
+            )
+            if len(st_sel) == 0:
+                csvPr_gen.close()
+                return (
+                    f"{pos} {station}: FAILED no traces for station in shared Stream.",
+                    model_load_time,
+                    None,
+                )
+            stream, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
+        else:
+            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+            result = mseed2stream_3c(args, files_list, station)
+            if result is None:
+                csvPr_gen.close()
+                return (f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).", model_load_time, None)
+            stream, freqmin, freqmax = result
     except Exception as e:
         csvPr_gen.close()
-        # Provide more specific error message
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
         return (f"{pos} {station}: {err_msg}", model_load_time, None)
     waveform_load_time = time.time() - waveform_load_start
-    
+
     try:
         # Run SeisBench model prediction using the model wrapper's classify method
         # IMPORTANT: strict=False and flexible_horizontal_components=True are needed
