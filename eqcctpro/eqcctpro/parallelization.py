@@ -500,6 +500,38 @@ def _load_ripper_mseed_stream(input_dir: str, station_list: list) -> obspy.Strea
     return full
 
 
+def _trace_matches_station_task(tr, station_id: str) -> bool:
+    """
+    Map timechunk subdirectory names to ObsPy trace headers.
+
+    ``build_station_list_from_dir`` uses directory basenames (e.g. ``TX_EF09``).
+    MiniSEED stores network and station separately (``TX`` + ``EF09``), so comparing
+    only ``tr.stats.station`` to ``TX_EF09`` never matches.
+    """
+    sid = str(station_id).strip()
+    if not sid:
+        return False
+    net = str(tr.stats.network).strip()
+    sta = str(tr.stats.station).strip()
+    if sta == sid:
+        return True
+    if net and f"{net}_{sta}".upper() == sid.upper():
+        return True
+    if net and "_" in sid:
+        prefix, rest = sid.split("_", 1)
+        if prefix.upper() == net.upper() and rest.strip().upper() == sta.upper():
+            return True
+    dotted = sid.replace("_", ".", 1) if "_" in sid else sid
+    if net and f"{net}.{sta}".upper() == dotted.upper():
+        return True
+    return False
+
+
+def _stream_select_for_station_task(full_st: obspy.Stream, station: str) -> obspy.Stream:
+    """Subset a merged Stream to traces for one task station id (subdir name)."""
+    return obspy.Stream(traces=[tr.copy() for tr in full_st if _trace_matches_station_task(tr, station)])
+
+
 def _output_writter_prediction(meta, csvPr, Ppicks, Pprob, Spicks, Sprob, detection_memory,prob_memory,predict_writer, idx, cq, cqq):
 
     """ 
@@ -2269,13 +2301,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = obspy.Stream(
-                traces=[
-                    tr.copy()
-                    for tr in full_st
-                    if str(tr.stats.station).strip() == str(station).strip()
-                ]
-            )
+            st_sel = _stream_select_for_station_task(full_st, station)
             if len(st_sel) == 0:
                 csvPr_gen.close()
                 return (f"{pos} {station}: FAILED - No traces for station in shared Stream.", None)
@@ -2496,13 +2522,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = obspy.Stream(
-                traces=[
-                    tr.copy()
-                    for tr in full_st
-                    if str(tr.stats.station).strip() == str(station).strip()
-                ]
-            )
+            st_sel = _stream_select_for_station_task(full_st, station)
             if len(st_sel) == 0:
                 return (f"{pos} {station}: FAILED no traces for station in shared Stream.", None)
             packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
@@ -2740,13 +2760,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = obspy.Stream(
-                traces=[
-                    tr.copy()
-                    for tr in full_st
-                    if str(tr.stats.station).strip() == str(station).strip()
-                ]
-            )
+            st_sel = _stream_select_for_station_task(full_st, station)
             if len(st_sel) == 0:
                 return (
                     f"{pos} {station}: FAILED no traces for station in shared Stream.",
@@ -2895,13 +2909,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = obspy.Stream(
-                traces=[
-                    tr.copy()
-                    for tr in full_st
-                    if str(tr.stats.station).strip() == str(station).strip()
-                ]
-            )
+            st_sel = _stream_select_for_station_task(full_st, station)
             if len(st_sel) == 0:
                 csvPr_gen.close()
                 return (
