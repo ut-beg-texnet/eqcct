@@ -675,6 +675,27 @@ class EvaluateSystem():
         gpus_norm = tuple(sorted(int(x) for x in gpus_to_use))
         return f"cpus={int(num_cpus)}|gpus={gpus_norm}|stations={int(stations)}|timechunks={int(timechunks)}|model={model}"
 
+    def _concurrency_test_values_for_station_count(self, num_stations_capped: int) -> list:
+        """Concurrency levels to benchmark for station count N.
+
+        If conc_station_tasks_step_size == 0: use 20%, 40%, 60%, 80%, 100% of N (rounded, deduped),
+        then keep values >= min_conc_stations. This avoids starting at 1 concurrent task when the
+        step is 2+ (e.g. N=10 → 2,4,6,8,10 not 1,3,5,7,9).
+
+        Otherwise: range(min_conc_stations, N+1, step) with step = conc_station_tasks_step_size.
+        """
+        if num_stations_capped <= 0:
+            return []
+        if self.conc_station_tasks_step_size == 0:
+            raw = []
+            for frac in (0.2, 0.4, 0.6, 0.8, 1.0):
+                v = min(num_stations_capped, max(1, int(round(num_stations_capped * frac))))
+                raw.append(v)
+            vals = sorted(set(raw))
+            return [v for v in vals if v >= self.min_conc_stations]
+        step = max(1, self.conc_station_tasks_step_size)
+        return sorted(set(range(self.min_conc_stations, num_stations_capped + 1, step)))
+
     def _load_existing_trial_keys(self, csv_path: str) -> tuple[set[str], dict[str, set[int]]]:
         """Load both exact trial keys and prediction-fuzzy keys from an existing CSV.
         
@@ -954,13 +975,8 @@ class EvaluateSystem():
                     for num_stations_capped in unique_stations_list:
                         
                         tested_concurrency = set() # Reset for each configuration
-                        # Automatic 20% concurrency stepping if step_size is 0
-                        if self.conc_station_tasks_step_size == 0:
-                            current_step = max(1, int(num_stations_capped * 0.2))
-                        else:
-                            current_step = self.conc_station_tasks_step_size
-
-                        concurrent_predictions_list = sorted(list(set(range(self.min_conc_stations, num_stations_capped + 1, current_step))))
+                        concurrent_predictions_list = self._concurrency_test_values_for_station_count(num_stations_capped)
+                        current_step = max(1, int(num_stations_capped * 0.2)) if self.conc_station_tasks_step_size == 0 else max(1, self.conc_station_tasks_step_size)
                         
                         # ===== FEASIBILITY CHECK (CPU) =====
                         # Since actors are CAPPED to MEMORY in parallelization.py, all concurrency levels
@@ -1044,8 +1060,8 @@ class EvaluateSystem():
                         if not valid_predictions and num_stations_capped > 0:
                             # If even the first step (20%) is too much, try just 1 prediction or the max possible
                             if max_actors >= 1:
-                                valid_predictions = [min(step, max_actors)]
-                                self.logger.info(f"Station count {num_stations_capped}: 20% step ({step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
+                                valid_predictions = [min(current_step, max_actors)]
+                                self.logger.info(f"Station count {num_stations_capped}: 20% step ({current_step}) exceeds max actors ({max_actors}). Using max={valid_predictions[0]}")
                             else:
                                 self.logger.warning(f"Station count {num_stations_capped}: Cannot spawn any ModelActors. Skipping.")
                                 continue
@@ -1383,14 +1399,8 @@ class EvaluateSystem():
                 unique_stations_list = sorted(list(set(min(s, available_stations) for s in self.stations2use_list)))
                 
                 for stations_capped in unique_stations_list:
-                    # Automatic 20% concurrency stepping if step_size is 0
-                    if self.conc_station_tasks_step_size == 0:
-                        current_step = max(1, int(stations_capped * 0.2))
-                    else:
-                        current_step = self.conc_station_tasks_step_size
-
                     # Check if all prediction variants for this station exist
-                    for predictions in range(self.min_conc_stations, stations_capped + 1, current_step):
+                    for predictions in self._concurrency_test_values_for_station_count(stations_capped):
                         if not self._is_trial_already_tested(
                             num_cpus=len(cpus_to_use),
                             stations=stations_capped,
@@ -1586,10 +1596,8 @@ class EvaluateSystem():
                     continue
 
                 for stations_capped in unique_stations_list:
-                    
-                    # Use a 20% step size for concurrency testing as requested
-                    step = max(1, int(stations_capped * 0.2))
-                    concurrent_predictions_list = sorted(list(set(range(step, stations_capped + 1, step))))
+                    concurrent_predictions_list = self._concurrency_test_values_for_station_count(stations_capped)
+                    step = max(1, int(stations_capped * 0.2)) if self.conc_station_tasks_step_size == 0 else max(1, self.conc_station_tasks_step_size)
                     
                     # ===== FEASIBILITY CHECK =====
                     # Since actors are CAPPED to MEMORY in parallelization.py, all concurrency levels

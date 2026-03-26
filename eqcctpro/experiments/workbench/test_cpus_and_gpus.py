@@ -26,6 +26,14 @@ parser.add_argument('--model', type=str, default='eqcct',
 parser.add_argument('--cpu_start', type=int, default=0, help='Start of CPU core range')
 parser.add_argument('--cpu_end', type=int, default=40, help='End of CPU core range')
 parser.add_argument('--gpus', type=str, default='0,1', help='Comma-separated GPU indices (e.g. 0,1)')
+parser.add_argument(
+    '--conc_step',
+    type=int,
+    default=0,
+    metavar='N',
+    help=('Station-task concurrency step in EvaluateSystem: 0 = automatic 20%% of station count '
+          '(paper default); use N>0 for fixed step (e.g. 1 tests every concurrency level).'),
+)
 args = parser.parse_args()
 
 # Map arguments to settings
@@ -54,7 +62,7 @@ eval_defaults = {
     'min_cpu_amount': 5,
     'cpu_test_step_size': 3,
     'min_conc_stations': 1,
-    'conc_station_tasks_step_size': 1,
+    'conc_station_tasks_step_size': args.conc_step,
     'ram_safety_cap': 0.95,
     'tmp_dir': tmp_dir,
     'start_time': '2026-01-26 10:22:07',

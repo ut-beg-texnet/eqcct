@@ -2,11 +2,11 @@
 """Run all SeisBench models CPU sequential classify for 250 and 580 stations to verify paper claims."""
 import os
 import sys
-import time
 import glob
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from eqcctpro.tools import build_station_list_from_dir
+from eqcctpro.timing_util import monotonic_s
 from eqcctpro.seisbench_models import SeisBenchModels, mseed2stream_3c
 
 BASE = "/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro"
@@ -26,7 +26,7 @@ def run_model_cpu_sequential(input_mseed_dir, n_stations, parent, child):
     stations = build_station_list_from_dir(input_mseed_dir)[:n_stations]
     sb = SeisBenchModels(parent, child)
     model = sb.load_model()
-    start = time.time()
+    start = monotonic_s()
     for i, sta in enumerate(stations):
         files = glob.glob(os.path.join(input_mseed_dir, sta, "*mseed"))
         if not files:
@@ -35,7 +35,7 @@ def run_model_cpu_sequential(input_mseed_dir, n_stations, parent, child):
         model.classify(stream)
         if (i + 1) % 50 == 0:
             print(f"    {model_name}: {i+1}/{n_stations}...")
-    elapsed = time.time() - start
+    elapsed = monotonic_s() - start
     return elapsed
 
 

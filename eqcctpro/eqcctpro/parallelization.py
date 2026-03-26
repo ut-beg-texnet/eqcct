@@ -21,6 +21,7 @@ import platform
 import traceback
 import numpy as np
 from eqcctpro.tools import *
+from eqcctpro.timing_util import cuda_synchronize_best_effort, monotonic_s
 from os import listdir
 from obspy import UTCDateTime
 from datetime import datetime, timedelta 
@@ -1030,7 +1031,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # tf_environ(gpu_id=1, gpu_memory_limit_mb=gpu_memory_limit_mb, gpus_to_use=gpu_id, intra_threads=intra_threads, inter_threads=inter_threads)
 
     # ===== TIMING: Start tracking total trial time =====
-    trial_start_time = time.time()
+    trial_start_time = monotonic_s()
 
     args = {
     "input_dir": input_dir,
@@ -1110,7 +1111,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # =====================================================================
     if ripper:
         # ===== TIMING: Ripper mode has no actor creation, just setup time =====
-        setup_start_time = time.time()
+        setup_start_time = monotonic_s()
         
         logger.info(f"===== RIPPER MODE ENABLED =====")
         logger.info(f"Using old task-based approach (model loaded per task)")
@@ -1288,13 +1289,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 )
         
         # ===== TIMING: End of setup, start of processing =====
-        setup_end_time = time.time()
+        setup_end_time = monotonic_s()
         setup_time_seconds = setup_end_time - setup_start_time
         logger.info(f"Ripper mode setup completed in {setup_time_seconds:.2f} seconds")
         
         logger.info(f"Starting EQCCTPro parallelized waveform processing (RIPPER MODE)...") 
         logger.info("")
-        start_time = time.time() 
+        start_time = monotonic_s() 
         
         if model_type_lower == 'seisbench':
             logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) [RIPPER] -------")
@@ -1396,7 +1397,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
             raise
 
         logger.info(f"------- Parallel Station Waveform Processing Complete [RIPPER MODE] -------")
-        end_time = time.time()
+        end_time = monotonic_s()
         logger.info(f"Picks saved at {output_dir}. Process Runtime: {end_time - start_time:.2f} s")
 
         if testing_gpu is not None: 
@@ -1452,7 +1453,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # =====================================================================
     
     # ===== TIMING: Start tracking actor creation time =====
-    actor_creation_start_time = time.time()
+    actor_creation_start_time = monotonic_s()
     
     # CREATE MODEL ACTOR(S) - Add this before the task loop
     logger.info(f"Creating model actor(s)...") 
@@ -1913,7 +1914,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
 
     # ===== TIMING: End of actor creation =====
-    actor_creation_end_time = time.time()
+    actor_creation_end_time = monotonic_s()
     actor_creation_time_seconds = actor_creation_end_time - actor_creation_start_time
     logger.info(f"Actor creation completed in {actor_creation_time_seconds:.2f} seconds")
 
@@ -1933,7 +1934,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     
     logger.info(f"Starting EQCCTPro parallelized waveform processing...") 
     logger.info("")
-    start_time = time.time() 
+    start_time = monotonic_s() 
     model_type_lower = model_type.lower() if model_type else 'eqcct'
     if model_type_lower == 'seisbench':
         logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) -------")
@@ -2040,7 +2041,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         raise  # Re-raise to see the error
 
     logger.info(f"------- Parallel Station Waveform Processing Complete For {starttime} to {endtime} Timechunk-------")
-    end_time = time.time()
+    end_time = monotonic_s()
     logger.info(f"Picks saved at {output_dir}Process Runtime: {end_time - start_time:.2f} s")
 
     if testing_gpu is not None: 
@@ -2199,6 +2200,7 @@ class SeisBenchModelActor:
             try:
                 if hasattr(self.model_wrapper.model, 'to'):
                     self.model_wrapper.model.to(self.device)
+                cuda_synchronize_best_effort()
                 self.logger.info(f"Model moved to {self.device}")
             except Exception as e:
                 self.logger.warning(f"Could not move model to GPU: {e}")
@@ -2231,13 +2233,16 @@ class SeisBenchModelActor:
         ClassifyOutput
             Object containing picks
         """
-        return self.model_wrapper.classify(
-            stream, 
+        out = self.model_wrapper.classify(
+            stream,
             P_threshold=P_threshold,
             S_threshold=S_threshold,
             Detection_threshold=Detection_threshold,
-            **kwargs
+            **kwargs,
         )
+        if self.use_gpu:
+            cuda_synchronize_best_effort()
+        return out
 
 
 @ray.remote
@@ -2294,10 +2299,10 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                             's_probability'])  
     csvPr_gen.flush()
     
-    start_Predicting = time.time()
+    start_Predicting = monotonic_s()
 
     # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = time.time()
+    waveform_load_start = monotonic_s()
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
@@ -2316,7 +2321,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         csvPr_gen.close()
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
         return (f"{pos} {station}: {err_msg}", None)
-    waveform_load_time = time.time() - waveform_load_start
+    waveform_load_time = monotonic_s() - waveform_load_start
 
     try:
         # Get picks from SeisBench model
@@ -2426,7 +2431,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         csvPr_gen.flush()
         csvPr_gen.close()
         
-        end_Predicting = time.time()
+        end_Predicting = monotonic_s()
         delta = (end_Predicting - start_Predicting)
         # Return tuple: (log_message, waveform_load_time) for timing analysis
         return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", waveform_load_time)
@@ -2515,10 +2520,10 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                             's_probability'])  
     csvPr_gen.flush()
     
-    start_Predicting = time.time()
+    start_Predicting = monotonic_s()
 
     # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = time.time()
+    waveform_load_start = monotonic_s()
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
@@ -2537,7 +2542,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     except Exception as e:
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
         return (f"{pos} {station}: {err_msg}", None)
-    waveform_load_time = time.time() - waveform_load_start
+    waveform_load_time = monotonic_s() - waveform_load_start
 
     try:
         # Load model ONLY if we don't have a shared model_actor (RIPPER mode)
@@ -2578,7 +2583,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                 detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
             )
                                         
-        end_Predicting = time.time()
+        end_Predicting = monotonic_s()
         delta = (end_Predicting - start_Predicting)
         # Return tuple: (log_message, waveform_load_time) for timing analysis
         return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", waveform_load_time)
@@ -2723,9 +2728,9 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
 
     # RIPPER MODE: Load the model inside this task (old approach)
     # ===== TIMING: Track model load time for ripper mode analysis =====
-    model_load_start = time.time()
+    model_load_start = monotonic_s()
     model = load_eqcct_model(args["p_model"], args["s_model"])
-    model_load_time = time.time() - model_load_start
+    model_load_time = monotonic_s() - model_load_start
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
@@ -2753,10 +2758,10 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                             's_probability'])  
     csvPr_gen.flush()
     
-    start_Predicting = time.time()
+    start_Predicting = monotonic_s()
 
     # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = time.time()
+    waveform_load_start = monotonic_s()
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
@@ -2781,7 +2786,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     except Exception as e:
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
         return (f"{pos} {station}: {err_msg}", model_load_time, None)
-    waveform_load_time = time.time() - waveform_load_start
+    waveform_load_time = monotonic_s() - waveform_load_start
 
     try:
         params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
@@ -2801,7 +2806,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                 detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
             )
                                         
-        end_Predicting = time.time()
+        end_Predicting = monotonic_s()
         delta = (end_Predicting - start_Predicting)
         
         # Clean up model to free GPU memory
@@ -2860,7 +2865,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     device = torch.device("cuda" if (gpu and torch.cuda.is_available()) else "cpu")
     
     # ===== TIMING: Track model load time for ripper mode analysis =====
-    model_load_start = time.time()
+    model_load_start = monotonic_s()
     
     # Create and load the model (skip validation — driver already verified the model name)
     model_wrapper = SeisBenchModels(parent_model_name, child_model_name, validate_pretrained=False)
@@ -2873,8 +2878,9 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                 model_wrapper.model.to(device)
         except Exception:
             pass
-    
-    model_load_time = time.time() - model_load_start
+    if gpu:
+        cuda_synchronize_best_effort()
+    model_load_time = monotonic_s() - model_load_start
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
@@ -2902,10 +2908,10 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                             's_probability'])  
     csvPr_gen.flush()
     
-    start_Predicting = time.time()
+    start_Predicting = monotonic_s()
 
     # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = time.time()
+    waveform_load_start = monotonic_s()
     try:
         if use_shared_stream:
             full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
@@ -2929,18 +2935,22 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         csvPr_gen.close()
         err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
         return (f"{pos} {station}: {err_msg}", model_load_time, None)
-    waveform_load_time = time.time() - waveform_load_start
+    waveform_load_time = monotonic_s() - waveform_load_start
 
     try:
         # Run SeisBench model prediction using the model wrapper's classify method
         # IMPORTANT: strict=False and flexible_horizontal_components=True are needed
         # to handle streams that don't perfectly match expected channel names
-        classify_output = model_wrapper.classify(stream, 
-                              P_threshold=args.get('P_threshold', 0.3),
-                              S_threshold=args.get('S_threshold', 0.3),
-                              Detection_threshold=Detection_threshold,
-                              strict=False,
-                              flexible_horizontal_components=True)
+        classify_output = model_wrapper.classify(
+            stream,
+            P_threshold=args.get('P_threshold', 0.3),
+            S_threshold=args.get('S_threshold', 0.3),
+            Detection_threshold=Detection_threshold,
+            strict=False,
+            flexible_horizontal_components=True,
+        )
+        if gpu:
+            cuda_synchronize_best_effort()
         
         # Extract picks from ClassifyOutput
         picks = classify_output.picks if hasattr(classify_output, 'picks') else []
@@ -2968,7 +2978,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
         csvPr_gen.flush()
         csvPr_gen.close()
                                         
-        end_Predicting = time.time()
+        end_Predicting = monotonic_s()
         delta = (end_Predicting - start_Predicting)
         
         # Clean up model to free GPU memory
