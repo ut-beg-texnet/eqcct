@@ -18,7 +18,7 @@ eqcctpro/
 ├── eqcctpro/                   # Core Python package source code
 ├── experiments/                # Pipeline execution and benchmarking
 │   ├── main/                   # Production scripts (run.py)
-│   └── workbench/              # Performance evaluation (test_cpus_and_gpus.py)
+│   └── workbench/              # Performance evaluation (e.g. test_cpus_and_gpus.py, scaling/run_requested_benchmarks.py)
 ├── models/                     # Pre-trained model weights (.h5 files)
 │   └── EQCCT/                  # EQCCT specific model checkpoints
 ├── results/                    # Output artifacts
@@ -243,6 +243,24 @@ runner.run_eqcctpro()
 # **2. System Evaluation (EvaluateSystem)**
 
 Before running large-scale production jobs, use `EvaluateSystem` to benchmark your hardware. It autonomously runs trials across different concurrency levels to find the "sweet spot" for your system.
+
+### **Trial timing and result CSV metrics**
+
+Trial durations are measured with **`eqcctpro.timing_util.monotonic_s()`**, which wraps Python’s **`time.perf_counter()`**: the clock is monotonic and high-resolution, so elapsed times are not skewed by NTP or manual clock changes the way wall-clock **`time.time()`** can be.
+
+For **SeisBench (PyTorch) on GPU**, **`eqcctpro.timing_util.cuda_synchronize_best_effort()`** runs after weights are moved to the device and again after **`classify`** inside Ripper tasks and inside **`SeisBenchModelActor`**. PyTorch schedules GPU work asynchronously; without an explicit device synchronize, stopwatches can stop before kernels finish. That policy keeps **model load** and **inference** intervals aligned with completed CUDA work where applicable. **EQCCT (TensorFlow)** Ripper paths rely on the standard **`predict`** path, which already blocks the host until batch work completes for the generator-driven workflow.
+
+Trial outputs use the canonical CSV header defined in **`eqcctpro/tools.py`** (see **`CANONICAL_CSV_HEADER`**). The primary timing columns have the following meaning:
+
+| Column | Meaning |
+|--------|---------|
+| **Total Trial Time (s)** | Wall time from the trial’s **initial** timestamp (driver/worker entry for the native process) through the end of the picking phase. |
+| **Total Run time for Picker (s)** | Wall time for the **picker phase** only: from just before the driver merges station mSEED (and registers shared waveform refs) through completion of all station tasks. Compare this across ModelActor, Ripper, and serial baselines. |
+| **Actor Creation Time (s)** | Time to create and warm **ModelActor** (or SeisBench actor) instances; empty in Ripper-only rows. |
+| **Avg Model Load Time (s)** | Mean **per-task** model load interval in **Ripper** mode (each task loads its own model). |
+| **Waveform Processing Time (s)** | Mean **per-station-task** time spent preparing waveforms in the worker (e.g. resolving shared streams and running the same preprocessing wedge as production picking), not including the one-time driver-side merge of all stations into the object store. |
+
+The **`experiments/workbench/scaling/run_requested_benchmarks.py`** script uses the same **`timing_util`** helpers for **raw serial** and **reload-per-waveform** baselines so those CSV rows remain comparable to **`EvaluateSystem`** trial exports for the same column names.
 
 ### **Key Benchmark Optimizations**
 - **20% Step Size**: Automatically tests station concurrency at 20%, 40%, 60%, 80%, and 100% levels.
