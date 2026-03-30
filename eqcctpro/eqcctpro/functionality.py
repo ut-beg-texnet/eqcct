@@ -500,7 +500,7 @@ class EvaluateSystem():
         self.min_cpu_amount = min_cpu_amount
         self.min_conc_stations = min_conc_stations # default is = 1 
         self.conc_station_tasks_step_size = conc_station_tasks_step_size # default is = 1 
-        self.stations2use_list = list(range(1, 11)) + list(range(15, 105, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
+        self.stations2use_list = list(range(10, 105, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
         self.start_time = start_time
         self.end_time = end_time
         self.conc_timechunk_tasks_step_size = conc_timechunk_tasks_step_size

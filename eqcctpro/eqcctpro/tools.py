@@ -550,24 +550,23 @@ def generate_station_list(starting_amount_of_stations, total_num_stations_to_use
     if total_num_stations_to_use == 1:
         return [1]
     elif total_num_stations_to_use < 10:
-        return list(range(1, total_num_stations_to_use + 1))
+        # No 1–9 sweep; one trial at the maximum station count available for small datasets.
+        return [total_num_stations_to_use]
     elif total_num_stations_to_use >= 10 and starting_amount_of_stations == 1 and station_list_step_size == 1:
-        # We want to reduce as much extra testing as needed by applying an iterative approach for marching approach via smart step sizes
-        
-        # We check if we can apply multiples of 5 up to total_num_stations_to_use
+        # March from 10 by 5, then unit steps to the target when the target is not a multiple of 5.
         target = total_num_stations_to_use
-        start = 10 # We start from 10 because we already covered 1-9 in the previous condition
-        step = 5 # Step size of 5 for multiples of 5 (User can change this if desired - To Do add var for this in the future)
-        
-        stp_of_one = list(range(1, start + 1)) # We generate a list of 1-10 with step size of 1 and afterwards we will add multiples of 5
+        start = 10
+        step = 5
 
-        remainder = target % step # We calculate the remainder to see if target is a multiple of 5 or not
-        max_multiple = target - remainder # We calculate what is the maximum multiple of 5 that is less than or equal to the target
-        if remainder != 0:  # We found a number that is not immediately a multiple of 5, so we need to add the remaining numbers after the last multiple of 5 up to the target with step size of 1 
-            marching_scheme = stp_of_one + list(range(start + step, max_multiple + 1, step)) + list(range(max_multiple + 1, target + 1, 1))
+        first_point = [10]
 
-        elif remainder == 0: # We hit that the target is not a multiple of 5, so we start from 20, ..., +5, ..., up to target
-            marching_scheme = stp_of_one + list(range(start + step, target + 1, step))
+        remainder = target % step
+        max_multiple = target - remainder
+        if remainder != 0:
+            marching_scheme = first_point + list(range(start + step, max_multiple + 1, step)) + list(range(max_multiple + 1, target + 1, 1))
+
+        else:
+            marching_scheme = first_point + list(range(start + step, target + 1, step))
 
         return sorted(set(marching_scheme))
     else: 
