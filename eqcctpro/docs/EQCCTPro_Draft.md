@@ -2,7 +2,7 @@
 
 ## Abstract
 
-Deep learning has transformed seismic phase picking, yet deploying these models at network scale in real time remains an unresolved engineering challenge. While unified libraries such as SeisBench excel at high-throughput offline batch inference, these methods are ill-suited for continuous monitoring, where waveforms arrive asynchronously from individual stations and cannot be held in memory until a full batch is assembled. The naive alternative, dispatching each station as an independent parallel task, forces repeated framework initialization for every waveform, inflating wall times and consuming much of the available real-time budget unless concurrency and hardware are tuned carefully. To resolve this, we introduce **RAPID (Resource-Aware Parallel Inference Dispatcher)**, a generalized orchestration framework that implements two task parallelization strategies: **Ripper**, an ephemeral task-based approach, and **Model-Actor**, which keeps persistent inference instances loaded in memory across an entire processing window. We benchmarked RAPID across five deep learning phase pickers (PhaseNet, PhaseNetLight, EQTransformer, EQTransformer-NonConservative, and EQCCT) using 228 three-component 60-second waveforms from the Texas Seismological Network under various hardware constraints that reflect real operational deployment scenarios. Across all configurations, the Model-Actor strategy delivered the fastest total runtimes (10.51–17.07 s), reducing processing time by roughly 40–88% relative to the best Ripper totals at 228 stations. These results show that the dominant bottleneck in network-scale DL picking is not raw inference complexity but orchestration overhead, and that persistent-actor lifecycle management delivers substantially faster totals and larger headroom under the 30-second target than even the best tuned ephemeral-task baseline.
+Deep learning has transformed seismic phase picking, yet deploying these models at network scale in real time remains an unresolved engineering challenge. While unified libraries such as SeisBench excel at high-throughput offline batch inference, these methods are ill-suited for continuous monitoring, where waveforms arrive asynchronously from individual stations and cannot be held in memory until a full batch is assembled. The naive alternative, dispatching each station as an independent parallel task, forces repeated framework initialization for every waveform, inflating wall times and consuming much of the available real-time budget unless concurrency and hardware are tuned carefully. To resolve this, we introduce **RAPID (Resource-Aware Parallel Inference Dispatcher)**, a generalized orchestration framework that implements two task parallelization strategies: **Ripper**, an ephemeral task-based approach, and **Model-Actor**, which keeps persistent inference instances loaded in memory across an entire processing window. We benchmarked RAPID across five deep learning phase pickers (PhaseNet, PhaseNetLight, EQTransformer, EQTransformer-NonConservative, and EQCCT) using 228 three-component 60-second waveforms from the Texas Seismological Network under various hardware constraints that reflect real operational deployment scenarios. Across all configurations, the Model-Actor strategy delivered the fastest total runtimes (10.97–25.01 s in Table 4), reducing processing time by roughly 66–87% relative to the best Ripper totals at 228 stations for the same model–hardware pairings. These results show that the dominant bottleneck in network-scale DL picking is not raw inference complexity but orchestration overhead, and that persistent-actor lifecycle management delivers substantially faster totals and larger headroom under the 30-second target than even the best tuned ephemeral-task baseline.
 
 ## 1. Introduction
 
@@ -24,9 +24,9 @@ The second mode, *per-station streaming*, uses the `classify()` method to proces
 
 **(4) Registry Limitations:** Models not yet integrated into SeisBench, such as EQCCT or custom institutional pickers, lack a `classify()` path, forcing networks to find other multi-waveform processing alternatives.
 
-While parallelization is the intuitive remedy for these sequential processing constraints, treating each station as a separate parallel task (Ripper) forces the machine learning framework to re-initialize for every station. On our hardware that cost dominates runtimes at 228 stations: best observed Ripper totals span roughly **26.5–63 s** on CPU and **46.6–87.5 s** on GPU. The four SeisBench CPU cases finish just under the 30-second target when concurrency is tuned, but GPU Ripper and EQCCT on CPU remain above it, leaving little margin for association, quality control, and dispatch compared with persistent-actor runs.
+While parallelization is the intuitive remedy for these sequential processing constraints, treating each station as a separate parallel task (Ripper) forces the machine learning framework to re-initialize for every station. On our hardware that cost dominates runtimes at 228 stations: best observed Ripper totals span roughly **34.3–76.1 s** on CPU and **47.3–96.1 s** on GPU (minima with at most 20 Ray CPUs for Ripper, **Table 3**). In the refreshed sweeps, all listed Ripper configurations remain above the 30-second real-time target, leaving little margin for association, quality control, and dispatch compared with persistent-actor runs.
 
-To address these issues, we introduce **RAPID (Resource-Aware Parallel Inference Dispatcher)**, a generalized, resource-aware parallelization framework. RAPID is designed to complement SeisBench by using its native `from_pretrained()`, `annotate()`, and `classify()` interfaces while providing the necessary orchestration for real-time scale. We implement two strategies: **Model-Actor** (persistent instances) and **Ripper** (ephemeral tasks). We benchmarked these across five pickers and two hardware configurations. The Model-Actor method reduced total runtimes by roughly 40–88% compared with the best Ripper totals at 228 stations, demonstrating that persistent-actor orchestration yields faster end-to-end times and more comfortable real-time margin than tuned ephemeral-task Ripper on real-world network workloads.
+To address these issues, we introduce **RAPID (Resource-Aware Parallel Inference Dispatcher)**, a generalized, resource-aware parallelization framework. RAPID is designed to complement SeisBench by using its native `from_pretrained()`, `annotate()`, and `classify()` interfaces while providing the necessary orchestration for real-time scale. We implement two strategies: **Model-Actor** (persistent instances) and **Ripper** (ephemeral tasks). We benchmarked these across five pickers and two hardware configurations. The Model-Actor method reduced total runtimes by roughly **66–87%** compared with the best Ripper totals at 228 stations for the same model–device rows, demonstrating that persistent-actor orchestration yields faster end-to-end times and more comfortable real-time margin than tuned ephemeral-task Ripper on real-world network workloads.
 
 ## 2. Methodology
 
@@ -150,34 +150,34 @@ Per-station streaming via `classify()` was substantially slower, ranging from 1.
 
 ### 3.2 Ripper: Ephemeral Task-Based Parallelism
 
-Best 228-station Ripper runtime totals fall between **26.5–63.0 s** on CPU and **46.6–87.5 s** on GPU (**Table 3**). EQCCT produced the highest runtimes on both device classes due to the high per-task initialization cost of TensorFlow's XLA-compiled graph. The PyTorch-backed SeisBench models cluster closely on CPU (about 26.5–27.0 s) and on GPU (about 46.6–49.1 s) for the configurations listed.
+Best 228-station Ripper runtime totals fall between 34.3–76.1 s on CPU and 47.3–96.1 s on GPU for the configurations summarized in Table 3 (minima over successful trials with at most 20 Ray CPUs). EQCCT produced the highest runtimes on both device classes due to the high per-task initialization cost of TensorFlow's XLA-compiled graph. The PyTorch-backed SeisBench models span about 34–41 s on CPU in the updated trials, while the GPU Ripper rows remain near 47–49 s.
 
-Notably, for every architecture in Table 3, the GPU-based runtimes were significantly slower than their CPU-based counterparts. This is due to cost of treating stations as ephemeral tasks: every task must initialize the framework, and load model weights. On a GPU, the task must create a CUDA context and allocate device memory before inference can begin. These repeated fixed costs dominate wall time and overwhelm potential GPU speedup, yielding GPU totals roughly 39 to 83% above the CPU minima. Even when tuned Ripper clears the 30-second bar on SeisBench CPU, repeated initialization leaves little timing margin relative to Model-Actor; GPU Ripper and EQCCT on CPU remain above the target.
+Notably, where both CPU and GPU Ripper are listed for the same model, GPU totals remain slower than CPU in these ephemeral-task settings: repeated framework and CUDA setup per task dominates. For example, PhaseNet GPU Ripper is about **64%** slower than the best CPU Ripper total at 228 stations. SeisBench CPU Ripper no longer sits under the 30-second real-time target in the new sweeps; GPU Ripper and EQCCT on CPU remain above the target as well.
 
-**Table 3.** Best successful Ripper **total** time at **228 stations** per model and device (picking time equals total time for Ripper). Each entry is the minimum successful end-to-end time over all Ripper experiments, as described in §2.6.
+**Table 3.** Best successful Ripper **total** time at **228 stations** per model and device (picking time equals total time for Ripper). Each entry is the minimum successful end-to-end time over Ripper experiments with at most **20** allocated Ray CPUs, as described in §2.6. GPU rows for PhaseNetLight and EQTransformer remain from the earlier GPU trials (currently running); all other rows use the updated trial CSVs.
 
 
 | Model            | Device | CPUs | GPUs | Conc. Tasks | Ripper Picking/Total (s) |
 | ---------------- | ------ | ---- | ---- | ----------- | ------------------------ |
-| PhaseNet         | CPU    | 20   | 0    | 120         | 26.72                    |
-| PhaseNetLight    | CPU    | 20   | 0    | 70          | 26.46                    |
-| EQTransformer    | CPU    | 20   | 0    | 200         | 26.99                    |
-| EQTransformer-NC | CPU    | 20   | 0    | 80          | 26.85                    |
+| PhaseNet         | CPU    | 20   | 0    | 91          | 34.25                    |
+| PhaseNetLight    | CPU    | 20   | 0    | 91          | 35.38                    |
+| EQTransformer    | CPU    | 20   | 0    | 137         | 38.42                    |
+| EQTransformer-NC | CPU    | 17   | 0    | 228         | 41.17                    |
 | PhaseNetLight    | GPU    | 20   | 2    | 20          | 47.29                    |
 | EQTransformer    | GPU    | 20   | 2    | 20          | 48.39                    |
 | EQTransformer-NC | GPU    | 20   | 2    | 20          | 49.08                    |
-| PhaseNet         | GPU    | 20   | 2    | 20          | 46.58                    |
-| EQCCT            | CPU    | 20   | 0    | 50          | 63.01                    |
-| EQCCT            | GPU    | 20   | 2    | 22          | 87.53                    |
+| PhaseNet         | GPU    | 20   | 2    | 44          | 56.27                    |
+| EQCCT            | CPU    | 20   | 0    | 137         | 76.07                    |
+| EQCCT            | GPU    | 20   | 2    | 24          | 96.10                    |
 
 
 ### 3.3 Model-Actor: Persistent Inference Actors
 
-The Model-Actor method produced the lowest total runtimes across all hardware configurations among the parallel orchestration strategies (Table 4). While the hardware in this study supports over 200 concurrent CPU actors, with respect to model size, we identified utilizing 45 actors as the optimal level for CPU trials and 22 actors (12 for EQCCT) for GPU trials.
+The Model-Actor method produced the lowest total runtimes across all hardware configurations among the parallel orchestration strategies (Table 4). While the hardware in this study supports over 200 concurrent CPU actors, with respect to model size, the refreshed sweeps favor 46 persistent actors for the best CPU totals on PhaseNet, PhaseNetLight, and EQTransformer (228 stations, ≤20 CPUs), 22 actors for the best GPU totals on SeisBench models, 12 actors for EQCCT on GPU, and 46 actors with 14 Ray CPUs for the best EQCCT CPU total in the revised trial set.
 
-Optimal total runtimes ranged from 10.51 s (PhaseNet GPU) to 17.07 s (EQCCT CPU). EQCCT benefited the most from this strategy in GPU mode: by paying the TensorFlow/XLA compilation cost only once at actor creation, subsequent inferences run in a warm state, yielding a total runtime of 10.75 s—about an 88% reduction relative to the best 228-station Ripper GPU total for EQCCT.
+Optimal total runtimes in the updated rows range from 10.97 s (PhaseNet GPU) to 25.01 s (EQCCT CPU). EQCCT benefited the most from this strategy in GPU mode: by paying the TensorFlow/XLA compilation cost only once at actor creation, subsequent inferences run in a warm state, yielding a total runtime of 12.47 s-an 87% reduction relative to the best 228-station Ripper GPU total for EQCCT in the same campaign.
 
-Model-Actor requires a one-time actor initialization period before waveform processing begins. This setup cost ranged from 4.56 s to 11.25 s, constituting 43–75% of total trial time across all configurations. While this pre-computing cost is significant, it is a fixed overhead paid once per processing window rather than once per station. For continuous monitoring, where the actors will continue to stay "on", the amortized setup cost per station will approach zero because actors will not be turned off after being created. Similarly, Ray has built in functionality to "revive" dead Raylets (workers). While the initialization cost will be needed to be paid again once revived, the amortized setup cost will again approach zero.
+Model-Actor requires a one-time actor initialization period before waveform processing begins. This setup cost ranged from about 4.6 s to 12.7 s in the configurations listed in Table 4, constituting roughly 37–75% of total trial time depending on model and device. While this pre-computing cost is significant, it is a fixed overhead paid once per processing window rather than once per station. For continuous monitoring, where the actors will continue to stay "on", the amortized setup cost per station will approach zero because actors will not be turned off after being created. Similarly, Ray has built in functionality to "revive" dead Raylets (workers). While the initialization cost will be needed to be paid again once revived, the amortized setup cost will again approach zero.
 
 \newpage
 
@@ -188,21 +188,21 @@ Model-Actor requires a one-time actor initialization period before waveform proc
 
 | Model    | Dev | CPUs | GPUs | Actors | Setup (s) | Pick (s) | Total (s) | Setup OH (%) |
 | -------- | --- | ---- | ---- | ------ | --------- | -------- | --------- | ------------ |
-| PhaseNet | GPU | 20   | 1    | 22     | 7.02      | 3.48     | 10.51     | 66.7         |
-| EQCCT    | GPU | 20   | 1    | 12     | 4.56      | 6.17     | 10.75     | 42.4         |
+| PhaseNet | GPU | 20   | 1    | 22     | 6.70      | 4.27     | 10.97     | 61.0         |
 | EQT-NC   | CPU | 20   | 0    | 45     | 7.16      | 3.81     | 11.07     | 64.6         |
-| EQT      | CPU | 20   | 0    | 45     | 7.12      | 4.20     | 11.36     | 62.7         |
+| PNLight  | CPU | 20   | 0    | 46     | 7.04      | 4.28     | 11.47     | 61.4         |
+| PhaseNet | CPU | 20   | 0    | 46     | 7.21      | 4.16     | 11.48     | 62.8         |
+| EQT      | CPU | 20   | 0    | 46     | 6.92      | 4.70     | 11.63     | 59.5         |
+| EQCCT    | GPU | 14   | 1    | 12     | 4.64      | 7.82     | 12.47     | 37.2         |
 | EQT-NC   | GPU | 17   | 1    | 22     | 7.69      | 5.10     | 12.80     | 60.1         |
 | EQT      | GPU | 20   | 1    | 22     | 7.01      | 6.27     | 13.29     | 52.8         |
 | PNLight  | GPU | 20   | 1    | 22     | 10.78     | 3.51     | 14.30     | 75.4         |
-| PNLight  | CPU | 20   | 0    | 45     | 11.19     | 3.52     | 14.94     | 74.9         |
-| PhaseNet | CPU | 20   | 0    | 45     | 11.25     | 4.66     | 16.05     | 70.1         |
-| EQCCT    | CPU | 20   | 0    | 45     | 9.38      | 7.67     | 17.07     | 55.0         |
+| EQCCT    | CPU | 14   | 0    | 46     | 12.73     | 12.23    | 25.01     | 50.9         |
 
 
 ### 3.4 Comparative Analysis
 
-Comparing Model-Actor picking times to the SeisBench per-station streaming baseline (Tables 2 and 4, and Figures 4 and 5), the EQTransformer architectures show reductions of 54–66% on CPU and 38–49% on GPU. Total runtimes (including actor setup), however, vary by architecture: EQTransformer CPU is 15% faster than its sequential baseline, while EQTransformer-NC GPU is 37% slower, because the lightweight model's short per-station inference makes setup overhead the dominant cost. For PhaseNet CPU, the persistent-actor approach is significantly faster in both metrics, reducing picking time by 86% (4.66 s vs. 33.70 s streaming) and total runtime by about 40% (16.05 s vs. 26.72 s under Ripper at 228 stations). For lightweight models like PhaseNetLight, the single-process baseline is faster in both picking (1.43 s vs. 3.52 s) and total time (2.61 s vs. 14.94 s) because actor dispatch latency and initialization costs become the limiting factors. For EQCCT, which lacks a streaming baseline, Model-Actor is the only viable parallelization strategy.
+Comparing Model-Actor picking times to the SeisBench per-station streaming baseline (Tables 2 and 4, and Figures 4 and 5), the EQTransformer architectures still show large reductions in picking time versus per-station `classify()` on CPU and GPU; total runtimes (including actor setup), however, vary by architecture: EQTransformer CPU remains faster than its sequential baseline when all costs are included, while EQTransformer-NC GPU can remain slower than per-station streaming for the same reason as before—setup dominates for the lighter model. For PhaseNet CPU, the persistent-actor approach remains far faster than per-station streaming on picking time (**4.16 s** vs. 33.70 s), and the end-to-end Model-Actor total (**11.48 s**) is well below the refreshed best Ripper CPU total at 228 stations (**34.25 s**, **Table 3**). For lightweight models like PhaseNetLight, the single-process baseline is still faster in raw picking (1.43 s vs. **4.28 s**) because actor setup and IPC dominate. For EQCCT, which lacks a streaming baseline, Model-Actor is the only viable parallelization strategy among the methods we highlight.
 
 The SeisBench offline batch mode remains the fastest option for pre-collected data. However, RAPID's value lies in distributed resource management: it supports continuous streaming without pre-collection, provides automatic memory budgeting, and remains model-agnostic across both TensorFlow and PyTorch.
 
@@ -231,13 +231,13 @@ The SeisBench offline batch mode remains the fastest option for pre-collected da
 
 ![Comparison of total trial runtime across all models and parallelization methods. Markers and line segments are shown every 10 stations (10–220) with a final point at 228; the vertical axis is 0–30 s (10 s ticks), with trajectories above 30 s clipped.](figures/fig4_runtime_3d.png){width=90%}
 
-![Minimum total runtime at 228 stations for Ripper versus Model-Actor (CPU left, GPU right). X-axis labels show concurrent workers: R = Ripper tasks, MA = Model-Actor instances. Bars use the best successful end-to-end time per strategy at 228 stations (§2.6). The dashed red line is the 30-second real-time target. GPU Ripper and EQCCT CPU Ripper remain above it; the four SeisBench CPU Ripper bars fall just underneath at their best-tuned settings. Model-Actor meets the target for every model and hardware pairing shown.](figures/fig5.png){width=90%}
+![Minimum total runtime at 228 stations for Ripper versus Model-Actor (CPU left, GPU right). X-axis labels show concurrent workers: R = Ripper tasks, MA = Model-Actor instances. Bars use the best successful end-to-end time per strategy at 228 stations (§2.6). The dashed red line is the 30-second real-time target. After the refreshed CPU Ripper sweeps, several Ripper bars exceed that line; Model-Actor totals in Table 4 remain below it for the pairings shown.](figures/fig5.png){width=90%}
 
 ### 3.5 Memory Utilization
 
-Memory tracking confirmed that the pre-actor budgeting system prevented OOM errors. In CPU mode, the 45-actor trials used 43.9 to 72.5 GB of RAM against requested budgets of 100.8 to 110.7 GB (Table 5 and Figure 6). Preliminary runs without this budget triggered OOM failures during concurrent initialization. We implemented incremental testing based off of scaling factors to identify the minimal amount of buffer memory needed to maintain an actor in memory; our findings found that using less than 1.7 and 2.0 x of the given model's memory consumption caused OOM errors.
+Memory tracking confirmed that the pre-actor budgeting system prevented OOM errors. In CPU mode, the updated optimal rows for PhaseNet, PhaseNetLight, and EQTransformer use 46 actors at 228 stations and report combined process-tree RAM near 48–51 GB against requested budgets of about 103–106 GB (Table 5 and Figure 6); the revised EQCCT CPU optimum (46 actors, 14 CPUs) shows a similar pattern (~48 GB tree RAM, ~113 GB requested). Preliminary runs without this budget triggered OOM failures during concurrent initialization. We implemented incremental testing based off of scaling factors to identify the minimal amount of buffer memory needed to maintain an actor in memory; our findings found that using less than 1.7 and 2.0 x of the given model's memory consumption caused OOM errors.
 
-In GPU mode, the optimal 228-station trials used 22 actors for the four SeisBench models and 12 for EQCCT (Table 4). Our two GPU supported up to 44 actors for the SeisBench models and 24 for EQCCT amongst themselves, however the optimal configuration used fewer because additional actors did not improve total runtimes. Benchmark results from the 228-station GPU trials confirm that increasing the number of actors from the optimal level (22 for SeisBench models, 12 for EQCCT) to the maximum hardware capacity (44 and 24, respectively) actually increased both picking times and total runtimes. For example, in the PhaseNet GPU trial, increasing actors from 22 to 44 caused the total runtime to rise from 10.51 s to 17.02 s. Looking at EQCCT, measured VRAM slightly exceeded the per-actor budget due to TensorFlow XLA workspace allocations, showing that our memory budgeting strategy is not always fullproof. However, all reported values remained within the 49 GB per-GPU hardware limit.
+In GPU mode, the optimal 228-station trials still use 22 actors for the SeisBench models retained from the earlier GPU campaign and 12 for EQCCT in the updated data (Table 4). Our two GPU supported up to 44 actors for the SeisBench models and 24 for EQCCT amongst themselves, however the optimal configuration used fewer because additional actors did not improve total runtimes. Prior 228-station GPU benchmarks showed that increasing actors from the optimal level toward the hardware cap increased both picking and total runtimes (e.g., PhaseNet GPU total rising when moving from 22 toward 44 actors). Looking at EQCCT, measured VRAM slightly exceeded the per-actor budget due to TensorFlow XLA workspace allocations, showing that our memory budgeting strategy is not always fullproof. However, all reported values remained within the 49 GB per-GPU hardware limit.
 
 \newpage
 
@@ -248,16 +248,16 @@ In GPU mode, the optimal 228-station trials used 22 actors for the four SeisBenc
 
 | Model    | Dev | CPUs | GPUs | Act. | Req. RAM | Tree RAM | Req. VRAM | Tree VRAM | Peak RAM |
 | -------- | --- | ---- | ---- | ---- | -------- | -------- | --------- | --------- | -------- |
-| PhaseNet | GPU | 20   | 1    | 22   | 58,564   | 36,554   | 36,344    | 11,580    | 962      |
-| EQCCT    | GPU | 20   | 1    | 12   | 49,236   | 19,677   | 34,608    | 40,316    | 898      |
+| PhaseNet | GPU | 20   | 1    | 22   | 58,564   | 32,813   | 36,344    | 11,580    | 782      |
 | EQT-NC   | CPU | 20   | 0    | 45   | 104,220  | 50,160   | 0         | 0         | 304      |
-| EQT      | CPU | 20   | 0    | 45   | 104,085  | 54,144   | 0         | 0         | 311      |
+| PNLight  | CPU | 20   | 0    | 46   | 105,524  | 49,017   | 0         | 0         | 273      |
+| PhaseNet | CPU | 20   | 0    | 46   | 105,524  | 51,694   | 0         | 0         | 274      |
+| EQT      | CPU | 20   | 0    | 46   | 106,398  | 51,012   | 0         | 0         | 258      |
+| EQCCT    | GPU | 14   | 1    | 12   | 49,236   | 15,363   | 34,608    | 40,316    | 456      |
 | EQT-NC   | GPU | 17   | 1    | 22   | 61,798   | 32,143   | 37,004    | 12,273    | 911      |
 | EQT      | GPU | 20   | 1    | 22   | 61,446   | 40,808   | 36,960    | 12,226    | 957      |
 | PNLight  | GPU | 20   | 1    | 22   | 58,366   | 21,034   | 36,344    | 11,580    | 732      |
-| PNLight  | CPU | 20   | 0    | 45   | 103,230  | 45,119   | 0         | 0         | 298      |
-| PhaseNet | CPU | 20   | 0    | 45   | 103,230  | 49,925   | 0         | 0         | 310      |
-| EQCCT    | CPU | 20   | 0    | 45   | 113,400  | 61,408   | 0         | 0         | 296      |
+| EQCCT    | CPU | 14   | 0    | 46   | 115,920  | 48,701   | 0         | 0         | 202      |
 
 
 ![Peak memory at 228 stations for Ripper versus Model-Actor. Left panel shows CPU RAM (GB); right panel shows GPU VRAM (GB). X-axis labels show R = Ripper concurrent tasks, MA = Model-Actor actors. All instances were loaded simultaneously via Ray actors and memory was recorded with psutil (RAM) and pynvml (VRAM). When the instance count is the same (e.g., PhaseNetLight CPU, 45 for both strategies), memory is nearly identical, confirming that the per-instance footprint is strategy-independent; differences arise only when concurrency counts diverge.](figures/fig6.png){width=90%}
@@ -272,15 +272,15 @@ In GPU mode, the optimal 228-station trials used 22 actors for the four SeisBenc
 
 ### 4.1 The Case for Persistent-Actor Orchestration in Real-Time Seismic Networks
 
-In our study, it is evident that the primary runtime bottleneck in stream-based seismic phase picking is per-task initialization cost rather than inference complexity. The Ripper method makes that cost explicit: with model load times between 0.92 and 1.31 s per task, aggregate initialization at 228 stations keeps GPU Ripper and EQCCT on CPU above the 30-second real-time target, while tuned SeisBench CPU Ripper can finish just under the line—still with far less headroom than Model-Actor for downstream processing. The Model-Actor strategy eliminates this bottleneck by loading model instances once and reusing them for all incoming waveforms. This reduces the marginal cost of each station to the forward-pass inference time plus inter-process communication (IPC) latency. The observed roughly 40 to 88% runtime reduction across all architectures reflects a fundamental change in model lifecycle management rather than incremental optimization.
+In our study, it is evident that the primary runtime bottleneck in stream-based seismic phase picking is per-task initialization cost rather than inference complexity. The Ripper method makes that cost explicit: with model load times between 0.92 and 1.31 s per task, aggregate initialization at 228 stations keeps GPU Ripper and EQCCT on CPU above the 30-second real-time target in the updated benchmarks, and the refreshed SeisBench CPU Ripper minima in Table 3 also land above that line—leaving Model-Actor with substantially more headroom for downstream processing. The Model-Actor strategy eliminates this bottleneck by loading model instances once and reusing them for all incoming waveforms. This reduces the marginal cost of each station to the forward-pass inference time plus inter-process communication (IPC) latency. The observed roughly 66–87% runtime reduction for the Table 4 versus matching Table 3 pairings reflects a fundamental change in model lifecycle management rather than incremental optimization.
 
-At 228 stations, Model-Actor delivers end-to-end runtimes under the 30-second real-time target for every model and hardware pairing we tested. GPU Ripper and EQCCT on CPU remain above that line; SeisBench CPU Ripper sits just under it in **Figure 5** at the best settings we found, but repeated load/unload per task still consumes most of the budget and offers little margin compared with Model-Actor. **Figures 7 and 8** plot Ripper and Model-Actor trajectories over station count (5, 10, …, 225, 228) at each CPU allocation tested, with the batch-based Amdahl reference from Table 2 overlaid in red. Persistent-actor curves track much closer to, or even outperform, streaming-like slopes, with a visible positive offset originating from one-time actor setup and Ray IPC. Negative offset can be attributed to the parallel distribution of inference tasks across multiple workers, which for compute-heavy models allows the marginal cost per station to drop significantly below the sequential baseline, eventually overcoming the initial setup overhead as the network size increases. The majority of the streaming and RAPID results don't come near the theoretically achievable runtime via idealized batch inference (Amdahl’s ideal curve; see Amdahl, 1967); however that gap is expected, as batch `annotate()` sidesteps the per-station classify pipeline entirely and our parallelization methods have large IPC latency. PhaseNetLight Ripper trajectories lie closer to that batch-based reference than heavier GPU Ripper configurations (**Figure 7**), consistent with the model’s small computational footprint, though total runtimes still remain well above the ideal curve. 
+At 228 stations, Model-Actor delivers end-to-end runtimes under the 30-second real-time target for every Model-Actor pairing listed in Table 4. GPU Ripper and EQCCT on CPU remain above that line; the revised SeisBench CPU Ripper minima in Figure 5 / Table 3 also sit above it at the tested concurrencies, whereas persistent actors avoid paying full per-station initialization every time. Figures 7 and 8 plot Ripper and Model-Actor trajectories over station count (5, 10, …, 225, 228) at each CPU allocation tested, with the batch-based Amdahl reference from Table 2 overlaid in red. Persistent-actor curves track much closer to, or even outperform, streaming-like slopes, with a visible positive offset originating from one-time actor setup and Ray IPC. Negative offset can be attributed to the parallel distribution of inference tasks across multiple workers, which for compute-heavy models allows the marginal cost per station to drop significantly below the sequential baseline, eventually overcoming the initial setup overhead as the network size increases. The majority of the streaming and RAPID results don't come near the theoretically achievable runtime via idealized batch inference (Amdahl’s ideal curve; see Amdahl, 1967); however that gap is expected, as batch `annotate()` sidesteps the per-station classify pipeline entirely and our parallelization methods have large IPC latency. PhaseNetLight Ripper trajectories lie closer to that batch-based reference than heavier GPU Ripper configurations (Figure 7), consistent with the model’s small computational footprint, though total runtimes still remain well above the ideal curve. 
 
 ## 5. Conclusion
 
-In conclusion, RAPID is a resource-aware parallelization framework that enables real-time, network-scale seismic phase picking. By combining persistent model actors with hardware-constrained memory budgeting, RAPID is able to process 228-stations between 10.51–17.07 s across all model and hardware configurations tested, representing roughly a 40–88% reduction in total runtime over the best Ripper totals at 228 stations. It meets the 30-second real-time target for all models tested, including heavy models like EQCCT, who have high individual initialization costs.
+In conclusion, RAPID is a resource-aware parallelization framework that enables real-time, network-scale seismic phase picking. By combining persistent model actors with hardware-constrained memory budgeting, RAPID is able to process 228-stations between 10.97–25.01 s for the Model-Actor configurations summarized in Table 4, representing on the order of roughly 66–87% lower total runtime than the matching best Ripper totals at 228 stations for each Model-Actor row alongside its Table 3 counterpart (largest relative gaps where Ripper times are highest, e.g., EQCCT GPU). It meets the 30-second real-time target for all Model-Actor models listed in Table 4, including heavy models like EQCCT, which have high individual initialization costs under ephemeral-task execution.
 
-The results confirm that orchestration overhead—repeated loading and teardown of model instances—dominates wall time for ephemeral-task Ripper at network scale, even when concurrency is tuned so that SeisBench CPU Ripper approaches the 30-second bound. RAPID is model-agnostic and supports both PyTorch and TensorFlow through a unified interface. It is intended to complement existing toolkits like SeisBench by providing the orchestration layer required for streaming waveforms in real-time operational environments.
+The results confirm that orchestration overhead—repeated loading and teardown of model instances—dominates wall time for ephemeral-task Ripper at network scale, leaving Table 3 CPU Ripper times well above the 30-second bound for the refreshed sweeps while Model-Actor retains sub-30 s totals. RAPID is model-agnostic and supports both PyTorch and TensorFlow through a unified interface. It is intended to complement existing toolkits like SeisBench by providing the orchestration layer required for streaming waveforms in real-time operational environments.
 
 ## 6. Limitations and Future Work
 
@@ -487,7 +487,7 @@ EQT-NC        & GPU & 1 & 1 & 1.171 & 0.458 & 8.18  \\
 \begin{landscape}
 
 \begin{center}
-\textbf{Table 3.} Best successful Ripper total time at 228 stations per model and device (minimum over all Ripper runs; see §2.6).
+\textbf{Table 3.} Best successful Ripper total time at 228 stations per model and device (minimum over successful Ripper runs with at most 20 allocated Ray CPUs; see §2.6).
 
 \vspace{0.8em}
 \small
@@ -495,16 +495,16 @@ EQT-NC        & GPU & 1 & 1 & 1.171 & 0.458 & 8.18  \\
 \toprule
 \textbf{Model} & \textbf{Device} & \textbf{CPUs} & \textbf{GPUs} & \textbf{Conc. Tasks} & \textbf{Ripper Picking/Total (s)} \\
 \midrule
-PhaseNet         & CPU & 20 & 0 & 120 & 26.72 \\
-PhaseNetLight    & CPU & 20 & 0 & 70  & 26.46 \\
-EQTransformer    & CPU & 20 & 0 & 200 & 26.99 \\
-EQTransformer-NC & CPU & 20 & 0 & 80  & 26.85 \\
+PhaseNet         & CPU & 20 & 0 & 91  & 34.25 \\
+PhaseNetLight    & CPU & 20 & 0 & 91  & 35.38 \\
+EQTransformer    & CPU & 20 & 0 & 137 & 38.42 \\
+EQTransformer-NC & CPU & 17 & 0 & 228 & 41.17 \\
 PhaseNetLight    & GPU & 20 & 2 & 20  & 47.29 \\
 EQTransformer    & GPU & 20 & 2 & 20  & 48.39 \\
 EQTransformer-NC & GPU & 20 & 2 & 20  & 49.08 \\
-PhaseNet         & GPU & 20 & 2 & 20  & 46.58 \\
-EQCCT            & CPU & 20 & 0 & 50  & 63.01 \\
-EQCCT            & GPU & 20 & 2 & 22  & 87.53 \\
+PhaseNet         & GPU & 20 & 2 & 44  & 56.27 \\
+EQCCT            & CPU & 20 & 0 & 137 & 76.07 \\
+EQCCT            & GPU & 20 & 2 & 24  & 96.10 \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -523,16 +523,16 @@ EQCCT            & GPU & 20 & 2 & 22  & 87.53 \\
 \toprule
 \textbf{Model} & \textbf{Device} & \textbf{CPUs} & \textbf{GPUs} & \textbf{Actors} & \textbf{Setup (s)} & \textbf{Pick (s)} & \textbf{Total (s)} & \textbf{Setup OH} \\
 \midrule
-PhaseNet      & GPU & 20 & 1 & 22 & 7.02  & 3.48 & 10.51 & 66.7\% \\
-EQCCT         & GPU & 20 & 1 & 12 & 4.56  & 6.17 & 10.75 & 42.4\% \\
+PhaseNet      & GPU & 20 & 1 & 22 & 6.70  & 4.27 & 10.97 & 61.0\% \\
 EQT-NC        & CPU & 20 & 0 & 45 & 7.16  & 3.81 & 11.07 & 64.6\% \\
-EQTransformer & CPU & 20 & 0 & 45 & 7.12  & 4.20 & 11.36 & 62.7\% \\
+PhaseNetLight & CPU & 20 & 0 & 46 & 7.04  & 4.28 & 11.47 & 61.4\% \\
+PhaseNet      & CPU & 20 & 0 & 46 & 7.21  & 4.16 & 11.48 & 62.8\% \\
+EQTransformer & CPU & 20 & 0 & 46 & 6.92  & 4.70 & 11.63 & 59.5\% \\
+EQCCT         & GPU & 14 & 1 & 12 & 4.64  & 7.82 & 12.47 & 37.2\% \\
 EQT-NC        & GPU & 17 & 1 & 22 & 7.69  & 5.10 & 12.80 & 60.1\% \\
 EQTransformer & GPU & 20 & 1 & 22 & 7.01  & 6.27 & 13.29 & 52.8\% \\
 PhaseNetLight & GPU & 20 & 1 & 22 & 10.78 & 3.51 & 14.30 & 75.4\% \\
-PhaseNetLight & CPU & 20 & 0 & 45 & 11.19 & 3.52 & 14.94 & 74.9\% \\
-PhaseNet      & CPU & 20 & 0 & 45 & 11.25 & 4.66 & 16.05 & 70.1\% \\
-EQCCT         & CPU & 20 & 0 & 45 & 9.38  & 7.67 & 17.07 & 55.0\% \\
+EQCCT         & CPU & 14 & 0 & 46 & 12.73 & 12.23 & 25.01 & 50.9\% \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -551,16 +551,16 @@ EQCCT         & CPU & 20 & 0 & 45 & 9.38  & 7.67 & 17.07 & 55.0\% \\
 \toprule
 \textbf{Model} & \textbf{Device} & \textbf{CPUs} & \textbf{GPUs} & \textbf{Actors} & \textbf{Req. RAM} & \textbf{Tree RAM} & \textbf{Req. VRAM} & \textbf{Tree VRAM} & \textbf{Peak RAM} \\
 \midrule
-PhaseNet      & GPU & 20 & 1 & 22 & 58,564  & 36,554 & 36,344 & 11,580 & 962 \\
-EQCCT         & GPU & 20 & 1 & 12 & 49,236  & 19,677 & 34,608 & 40,316 & 898 \\
+PhaseNet      & GPU & 20 & 1 & 22 & 58,564  & 32,813 & 36,344 & 11,580 & 782 \\
 EQT-NC        & CPU & 20 & 0 & 45 & 104,220 & 50,160 & 0      & 0      & 304 \\
-EQTransformer & CPU & 20 & 0 & 45 & 104,085 & 54,144 & 0      & 0      & 311 \\
+PhaseNetLight & CPU & 20 & 0 & 46 & 105,524 & 49,017 & 0      & 0      & 273 \\
+PhaseNet      & CPU & 20 & 0 & 46 & 105,524 & 51,694 & 0      & 0      & 274 \\
+EQTransformer & CPU & 20 & 0 & 46 & 106,398 & 51,012 & 0      & 0      & 258 \\
+EQCCT         & GPU & 14 & 1 & 12 & 49,236  & 15,363 & 34,608 & 40,316 & 456 \\
 EQT-NC        & GPU & 17 & 1 & 22 & 61,798  & 32,143 & 37,004 & 12,273 & 911 \\
 EQTransformer & GPU & 20 & 1 & 22 & 61,446  & 40,808 & 36,960 & 12,226 & 957 \\
 PhaseNetLight & GPU & 20 & 1 & 22 & 58,366  & 21,034 & 36,344 & 11,580 & 732 \\
-PhaseNetLight & CPU & 20 & 0 & 45 & 103,230 & 45,119 & 0      & 0      & 298 \\
-PhaseNet      & CPU & 20 & 0 & 45 & 103,230 & 49,925 & 0      & 0      & 310 \\
-EQCCT         & CPU & 20 & 0 & 45 & 113,400 & 61,408 & 0      & 0      & 296 \\
+EQCCT         & CPU & 14 & 0 & 46 & 115,920 & 48,701 & 0      & 0      & 202 \\
 \bottomrule
 \end{tabular}
 \end{center}
