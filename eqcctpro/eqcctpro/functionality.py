@@ -62,7 +62,9 @@ class RunEQCCTPro():
                 seisbench_child_model: str = None,  # e.g., 'original', 'stead'
                 Detection_threshold: float = 0.3,  # Detection threshold for SeisBench models
                 # Ripper mode - uses old task-based approach instead of ModelActors
-                ripper: bool = False):  # If True, use task-based parallel_predict instead of ModelActor pool
+                ripper: bool = False,  # If True, use task-based parallel_predict instead of ModelActor pool
+                ripper_ignore_cpu_ram_cap: bool = False,  # CPU Ripper: skip RAM-based max_pending_tasks clamp
+                ignore_cpu_ram_cap: bool = False):  # CPU: skip RAM caps in mseed_predictor (ModelActor pool + Ripper queue)
          
         self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
         self.input_dir = input_dir
@@ -108,6 +110,8 @@ class RunEQCCTPro():
         
         # Ripper mode - uses old task-based approach instead of ModelActors
         self.ripper = ripper
+        self.ripper_ignore_cpu_ram_cap = ripper_ignore_cpu_ram_cap
+        self.ignore_cpu_ram_cap = ignore_cpu_ram_cap
 
         # Validate model type and parameters
         if self.model_type not in ['eqcct', 'seisbench']:
@@ -308,7 +312,9 @@ class RunEQCCTPro():
                                         seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
                                         ram_safety_cap=self.ram_safety_cap,
                                         cudnn_headroom=self.cudnn_headroom,
-                                        ripper=self.ripper))
+                                        ripper=self.ripper,
+                                        ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
+                                        ignore_cpu_ram_cap=self.ignore_cpu_ram_cap))
                     break
                 
                 else: # If there are more tasks than maximum, just process them
@@ -444,6 +450,7 @@ class EvaluateSystem():
                  min_cpu_amount: int = 1,
                  min_conc_stations: int = 1, 
                  conc_station_tasks_step_size: int = 1,
+                 conc_station_tasks_max_only: bool = False,
                  max_vram_mb:float = None,
                  gpu_vram_safety_cap:float = 0.90, 
                  cudnn_headroom:float = 0.25,
@@ -461,7 +468,9 @@ class EvaluateSystem():
                  seisbench_child_model: str = None,
                  Detection_threshold: float = 0.3,
                  # Ripper mode - uses old task-based approach instead of ModelActors
-                 ripper: bool = False): 
+                 ripper: bool = False,
+                 ripper_ignore_cpu_ram_cap: bool = False,
+                 ignore_cpu_ram_cap: bool = False):
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
@@ -500,6 +509,7 @@ class EvaluateSystem():
         self.min_cpu_amount = min_cpu_amount
         self.min_conc_stations = min_conc_stations # default is = 1 
         self.conc_station_tasks_step_size = conc_station_tasks_step_size # default is = 1 
+        self.conc_station_tasks_max_only = conc_station_tasks_max_only
         self.stations2use_list = list(range(10, 105, 5)) if stations2use is None else generate_station_list(self.starting_amount_of_stations, stations2use, self.station_list_step_size,)
         self.start_time = start_time
         self.end_time = end_time
@@ -516,6 +526,8 @@ class EvaluateSystem():
         
         # Ripper mode - uses old task-based approach instead of ModelActors
         self.ripper = ripper
+        self.ripper_ignore_cpu_ram_cap = ripper_ignore_cpu_ram_cap
+        self.ignore_cpu_ram_cap = ignore_cpu_ram_cap
 
         # Validate model type and parameters
         if self.model_type not in ['eqcct', 'seisbench']:
@@ -678,21 +690,29 @@ class EvaluateSystem():
     def _concurrency_test_values_for_station_count(self, num_stations_capped: int) -> list:
         """Concurrency levels to benchmark for station count N.
 
+        If conc_station_tasks_max_only: return [N] only (one trial at full station count).
+
         If conc_station_tasks_step_size == 0: use 20%, 40%, 60%, 80%, 100% of N (rounded, deduped),
-        then keep values >= min_conc_stations. This avoids starting at 1 concurrent task when the
-        step is 2+ (e.g. N=10 → 2,4,6,8,10 not 1,3,5,7,9).
+        then keep values >= min_conc_stations. N is always appended if missing (e.g. rounding edge cases).
+        This avoids starting at 1 concurrent task when the step is 2+ (e.g. N=10 → 2,4,6,8,10 not 1,3,5,7,9).
 
         Otherwise: range(min_conc_stations, N+1, step) with step = conc_station_tasks_step_size.
         """
         if num_stations_capped <= 0:
             return []
+        if self.conc_station_tasks_max_only:
+            return [num_stations_capped] if num_stations_capped >= self.min_conc_stations else []
         if self.conc_station_tasks_step_size == 0:
             raw = []
             for frac in (0.2, 0.4, 0.6, 0.8, 1.0):
                 v = min(num_stations_capped, max(1, int(round(num_stations_capped * frac))))
                 raw.append(v)
             vals = sorted(set(raw))
-            return [v for v in vals if v >= self.min_conc_stations]
+            vals = [v for v in vals if v >= self.min_conc_stations]
+            if num_stations_capped >= self.min_conc_stations and num_stations_capped not in vals:
+                vals.append(num_stations_capped)
+                vals.sort()
+            return vals
         step = max(1, self.conc_station_tasks_step_size)
         return sorted(set(range(self.min_conc_stations, num_stations_capped + 1, step)))
 
@@ -944,6 +964,15 @@ class EvaluateSystem():
                 # The actual limit is RAM, not CPUs
                 # parallelization.py will cap to min(requested, max_actors_by_ram)
                 max_actors = max(1, max_actors_by_ram)
+                if self.ignore_cpu_ram_cap and not self.ripper:
+                    cap_st = max(unique_stations_list) if unique_stations_list else max_actors
+                    if cap_st > max_actors:
+                        self.logger.warning(
+                            "ignore_cpu_ram_cap=True: raising effective max actors for EvaluateSystem "
+                            "from %s to %s (max station count in this block). OOM risk.",
+                            max_actors, cap_st,
+                        )
+                    max_actors = max(max_actors, cap_st)
                 
                 # Check if at least one actor fits in memory
                 one_actor_fits = ram_per_actor <= aggregate_ram_cap_mb
@@ -1076,11 +1105,16 @@ class EvaluateSystem():
                         if not new_concurrent_values:
                             continue  # All concurrency values already tested
                         for num_concurrent_predictions in new_concurrent_values:
-                            # Optimization: if the requested concurrency exceeds what can fit in memory,
-                            # cap it to the maximum actors possible and then stop testing higher 
-                            # concurrency levels for this configuration.
+                            # ModelActor: cap requested concurrency to RAM-budgeted actor count and
+                            # stop marching (higher grid points would duplicate the same cap).
+                            # Ripper: do not pre-cap here; mseed_predictor / parallelization applies
+                            # task-queue limits (and optional ripper_ignore_cpu_ram_cap / ignore_cpu_ram_cap).
                             stop_concurrency_marching = False
-                            if num_concurrent_predictions >= max_actors:
+                            if (
+                                not self.ripper
+                                and not self.ignore_cpu_ram_cap
+                                and num_concurrent_predictions >= max_actors
+                            ):
                                 if num_concurrent_predictions > max_actors:
                                     self.logger.info(f"Capping concurrency: {num_concurrent_predictions} -> {max_actors} (RAM limit reached)")
                                 num_concurrent_predictions = max_actors
@@ -1192,7 +1226,9 @@ class EvaluateSystem():
                                                             seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
                                                             ram_safety_cap=self.ram_safety_cap,
                                                             cudnn_headroom=self.cudnn_headroom,
-                                                            ripper=self.ripper))
+                                                            ripper=self.ripper,
+                                                            ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
+                                                            ignore_cpu_ram_cap=self.ignore_cpu_ram_cap))
                                     
                                         break
                                 
@@ -1832,7 +1868,9 @@ class EvaluateSystem():
                                 seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
                                 ram_safety_cap=self.ram_safety_cap,
                                 cudnn_headroom=self.cudnn_headroom,
-                                ripper=self.ripper
+                                ripper=self.ripper,
+                                ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
+                                ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
                             )
                             
                             # Wait for result

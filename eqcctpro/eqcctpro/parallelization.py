@@ -950,6 +950,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
               cudnn_headroom=0.20,
               # Ripper mode - uses old task-based approach instead of ModelActors
               ripper=False,
+              # CPU Ripper only: if True, do not clamp max_pending_tasks using the RAM heuristic
+              # (matches wide maxTasksQueue behavior in scmlpick; can OOM if set too high).
+              ripper_ignore_cpu_ram_cap=False,
+              # CPU ModelActor + CPU Ripper: skip RAM-budget caps (see ripper RAM branch and CPU actor pool).
+              ignore_cpu_ram_cap=False,
               # If set, use this exact station order/count (deterministic benchmarks).
               # Skips random.sample(stations2use) and specific_stations filtering.
               fixed_station_list=None):
@@ -1261,7 +1266,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 max_pending_tasks = number_of_concurrent_station_predictions
                 actual_free_ram_mb = None
             
-            if actual_free_ram_mb is not None:
+            skip_ripper_cpu_ram_cap = ripper_ignore_cpu_ram_cap or ignore_cpu_ram_cap
+            if actual_free_ram_mb is not None and not skip_ripper_cpu_ram_cap:
                 # Budget = fraction of TOTAL installed RAM (same idea as get_available_ram_mb).
                 # Using only psutil.available * cap wrongly caps Ripper when much RAM is
                 # cached/freeable but not currently in the "available" counter — e.g. requesting
@@ -1286,6 +1292,14 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     f"RAM-aware concurrency: {max_pending_tasks} concurrent tasks "
                     f"(Total RAM: {system_ram_total_mb:.0f} MB, budget {ripper_ram_cap:.0%} → {usable_ram_mb:.0f} MB, "
                     f"currently available: {actual_free_ram_mb:.0f} MB, per-task estimate: {ram_per_task_mb:.0f} MB)"
+                )
+            elif skip_ripper_cpu_ram_cap:
+                requested_concurrency = number_of_concurrent_station_predictions
+                max_pending_tasks = max(1, int(requested_concurrency))
+                logger.warning(
+                    "RIPPER: ripper_ignore_cpu_ram_cap/ignore_cpu_ram_cap set; using requested concurrency %s without "
+                    "RAM-based clamp (scmlpick-style wide queues). Risk of OOM if concurrency exceeds physical RAM.",
+                    max_pending_tasks,
                 )
         
         # ===== TIMING: End of setup, start of processing =====
@@ -1663,7 +1677,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Calculate max actors based on RAM (memory constraint)
             max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
-            n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            if ignore_cpu_ram_cap:
+                n_actors = max(1, requested_actors)
+                logger.warning(
+                    "ignore_cpu_ram_cap=True: creating %s SeisBenchModelActor(s) without RAM-based cap "
+                    "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
+                    n_actors, requested_actors, max(1, max_actors_by_ram),
+                )
+            else:
+                n_actors = min(requested_actors, max(1, max_actors_by_ram))
             
             logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
@@ -1875,7 +1897,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
             # Calculate max actors based on RAM (memory constraint)
             max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
-            n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            if ignore_cpu_ram_cap:
+                n_actors = max(1, requested_actors)
+                logger.warning(
+                    "ignore_cpu_ram_cap=True: creating %s ModelActor(s) without RAM-based cap "
+                    "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
+                    n_actors, requested_actors, max(1, max_actors_by_ram),
+                )
+            else:
+                n_actors = min(requested_actors, max(1, max_actors_by_ram))
             
             logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL (EQCCT) =====")
             logger.info(f"Requested concurrent tasks: {requested_actors}")
