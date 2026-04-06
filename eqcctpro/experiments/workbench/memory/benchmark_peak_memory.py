@@ -22,13 +22,14 @@ import psutil
 import numpy as np
 from pathlib import Path
 
-PROJECT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT / "eqcctpro"))
+# .../eqcctpro/experiments/workbench/memory/benchmark_peak_memory.py -> repo root is parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
 
 EQCCT_P = "/home/skevofilaxc/model/ModelPS/test_trainer_024.h5"
 EQCCT_S = "/home/skevofilaxc/model/ModelPS/test_trainer_021.h5"
 
-TRIAL_BASE = PROJECT / "results" / "trials"
+TRIAL_BASE = REPO_ROOT / "results" / "trials"
 MODEL_MAP = {
     "phasenet_original":             ("PhaseNet",      "PhaseNet",      "original"),
     "phasenetlight_stead":           ("PhaseNetLight", "PhaseNetLight", "stead"),
@@ -51,6 +52,12 @@ def get_optimal_configs():
                     for row in csv.DictReader(f):
                         n = int(float(row["Number of Stations Used"]))
                         if n != 228:
+                            continue
+                        v = (row.get("Trial Success") or "").strip().lower()
+                        if v not in ("1", "true", "yes", "1.0"):
+                            continue
+                        cpub = int(float(row.get("Number of CPUs Allocated for Ray to Use", -1) or -1))
+                        if cpub in (41, 46):
                             continue
                         tt = float(row.get("Total Trial Time (s)", 0) or 0)
                         if best_tt is None or tt < best_tt:
@@ -241,7 +248,7 @@ def main():
         key = f"{display}_{hw}_{orch}"
         results[key] = result
 
-    out_dir = PROJECT / "results" / "benchmark_results"
+    out_dir = REPO_ROOT / "results" / "benchmark_results"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "peak_memory_measured.json"
     with open(out_file, "w") as f:

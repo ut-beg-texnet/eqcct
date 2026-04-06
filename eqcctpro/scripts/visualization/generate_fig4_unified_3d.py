@@ -47,6 +47,20 @@ MARKER_MAP = {
     ("ModelActor", 2): ("s", "full"),
 }
 GREY = "#666666"
+_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+
+
+def _trial_ok(row) -> bool:
+    v = (row.get("Trial Success") or "").strip().lower()
+    return v in ("1", "true", "yes", "1.0")
+
+
+def _ray_cpus_allowed(row) -> bool:
+    try:
+        c = int(float(row.get("Number of CPUs Allocated for Ray to Use", -1)))
+    except (TypeError, ValueError):
+        return False
+    return c not in _EXCLUDED_RAY_CPUS
 
 
 def parse_gpu_count(gpu_str):
@@ -61,6 +75,8 @@ def load_optimal_per_station(csv_path):
     try:
         with open(csv_path) as f:
             for row in csv.DictReader(f):
+                if not _trial_ok(row) or not _ray_cpus_allowed(row):
+                    continue
                 try:
                     n = int(float(row.get("Number of Stations Used", 0)))
                     cpus = int(float(row.get("Number of CPUs Allocated for Ray to Use", 0)))
@@ -174,7 +190,9 @@ parallel_data = collect_parallel_data()
 cpu_counts = set()
 for (model, method, gpu_count), d in parallel_data.items():
     cpu_counts |= set(d["cpus"])
-cpu_counts = sorted(c for c in cpu_counts if c > 1)
+# Match paper protocol (5–20 Ray CPUs); ignore one-off blocks (e.g., 40 CPUs) for the 2×3 grid.
+_PROTOCOL_CPUS = (5, 8, 11, 14, 17, 20)
+cpu_counts = sorted(c for c in cpu_counts if c in _PROTOCOL_CPUS)
 
 # Shared axes
 X_MIN, X_MAX = 0, 228

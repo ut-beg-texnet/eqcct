@@ -5,8 +5,12 @@ Generate fig6: Ripper vs Model-Actor memory at 228 stations.
 Left:  CPU — Process-Tree RAM (GB)
 Right: GPU — Process-Tree VRAM (GB)
 
-Data from scripts/benchmark_peak_memory.py: N model instances loaded
-simultaneously via Ray actors; RAM/VRAM via psutil + pynvml.
+Data from experiments/workbench/memory/benchmark_peak_memory.py (or equivalent):
+N model instances loaded simultaneously via Ray actors; RAM/VRAM via psutil + pynvml.
+
+Re-run the benchmark and this script inside conda env eqcctpro using python3, e.g.:
+  conda run -n eqcctpro python3 experiments/workbench/memory/benchmark_peak_memory.py
+  conda run -n eqcctpro python3 scripts/visualization/generate_fig6_memory.py
 
 /// = Ripper, ... = Model-Actor.
 """
@@ -46,38 +50,59 @@ BAR_W   = 0.32
 gap     = 0.06
 offsets = [-(BAR_W / 2 + gap / 2), (BAR_W / 2 + gap / 2)]
 x       = np.arange(len(MODELS))
-YMAX    = 120
-YTICKS  = list(range(0, YMAX + 1, 20))
 
-fig, axes = plt.subplots(1, 2, figsize=(15, 6), sharey=True)
-fig.subplots_adjust(wspace=0.08)
+
+def nice_ylim(vmax):
+    """Upper axis limit with headroom and ~5 step ticks (no clipping of peaks)."""
+    if vmax <= 0:
+        return 10.0, [0, 2, 4, 6, 8, 10]
+    head = max(vmax * 1.08, vmax + 0.5)
+    step = max(5, 10 ** int(np.floor(np.log10(head))) // 2)
+    if head / step > 8:
+        step *= 2
+    ymax = float(np.ceil(head / step) * step)
+    yticks = np.arange(0, ymax + step * 0.01, step)
+    if len(yticks) > 8:
+        step *= 2
+        ymax = float(np.ceil(head / step) * step)
+        yticks = np.arange(0, ymax + step * 0.01, step)
+    return ymax, list(yticks)
+
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 6), sharey=False)
+fig.subplots_adjust(wspace=0.12)
 
 
 def draw_panel(ax, hw, mem_field, title, ylabel):
+    peak_max = 0.0
+    for i, m in enumerate(MODELS):
+        r_val = get(m, hw, "Ripper", mem_field)
+        a_val = get(m, hw, "MA", mem_field)
+        peak_max = max(peak_max, r_val, a_val)
+
+    ymax, yticks = nice_ylim(peak_max)
+    pad = ymax * 0.012
+    label_clip = ymax * 0.985
+
     for i, m in enumerate(MODELS):
         c = MODEL_COLORS[m]
         r_val = get(m, hw, "Ripper", mem_field)
         a_val = get(m, hw, "MA", mem_field)
 
-        bar_r = min(r_val, YMAX)
-        bar_a = min(a_val, YMAX)
-
-        ax.bar(x[i] + offsets[0], bar_r, BAR_W,
+        ax.bar(x[i] + offsets[0], r_val, BAR_W,
                color=c, edgecolor="white", linewidth=0.7,
                hatch="///", zorder=3)
-        ax.bar(x[i] + offsets[1], bar_a, BAR_W,
+        ax.bar(x[i] + offsets[1], a_val, BAR_W,
                color=c, edgecolor="white", linewidth=0.7,
                hatch="...", zorder=3)
 
-        pad = YMAX * 0.008
         for j, v in enumerate([r_val, a_val]):
             if v > 0.3:
-                display_v = min(v, YMAX)
-                y_text = min(display_v + pad, YMAX * 0.96)
-                va = "bottom" if display_v + pad <= YMAX * 0.96 else "top"
+                y_text = min(v + pad, label_clip)
+                va = "bottom" if v + pad <= label_clip else "top"
                 ax.text(x[i] + offsets[j], y_text,
                         f"{v:.1f}", ha="center", va=va,
-                        fontsize=8, fontweight="bold", color=c, clip_on=True)
+                        fontsize=8, color=c, clip_on=True)
 
     xlabels = []
     for i, m in enumerate(MODELS):
@@ -87,11 +112,12 @@ def draw_panel(ax, hw, mem_field, title, ylabel):
 
     ax.set_xticks(x)
     ax.set_xticklabels(xlabels, fontsize=9, rotation=25, ha="right")
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+    ax.set_title(title, fontsize=12, pad=10)
     ax.set_ylabel(ylabel, fontsize=11)
     ax.set_xlabel("Model", fontsize=11, labelpad=10)
-    ax.set_ylim(0, YMAX)
-    ax.set_yticks(YTICKS)
+    visible_ticks = [t for t in yticks if t <= ymax]
+    ax.set_yticks(visible_ticks)
+    ax.set_ylim(0, ymax)
     ax.yaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.6, zorder=0)
     ax.set_axisbelow(True)
     ax.spines[["top", "right"]].set_visible(False)
@@ -117,7 +143,7 @@ fig.legend(
 
 fig.suptitle(
     "Ripper vs. Model-Actor:\nPeak Memory at 228 Stations\n",
-    fontsize=14, fontweight="bold", y=1.01,
+    fontsize=14, y=1.01,
 )
 
 out = PROJECT / "docs" / "figures" / "fig6.png"

@@ -7,15 +7,11 @@ Both figures use a 2x3 grid of subplots, one per CPU allocation present in the t
 trial directory (5, 10, …, 225, 228). This is the scaling plot for the paper; 228-station
 bar charts may use additional fixed-228 experiments not folded into these curves.
 
-Fig 7 Ripper configs (fastest total time per (stations, cpus, gpu group)):
-  CPU Ripper:   PhaseNet
-  1 GPU Ripper: PhaseNetLight
-  2 GPU Ripper: PhaseNetLight
-
-Fig 8 Model Actor configs:
-  CPU MA:   PhaseNet
-  1 GPU MA: EQT-NC
-  2 GPU MA: PhaseNet
+Ripper and Model Actor curves are chosen from trial CSVs: for each method and
+hardware class (CPU, 1 GPU, 2 GPUs), we take the model with the lowest mean
+successful total trial time over the station grid (5, 10, …, 225, 228) and
+Ray CPU allocations (5, 8, 11, 14, 17, 20). If no data exist for a slot, the
+script falls back to the previous static choice for that slot.
 """
 import csv
 from pathlib import Path
@@ -59,17 +55,26 @@ SERIAL_TABLE = {
     ("EQT-NC", "GPU"): (1.171, 0.458, 8.18),
 }
 
-RIPPER_CONFIGS = [
+ALL_MODELS = ["PhaseNet", "PhaseNetLight", "EQTransformer", "EQT-NC", "EQCCT"]
+
+FALLBACK_RIPPER = [
     ("PhaseNet", "Ripper", 0),
     ("PhaseNetLight", "Ripper", 1),
     ("PhaseNetLight", "Ripper", 2),
 ]
-MA_CONFIGS = [
+FALLBACK_MA = [
     ("PhaseNet", "ModelActor", 0),
     ("EQT-NC", "ModelActor", 1),
     ("PhaseNet", "ModelActor", 2),
 ]
-ALL_CONFIGS = RIPPER_CONFIGS + MA_CONFIGS
+
+_PROTOCOL_CPUS = (5, 8, 11, 14, 17, 20)
+ALL_CANDIDATE_CONFIGS = [
+    (m, method, g)
+    for m in ALL_MODELS
+    for method in ("Ripper", "ModelActor")
+    for g in (0, 1, 2)
+]
 
 VALID_STATIONS = set(range(5, 226, 5)) | {228}
 GREY = "#666666"
@@ -88,6 +93,20 @@ MARKER_STYLE = {
 }
 
 LINE_WIDTH = 3.0
+_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+
+
+def _trial_ok(row) -> bool:
+    v = (row.get("Trial Success") or "").strip().lower()
+    return v in ("1", "true", "yes", "1.0")
+
+
+def _ray_cpus_allowed(row) -> bool:
+    try:
+        c = int(float(row.get("Number of CPUs Allocated for Ray to Use", -1)))
+    except (TypeError, ValueError):
+        return False
+    return c not in _EXCLUDED_RAY_CPUS
 
 
 def parse_gpu_count(gpu_str):
@@ -112,6 +131,8 @@ def load_all_rows(csv_path):
     try:
         with open(csv_path) as f:
             for row in csv.DictReader(f):
+                if not _trial_ok(row) or not _ray_cpus_allowed(row):
+                    continue
                 try:
                     n = int(float(row.get("Number of Stations Used", 0)))
                     cpus = int(float(row.get("Number of CPUs Allocated for Ray to Use", 0)))
@@ -141,7 +162,7 @@ def load_all_rows(csv_path):
 
 
 def collect_data_for_configs():
-    best = {cfg: {} for cfg in ALL_CONFIGS}
+    best = {cfg: {} for cfg in ALL_CANDIDATE_CONFIGS}
     for d in sorted(TRIALS.iterdir()):
         if not d.is_dir():
             continue
@@ -167,6 +188,34 @@ def collect_data_for_configs():
     return best
 
 
+def pick_fastest_config(config_data, method: str, gpu_grp: int):
+    best = None
+    best_key = None
+    for m in ALL_MODELS:
+        cfg = (m, method, gpu_grp)
+        tts = [
+            vals[0]
+            for (n, cpus), vals in config_data.get(cfg, {}).items()
+            if n in VALID_STATIONS and cpus in _PROTOCOL_CPUS
+        ]
+        if not tts:
+            continue
+        mean_tt = sum(tts) / len(tts)
+        key = (mean_tt, -len(tts), m)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = cfg
+    return best
+
+
+def build_method_configs(config_data, method: str, fallbacks):
+    out = []
+    for gpu_grp, fb in enumerate(fallbacks):
+        chosen = pick_fastest_config(config_data, method, gpu_grp)
+        out.append(chosen if chosen is not None else fb)
+    return out
+
+
 def amdahl_ideal_batch(load, annotate_228, workers, stations):
     if workers <= 0:
         return None
@@ -174,12 +223,68 @@ def amdahl_ideal_batch(load, annotate_228, workers, stations):
     return [load + n * t_per_station / workers for n in stations]
 
 
-def make_figure(configs, title, out_name, serial_whitelist: set[str]):
-    config_data = collect_data_for_configs()
+def _ripper_legend_model_label(model: str) -> str:
+    if model == "EQTransformer":
+        return "EQT"
+    return model
+
+
+def _ripper_fig7_legend_handles(configs):
+    """
+    Legend order: PhaseNet, CPU, EQT, 1 GPU, EQT-NC, 2 GPUs, Amdahl ideal,
+    per-station streaming (interleaved model patch + hardware marker per Ripper slot).
+    """
+    ms = 14
+    mew = 1.5
+    hw_short = {0: "CPU", 1: "1 GPU", 2: "2 GPUs"}
+    handles = []
+    for model, mth, gpu_grp in sorted(configs, key=lambda c: c[2]):
+        handles.append(
+            mpatches.Patch(
+                facecolor=MODEL_COLORS[model],
+                edgecolor="white",
+                label=_ripper_legend_model_label(model),
+            )
+        )
+        marker, _fill = MARKER_STYLE[(mth, gpu_grp)]
+        h = Line2D(
+            [0],
+            [0],
+            marker=marker,
+            markersize=ms,
+            color="w",
+            markerfacecolor="none",
+            markeredgecolor=GREY,
+            markeredgewidth=mew,
+            linestyle="",
+        )
+        h.set_label(hw_short[gpu_grp])
+        handles.append(h)
+    h_amdahl = Line2D([0], [0], color=RED, linestyle=":", linewidth=LINE_WIDTH)
+    h_amdahl.set_label("Amdahl ideal")
+    handles.append(h_amdahl)
+    h_stream = Line2D([0], [0], color=GREY, linestyle="-.", linewidth=LINE_WIDTH)
+    h_stream.set_label("Per-station streaming")
+    handles.append(h_stream)
+    return handles
+
+
+
+
+def make_figure(
+    configs,
+    title,
+    out_name,
+    serial_whitelist: set[str],
+    config_data=None,
+    ripper_interleaved_legend: bool = False,
+):
+    if config_data is None:
+        config_data = collect_data_for_configs()
     cpu_counts = set()
     for cfg in configs:
         for (_n, cpus) in config_data[cfg]:
-            if cpus > 1:
+            if cpus > 1 and cpus in _PROTOCOL_CPUS:
                 cpu_counts.add(cpus)
     cpu_counts = sorted(cpu_counts)
     station_grid = np.array(sorted(VALID_STATIONS))
@@ -250,71 +355,81 @@ def make_figure(configs, title, out_name, serial_whitelist: set[str]):
     model_order = ["PhaseNet", "PhaseNetLight", "EQTransformer", "EQT-NC", "EQCCT"]
     sorted_fig_models = [m for m in model_order if m in fig_models]
     legend_handles = []
-    if len(sorted_fig_models) > 0:
-        legend_handles.append(
-            mpatches.Patch(facecolor=MODEL_COLORS[sorted_fig_models[0]], edgecolor="white", label=sorted_fig_models[0])
+    if ripper_interleaved_legend:
+        legend_handles = _ripper_fig7_legend_handles(configs)
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            ncol=4,
+            fontsize=20,
+            framealpha=0.95,
+            bbox_to_anchor=(0.05, -0.04, 0.9, 0.08),
+            bbox_transform=fig.transFigure,
+            columnspacing=3,
+            handletextpad=2,
         )
-    if len(sorted_fig_models) > 1:
-        legend_handles.append(
-            mpatches.Patch(facecolor=MODEL_COLORS[sorted_fig_models[1]], edgecolor="white", label=sorted_fig_models[1])
+    else:
+        for m in sorted_fig_models:
+            legend_handles.append(
+                mpatches.Patch(facecolor=MODEL_COLORS[m], edgecolor="white", label=m)
+            )
+        h_stream = Line2D([0], [0], color=GREY, linestyle="-.", linewidth=LINE_WIDTH)
+        h_stream.set_label("Per-station streaming (serial)")
+        legend_handles.append(h_stream)
+        h_cpu = Line2D(
+            [0],
+            [0],
+            marker="o",
+            markersize=16,
+            color="w",
+            markerfacecolor="none",
+            markeredgecolor=GREY,
+            markeredgewidth=2.0,
+            linestyle="",
         )
-    h_stream = Line2D([0], [0], color=GREY, linestyle="-.", linewidth=LINE_WIDTH)
-    h_stream.set_label("Per-station streaming (serial)")
-    legend_handles.append(h_stream)
-    h_cpu = Line2D(
-        [0],
-        [0],
-        marker="o",
-        markersize=16,
-        color="w",
-        markerfacecolor="none",
-        markeredgecolor=GREY,
-        markeredgewidth=2.0,
-        linestyle="",
-    )
-    h_cpu.set_label("CPU (0 GPUs)")
-    legend_handles.append(h_cpu)
-    h_1gpu = Line2D(
-        [0],
-        [0],
-        marker="D",
-        markersize=16,
-        color="w",
-        markerfacecolor="none",
-        markeredgecolor=GREY,
-        markeredgewidth=2.0,
-        linestyle="",
-    )
-    h_1gpu.set_label("1 GPU")
-    legend_handles.append(h_1gpu)
-    h_2gpu = Line2D(
-        [0],
-        [0],
-        marker="s",
-        markersize=16,
-        color="w",
-        markerfacecolor="none",
-        markeredgecolor=GREY,
-        markeredgewidth=2.0,
-        linestyle="",
-    )
-    h_2gpu.set_label("2 GPUs")
-    legend_handles.append(h_2gpu)
-    h_amdahl = Line2D([0], [0], color=RED, linestyle=":", linewidth=3.5)
-    h_amdahl.set_label("Amdahl ideal (batch-based)")
-    legend_handles.append(h_amdahl)
+        h_cpu.set_label("CPU (0 GPUs)")
+        legend_handles.append(h_cpu)
+        h_1gpu = Line2D(
+            [0],
+            [0],
+            marker="D",
+            markersize=16,
+            color="w",
+            markerfacecolor="none",
+            markeredgecolor=GREY,
+            markeredgewidth=2.0,
+            linestyle="",
+        )
+        h_1gpu.set_label("1 GPU")
+        legend_handles.append(h_1gpu)
+        h_2gpu = Line2D(
+            [0],
+            [0],
+            marker="s",
+            markersize=16,
+            color="w",
+            markerfacecolor="none",
+            markeredgecolor=GREY,
+            markeredgewidth=2.0,
+            linestyle="",
+        )
+        h_2gpu.set_label("2 GPUs")
+        legend_handles.append(h_2gpu)
+        h_amdahl = Line2D([0], [0], color=RED, linestyle=":", linewidth=3.5)
+        h_amdahl.set_label("Amdahl ideal (batch-based)")
+        legend_handles.append(h_amdahl)
 
-    fig.legend(
-        handles=legend_handles,
-        loc="lower center",
-        ncol=7,
-        fontsize=18,
-        framealpha=0.95,
-        bbox_to_anchor=(0.05, -0.06, 0.9, 0.08),
-        bbox_transform=fig.transFigure,
-        columnspacing=1.5,
-        handletextpad=1.2,
-    )
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            ncol=min(len(legend_handles), 11),
+            fontsize=18,
+            framealpha=0.95,
+            bbox_to_anchor=(0.05, -0.06, 0.9, 0.08),
+            bbox_transform=fig.transFigure,
+            columnspacing=1.5,
+            handletextpad=1.2,
+        )
     fig.suptitle(title, fontsize=28, fontweight="bold", y=1.02)
     plt.subplots_adjust(bottom=0.12, top=0.94, left=0.06, right=0.98)
     OUT.mkdir(parents=True, exist_ok=True)
@@ -324,16 +439,29 @@ def make_figure(configs, title, out_name, serial_whitelist: set[str]):
     print(f"Saved {out_path}")
 
 
+def _serial_whitelist_for_configs(configs):
+    return {m for (m, _, _) in configs if (m, "CPU") in SERIAL_TABLE}
+
+
 if __name__ == "__main__":
+    full_data = collect_data_for_configs()
+    ripper_cfgs = build_method_configs(full_data, "Ripper", FALLBACK_RIPPER)
+    ma_cfgs = build_method_configs(full_data, "ModelActor", FALLBACK_MA)
+    print("Fig 7 Ripper (method, gpu_grp):", ripper_cfgs)
+    print("Fig 8 ModelActor:", ma_cfgs)
+
     make_figure(
-        RIPPER_CONFIGS,
+        ripper_cfgs,
         "Serial vs Fastest Ripper vs Amdahl Ideal",
         "fig7_serial_vs_ripper.png",
-        serial_whitelist={"PhaseNet", "PhaseNetLight"},
+        serial_whitelist=_serial_whitelist_for_configs(ripper_cfgs),
+        config_data=full_data,
+        ripper_interleaved_legend=True,
     )
     make_figure(
-        MA_CONFIGS,
+        ma_cfgs,
         "Serial vs Fastest Model Actor vs Amdahl Ideal",
         "fig8_serial_vs_modelactor.png",
-        serial_whitelist={"PhaseNet", "PhaseNetLight", "EQT-NC"},
+        serial_whitelist=_serial_whitelist_for_configs(ma_cfgs),
+        config_data=full_data,
     )

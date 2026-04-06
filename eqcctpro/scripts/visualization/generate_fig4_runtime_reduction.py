@@ -3,6 +3,8 @@
 Generate fig4: Runtime Reduction barplot comparing Ripper vs Model-Actor at 228 stations.
 Runtime Reduction = (1 - MA Total / Ripper Total) × 100%
 Data: minimum Total Trial Time at 228 stations from trial CSVs (same source as fig5).
+
+X-axis: model names; device legend (CPU / GPU bar colors) is centered below the Model label.
 """
 import csv
 import matplotlib
@@ -21,6 +23,9 @@ MODEL_MAP = {
     "eqcct":                         "EQCCT",
 }
 
+_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+
+
 def min_tt_228(csv_path):
     best = None
     try:
@@ -31,6 +36,15 @@ def min_tt_228(csv_path):
                 except (KeyError, ValueError):
                     continue
                 if n != 228:
+                    continue
+                v = (row.get("Trial Success") or "").strip().lower()
+                if v not in ("1", "true", "yes", "1.0"):
+                    continue
+                try:
+                    c = int(float(row["Number of CPUs Allocated for Ray to Use"]))
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if c in _EXCLUDED_RAY_CPUS:
                     continue
                 tt = float(row.get("Total Trial Time (s)", 0) or 0)
                 if best is None or tt < best:
@@ -80,7 +94,6 @@ x        = np.arange(len(models))
 bar_w    = 0.35
 fig, ax  = plt.subplots(figsize=(10, 5.5))
 
-# Colours consistent with the rest of the paper figures (muted blue / orange)
 CPU_COLOR = "#4878CF"
 GPU_COLOR = "#F28522"
 
@@ -91,49 +104,53 @@ bars_gpu = ax.bar(x + bar_w / 2, gpu_vals, bar_w,
                   color=GPU_COLOR, edgecolor="white", linewidth=0.8,
                   label="GPU")
 
-# ── Value labels on top of each bar ───────────────────────────────────────────
 for bar in bars_cpu:
     h = bar.get_height()
     ax.text(bar.get_x() + bar.get_width() / 2, h + 0.8,
             f"{int(h)}%", ha="center", va="bottom",
-            fontsize=10, fontweight="bold", color=CPU_COLOR)
+            fontsize=10, color=CPU_COLOR)
 
 for bar in bars_gpu:
     h = bar.get_height()
     ax.text(bar.get_x() + bar.get_width() / 2, h + 0.8,
             f"{int(h)}%", ha="center", va="bottom",
-            fontsize=10, fontweight="bold", color=GPU_COLOR)
+            fontsize=10, color=GPU_COLOR)
 
-# ── Axes formatting ────────────────────────────────────────────────────────────
 ax.set_xticks(x)
 ax.set_xticklabels(models, fontsize=12)
 ax.set_ylabel("Runtime Reduction over Ripper (%)", fontsize=12)
-ax.set_xlabel("Model", fontsize=12)
+ax.set_xlabel("Model", fontsize=12, labelpad=20)
 ax.set_ylim(0, 100)
 ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(xmax=100))
 ax.set_yticks(range(0, 101, 10))
 
-# Light horizontal grid
 ax.yaxis.grid(True, linestyle="--", linewidth=0.6, alpha=0.7, zorder=0)
 ax.set_axisbelow(True)
 ax.spines[["top", "right"]].set_visible(False)
 
-# ── Title ─────────────────────────────────────────────────────────────────────
 ax.set_title(
     "Model-Actor Runtime Reduction over Ripper\nat 228 Stations (CPU vs. GPU)",
-    fontsize=13, fontweight="bold", pad=12
+    fontsize=13, pad=12,
 )
 
-# ── Legend ────────────────────────────────────────────────────────────────────
 cpu_patch = mpatches.Patch(color=CPU_COLOR, label="CPU")
 gpu_patch = mpatches.Patch(color=GPU_COLOR, label="GPU")
-ax.legend(handles=[cpu_patch, gpu_patch],
-          title="Device", title_fontsize=10,
-          fontsize=10, framealpha=0.9,
-          loc="lower right", edgecolor="#cccccc")
+fig.legend(
+    handles=[cpu_patch, gpu_patch],
+    ncol=2,
+    fontsize=10,
+    framealpha=0.9,
+    edgecolor="#cccccc",
+    loc="upper center",
+    bbox_to_anchor=(0.505, 0.15),
+    bbox_transform=fig.transFigure,
+)
 
-fig.tight_layout()
-
-out = Path(__file__).resolve().parents[2] / "docs" / "figures" / "fig4.png"
-fig.savefig(out, dpi=180, bbox_inches="tight")
-print(f"Saved {out}")
+fig.subplots_adjust(bottom=0.30, top=0.92)
+fig.savefig(
+    Path(__file__).resolve().parents[2] / "docs" / "figures" / "fig4.png",
+    dpi=180,
+    bbox_inches="tight",
+    pad_inches=0.15,
+)
+print(f"Saved {Path(__file__).resolve().parents[2] / 'docs/figures/fig4.png'}")

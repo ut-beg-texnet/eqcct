@@ -55,6 +55,17 @@ def _trial_ok(row: dict) -> bool:
     return v in ("1", "true", "yes", "1.0")
 
 
+_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+
+
+def _ray_cpus_allowed(row: dict) -> bool:
+    try:
+        c = int(float(row["Number of CPUs Allocated for Ray to Use"]))
+    except (KeyError, ValueError, TypeError):
+        return False
+    return c not in _EXCLUDED_RAY_CPUS
+
+
 def min_total_228(csv_path, *, require_success: bool = False):
     """Return (min_total_trial_time, workers) at 228 stations.
 
@@ -73,7 +84,9 @@ def min_total_228(csv_path, *, require_success: bool = False):
                     continue
                 if n != 228:
                     continue
-                if require_success and not _trial_ok(row):
+                if not _trial_ok(row):
+                    continue
+                if not _ray_cpus_allowed(row):
                     continue
                 try:
                     tt = float(row["Total Trial Time (s)"])

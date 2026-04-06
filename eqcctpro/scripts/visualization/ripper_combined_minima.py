@@ -14,6 +14,18 @@ def trial_success(row: dict) -> bool:
     return v in ("1", "true", "yes", "1.0")
 
 
+# Exploratory high-CPU runs are omitted from paper tables / figures.
+_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+
+
+def ray_cpus_allowed(row: dict) -> bool:
+    try:
+        c = int(float(row.get("Number of CPUs Allocated for Ray to Use") or -1))
+    except (TypeError, ValueError):
+        return False
+    return c not in _EXCLUDED_RAY_CPUS
+
+
 def _gpu_count(raw: str | None) -> int:
     raw = (raw or "").strip()
     if not raw or raw == "[]":
@@ -40,7 +52,7 @@ def _scan_gpu_csv(path: Path) -> tuple[float, dict] | None:
                 n = int(float(row.get("Number of Stations Used") or 0))
             except (ValueError, TypeError):
                 continue
-            if n != 228 or not trial_success(row):
+            if n != 228 or not trial_success(row) or not ray_cpus_allowed(row):
                 continue
             try:
                 tt = float(row.get("Total Trial Time (s)") or 1e9)
