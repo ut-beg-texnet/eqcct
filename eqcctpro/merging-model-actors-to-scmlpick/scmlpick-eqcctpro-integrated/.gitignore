@@ -1,0 +1,10 @@
+docs/
+seiscomp/share/scmlpick/model/*
+!seiscomp/share/scmlpick/model/ModelPS/
+!seiscomp/share/scmlpick/model/ModelPS/**
+seiscomp/share/scmlpick/tools/bindings/*
+!seiscomp/share/scmlpick/tools/bindings/buildBindings.py
+!seiscomp/share/scmlpick/tools/bindings/setBinds.py
+seiscomp/share/scmlpick/tools/filters/*
+seiscomp/share/scmlpick/tools/regions/*
+seiscomp/share/scmlpick/tools/*.py

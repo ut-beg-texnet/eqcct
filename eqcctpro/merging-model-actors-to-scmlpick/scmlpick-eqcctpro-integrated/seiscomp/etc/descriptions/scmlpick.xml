@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<seiscomp>
+        <module name="scmlpick" category="texnet" author="Texas Seismological Network (TexNet)" inherit-global-bindings="true">
+                <description>
+                        Real-time seismic phase picking using machine-learning models (EQCCT by default)
+                </description>
+                <configuration>
+                        <parameter name="whiteChanns" type="list:string">
+                                <description>
+                                    Define the list of channles types that are allowed to process. Example: HH, CH
+                                </description>
+                        </parameter>
+                        <group name="eqcct">
+                                <parameter name="Pmodel" type="string">
+                                        <description>
+                                            EQCCT model to detect P phases.
+                                        </description>
+                                </parameter>
+                                <parameter name="Smodel" type="string">
+                                        <description>
+                                            EQCCT model to detect S phases.
+                                        </description>
+                                </parameter>
+                                <parameter name="windowLength" type="int" default="60">
+                                        <description>
+                                            Define the data window length in seconds to send to eqcct.
+                                        </description>
+                                </parameter>
+                                <parameter name="filterShift" type="double" default="2.5">
+                                        <description>
+                                            Define the time shift to initialize the filter. This data will not be processed, so timeShift must be greater than this. (in seconds)
+                                        </description>
+                                </parameter>
+                                <parameter name="probThreshold" type="double" default="0.001">
+                                        <description>
+                                            Minimum probability to reach to send a new pick.
+                                        </description>
+                                </parameter>              
+                                <parameter name="timeShift" type="int" default="30">
+                                        <description>
+                                            Define the time in seconds to overlap with the previous window.
+                                        </description>
+                                </parameter>
+                                <parameter name="minStasBulk" type="int" default="5">
+                                        <description>
+                                            Minimum number of stations with windowLength data available to send to EQCCT after firstWait. 
+                                            This number should be less than the total stations.
+                                            At least this number of real-time stations must be available to produce picks.
+                                        </description>
+                                </parameter>
+                                <parameter name="minDelayStasBulk" type="int" default="5">
+                                        <description>
+                                            Minimum number of delayed stations with windowLength data available to send to EQCCT after firstWait.
+                                            This number should be less than the total stations.
+                                        </description>
+                                </parameter>
+                                <parameter name="firstWait" type="int" default="5">
+                                        <description>
+                                            Minimum delay between now and the end time of the last minute saved in memory to compute all data available. First computation.
+                                        </description>
+                                </parameter>
+                                <parameter name="secondWait" type="int" default="3">
+                                        <description>
+                                            Minimum time to wait after first computation to proceed with Second computation.
+                                        </description>
+                                </parameter>
+                                <parameter name="maxWait" type="int" default="10">
+                                        <description>
+                                            Maximum time to wait after first computation to proceed with second computation.
+                                        </description>
+                                </parameter>
+                                <parameter name="startLatency" type="int" default="60">
+                                        <description>
+                                            Define time in seconds to wait before sending the first data packet to eqcct.
+                                        </description>
+                                </parameter>              
+                                <parameter name="timeRemoveTrace" type="int" default="600">
+                                        <description>
+                                            Maximum time in seconds to wait before remove traces from the processing stream.
+                                        </description>
+                                </parameter>
+                                <parameter name="traceDelay" type="int" default="120">
+                                        <description>
+                                            Minimum delay in seconds between the current time and the start time of data acquired to send data to delayed data processing.
+                                        </description>
+                                </parameter>
+                                <parameter name="eqcctPthr" type="double" default="0.001">
+                                        <description>
+                                            Minimum probability to reach to send a new P pick.
+                                        </description>
+                                </parameter>
+                                <parameter name="eqcctSthr" type="double" default="0.002">
+                                        <description>
+                                            Minimum probability to reach to send a new S pick.
+                                        </description>
+                                </parameter>
+                                <parameter name="eqcctOverlap" type="int" default="0">
+                                        <description>
+                                            If set the detection and picking are performed in overlapping windows.
+                                        </description>
+                                </parameter>
+                                <parameter name="eqcctBatchSize" type="int" default="1">
+                                        <description>
+                                            Batch size. This wont affect the speed much but can affect the performance. A value beteen 200 to 1000 is recommended.
+                                        </description>
+                                </parameter>
+                                <parameter name="defaultPickerModel" type="string" default="EQCCT" values="EQCCT,PhaseNet/original,PhaseNet/stead,PhaseNet/ethz,PhaseNet/scedc,PhaseNet/pisdl,PhaseNet/instance,PhaseNetLight/stead,PhaseNetLight/ethz,PhaseNetLight/scedc,PhaseNetLight/instance,EQTransformer/original,EQTransformer/original_nonconservative,EQTransformer/stead,EQTransformer/ethz,EQTransformer/scedc,EQTransformer/instance,CRED/original,GPD/original,LFEDetect/original,OBSTransformer/original">
+                                        <description>
+                                            Fallback picker when a station binding has no profiles.*.pickerModel. EQCCT = TensorFlow/EQCCT; otherwise Parent/Child for SeisBench (scconfig shows a drop-down when values is set).
+                                        </description>
+                                </parameter>
+                                <parameter name="detectionThreshold" type="double" default="0.3">
+                                        <description>
+                                            SeisBench model.classify Detection_threshold (0–1). EQCCT picking uses eqcctPthr / eqcctSthr instead.
+                                        </description>
+                                </parameter>
+                                <parameter name="gpuID" type="int" default="0">
+                                        <description>
+                                            Primary CUDA device index when ray.gpuDeviceIds is unset: use -1 for CPU-only. If ray.gpuDeviceIds is set, it defines all GPU IDs and Ray num_gpus = len(list).
+                                        </description>
+                                </parameter>
+                                <parameter name="gpuLimit" type="int" default="1">
+                                        <description>
+                                            Legacy GPU tuning parameter (site-specific). For ModelActor/Ripper VRAM caps prefer ray.actorGpuMemoryLimitMB / ray.ripperGpuMemoryLimitMB.
+                                        </description>
+                                </parameter>
+                        </group>
+                        <group name="pipelines">
+                                <parameter name="profiles" type="list:String">
+                                        <description>
+                                                Profile names must match the profiles in the bindings configuration.
+                                        </description>
+                                </parameter>
+                                        <parameter name="Standard" type="boolean" default="true">
+                                                <description>
+                                                If enabled, the module sends picks to the messaging system as soon as the module produces them. In the default setup, 1-minute windows are processed every 30 seconds.
+                                                </description>
+                                        </parameter>
+                                        <parameter name="Simulation" type="boolean" default="false">
+                                                <description>
+                                                If enabled, the module sends picks simulating the true arrival time but includes a delay corresponding to the first processed window.
+                                                </description>
+                                        </parameter>
+                                        <parameter name="Bulk" type="boolean" default="false">
+                                                <description>
+                                                If enabled, the module stores picks and sends them to the messaging system periodically, at a configurable time interval.
+                                                </description>
+                                        </parameter>
+                                        <parameter name="bulkInverval" type="int" default="1800">
+                                                <description>
+                                                Inverval in seconds used when bulk pick delivery strategy is enabled
+                                                </description>
+                                        </parameter>
+                                <group name="profiles">
+                                        <description>
+                                                Profiles including specific configurations.
+                                        </description>
+                                        <struct type="Pipeline profiles" link = "pipelines.profiles">
+                                                <parameter name="pickTargetGroup" type="String" default="PICK">
+                                                        <description>
+                                                        This is the name of the group to send pick messages for specific profile when standard pick delivery strategy is enabled
+                                                        </description>
+                                                </parameter>
+                                                <parameter name="pickSimulTargetGroup" type="String" default="PICK">
+                                                        <description>
+                                                        This is the name of the group to which pick messages will be sent for a specific profile when simulation pick delivery strategy is enabled
+                                                        </description>
+                                                </parameter>
+                                                <parameter name="pickBulkTargetGroup" type="String" default="PICK">
+                                                        <description>
+                                                        This is the name of the group to which pick messages will be sent for a specific profile when bulk pick delivery strategy is enabled.
+                                                        </description>
+                                                </parameter>
+                                                <parameter name="locTargetGroup" type="String" default="LOCATION">
+                                                        <description>
+                                                        This is the name of the group to send location messages for specific profile
+                                                        </description>
+                                                </parameter>
+                                                <parameter name="authorTarget" type="String" default="SCMLPICK">
+                                                        <description>
+                                                        This author should match the origin (location) author for locations to be checked against quality control parameters.
+                                                        </description>
+                                                </parameter>
+                                                 <parameter name="region" type="path" default="none">
+                                                        <description>
+                                                        The BNA file defining regions (closed polygons) or tuple with 4 elements. Inside this region, the origin evaluation status is TrueOrgEvalStat, and outside is FalseOrgEvalStat. If this is set to none, then the origin location will not be checked against any polygon.
+                                                        </description>
+                                                </parameter>
+                                          </struct>
+                                </group>
+                        </group>
+                        <group name="ray">
+                                <parameter name="inferenceMode" type="string" default="modelActor">
+                                        <description>
+                                            modelActor: persistent eqcctpro ModelActor pool (weights loaded once). ripper: each picker task loads EQCCT (higher overhead; use with ray.maxTasksQueue for concurrency). Also: --inference-mode on CLI.
+                                        </description>
+                                </parameter>
+                                <parameter name="numModelActors" type="int" default="0">
+                                        <description>
+                                            Number of ModelActors when inferenceMode=modelActor (0 = auto from ray.maxTasksQueue and number of visible GPUs). Also: --num-model-actors on CLI.
+                                        </description>
+                                </parameter>
+                                <parameter name="gpuDeviceIds" type="string" default="">
+                                        <description>
+                                            Comma-separated CUDA device IDs, e.g. 0 or 0,1. Sets CUDA_VISIBLE_DEVICES and Ray num_gpus. If empty, uses eqcct.gpuID alone when it is &gt;= 0. Also: --gpu-devices on CLI.
+                                        </description>
+                                </parameter>
+                                <parameter name="actorGpuMemoryLimitMB" type="int" default="0">
+                                        <description>
+                                            Optional TensorFlow soft VRAM limit per ModelActor (MB). 0 = no limit (dynamic growth). Ignored in ripper mode.
+                                        </description>
+                                </parameter>
+                                <parameter name="ripperGpuMemoryLimitMB" type="int" default="0">
+                                        <description>
+                                            Optional TensorFlow soft VRAM limit per picker task when inferenceMode=ripper and GPUs are visible (MB). 0 = no limit.
+                                        </description>
+                                </parameter>
+                                <parameter name="numCPUs" type="int" default="5">
+                                        <description>
+                                            Number of CPUs allocated for running the run_picker() to create the time chunks.
+                                        </description>
+                                </parameter>
+                                <parameter name="maxTasksQueue" type="int" default="50">
+                                        <description>
+                                            Maximum number of Ray picker tasks in flight (concurrent stations/time windows). Caps ModelActor round-robin load and Ripper concurrency.
+                                        </description>
+                                </parameter>
+                                <parameter name="numWorkers" type="int" default="1">
+                                        <description>
+                                            Number of groups to split stations. Each group will work in parallel without affecting the others. This helps prevent delays when working with a large number of stations and is usually only required when running more than 100 stations in real time.
+                                        </description>
+                                </parameter>
+                        </group>
+                        <group name="qcheck">
+                                <parameter name="latUncTHR" type="int" default="20">
+                                        <description>
+                                            Set the latitude uncertainty threshold. Above this value, the origin evaluation status is FalseOrgEvalStat, and below is TrueOrgEvalStat.
+                                        </description>
+                                </parameter>
+                                <parameter name="lonUncTHR" type="int" default="20">
+                                        <description>
+                                            Set the longitude uncertainty threshold. Above this value, the origin evaluation status is FalseOrgEvalStat, and below is TrueOrgEvalStat.
+                                        </description>
+                                </parameter>
+                                <parameter name="depthUncTHR" type="int" default="20">
+                                        <description>
+                                            Set the depth uncertainty threshold. Above this value, the origin evaluation status is FalseOrgEvalStat, and below is TrueOrgEvalStat.
+                                        </description>
+                                </parameter>
+                                <parameter name="depthTHR" type="int" default="20">
+                                        <description>
+                                            Set the depth threshold. Above this value, the origin evaluation status is FalseOrgEvalStat, and below is TrueOrgEvalStat.
+                                        </description>
+                                </parameter>
+                                <parameter name="azGapTHR" type="int" default="270">
+                                        <description>
+                                            Set the azimuthal gap threshold. Above this value, the origin evaluation status is FalseOrgEvalStat, and below is TrueOrgEvalStat.
+                                        </description>
+                                </parameter>
+                                <parameter name="TrueOrgEvalStat" type="int" default="5">
+                                        <description>
+                                            Set the origin evaluation status to use when the origin fulfills all quality thresholds. Use integers from 0 to 5. Each integer means following next list: 0=preliminary, 1=confirmed, 2=reviewed, 3=final, 4=rejected, 5=reported.
+                                        </description>
+                                </parameter>
+                                <parameter name="FalseOrgEvalStat" type="int" default="4">
+                                        <description>
+                                            Set the origin evaluation status to use when the origin does not fulfill one or more quality thresholds. Use integers from 0 to 5. Each integer means following next list: 0=preliminary, 1=confirmed, 2=reviewed, 3=final, 4=rejected, 5=reported
+                                        </description>
+                                </parameter>
+                        </group>
+                </configuration>
+        </module>
+	<binding module="scmlpick">
+		<description>
+			Configures a station for picking. A station without a binding assigned
+			will not be picked.
+		</description>
+		<configuration>
+                        <parameter name="profiles" type="list:String" default="">
+                                <description>
+                                        Profile names must match the profiles in the module configuration.
+                                </description>
+                        </parameter>
+                        <group name="profiles">
+                                <description>
+                                      Activate the station for a specific profile. Profiles must exist in both the module configuration and the bindings.  
+                                </description>
+                                <struct type="Profiles" link = "profiles">
+                                        <parameter name="pickEnable" type="boolean" default="false">
+                                                <description>
+                                                        Enables/disables picking on a station.
+                                                </description>
+                                        </parameter>
+                                        <parameter name="filter" type="string" default="">
+                                                <description>
+                                                        Defines the filter to be used for picking.
+                                                </description>
+                                        </parameter>
+                                        <parameter name="pickerModel" type="string" default="EQCCT" values="EQCCT,PhaseNet/original,PhaseNet/stead,PhaseNet/ethz,PhaseNet/scedc,PhaseNet/pisdl,PhaseNet/instance,PhaseNetLight/stead,PhaseNetLight/ethz,PhaseNetLight/scedc,PhaseNetLight/instance,EQTransformer/original,EQTransformer/original_nonconservative,EQTransformer/stead,EQTransformer/ethz,EQTransformer/scedc,EQTransformer/instance,CRED/original,GPD/original,LFEDetect/original,OBSTransformer/original">
+                                                <description>
+                                                        Picker backend: EQCCT or a SeisBench Parent/Child preset (same list as eqcct.defaultPickerModel). scconfig uses values for a drop-down; unknown strings are rejected at runtime.
+                                                </description>
+                                        </parameter>
+                                </struct>
+                        </group>
+		</configuration>
+	</binding>
+</seiscomp>
