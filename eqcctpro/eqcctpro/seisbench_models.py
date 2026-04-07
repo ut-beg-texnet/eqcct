@@ -1,10 +1,25 @@
 import obspy
 import numpy as np
 import seisbench.models as sbm
+import time
+import random
 from pathlib import Path
 
 class SeisBenchModels:
-    def __init__(self, parent_model_name, child_model_name):
+    def __init__(self, parent_model_name, child_model_name, validate_pretrained=True):
+        """
+        Parameters:
+        -----------
+        parent_model_name : str
+            SeisBench model family (e.g. 'EQTransformer', 'PhaseNet')
+        child_model_name : str
+            Pretrained variant name (e.g. 'original', 'stead')
+        validate_pretrained : bool
+            If True (default), call list_pretrained() to verify child_model_name
+            exists on the SeisBench server. Set to False when the caller has
+            already validated (e.g. Ray actors after driver-side validation) to
+            avoid redundant network calls and thundering-herd 500 errors.
+        """
         self.models = {}
         self.parent_model_list = ['PhaseNet', 'PhaseNetLight', 'EQTransformer', 'CRED', 'GPD', 'LFEDetect', 'OBSTransformer']  # List of available models from SeisBench
 
@@ -19,19 +34,34 @@ class SeisBenchModels:
         # Check if child model is valid - use getattr to dynamically access the model class
         try:
             model_class = getattr(sbm, self.parent_model_name)
-            available_models = model_class.list_pretrained()
-            if child_model_name not in available_models:
-                raise ValueError(
-                    f"Child model {child_model_name} not found in {parent_model_name}. "
-                    f"Please choose from {available_models}"
-                )
         except AttributeError:
             raise ValueError(
                 f"Model class {self.parent_model_name} not found in seisbench.models. "
                 f"Please check the model name."
             )
+
+        if validate_pretrained:
+            available_models = self._list_pretrained_with_retry(model_class)
+            if available_models is not None and child_model_name not in available_models:
+                raise ValueError(
+                    f"Child model {child_model_name} not found in {parent_model_name}. "
+                    f"Please choose from {available_models}"
+                )
+
         self.child_model_name = child_model_name
         self.model = None  # Will be loaded in load_model()
+
+    @staticmethod
+    def _list_pretrained_with_retry(model_class, max_retries=3):
+        """Fetch list_pretrained() with retries and jitter to handle transient server errors."""
+        for i in range(max_retries):
+            try:
+                if i > 0:
+                    time.sleep(random.uniform(1.0, 3.0))
+                return model_class.list_pretrained()
+            except Exception:
+                if i == max_retries - 1:
+                    return None
 
     def load_model(self):
         """
@@ -141,6 +171,86 @@ def resampling(st):
     return st
 
 
+def process_raw_station_stream_3c(args, st, station):
+    """
+    SeisBench preprocessing (taper → bandpass → resample → trim → 3C) from an in-memory
+    ObsPy Stream that is already read, merged per file, and demeaned (same state as after
+    the file-read loop in mseed2stream_3c). Used with ray.put shared Streams (scmlpick-style).
+    """
+    if st is None or len(st) == 0:
+        raise ValueError(f"No traces for station {station} in shared Stream.")
+
+    st = obspy.Stream(traces=[tr.copy() for tr in st])
+    try:
+        st.merge(method=1, fill_value=0)
+    except Exception:
+        try:
+            st.merge(method=1, fill_value=0)
+        except Exception:
+            pass
+    if len(st) == 0:
+        raise ValueError(f"No valid data after merge for station {station}.")
+
+    max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)
+    st.taper(max_percentage=max_percentage, type="cosine")
+
+    freqmin, freqmax = 1.0, 45.0
+    if args.get("stations_filters") is not None:
+        try:
+            df_filters = args["stations_filters"]
+            row = df_filters[df_filters.sta == station].iloc[0]
+            freqmin, freqmax = float(row["hp"]), float(row["lp"])
+        except Exception:
+            pass
+
+    st.filter("bandpass", freqmin=freqmin, freqmax=freqmax, corners=2, zerophase=True)
+
+    if any(tr.stats.sampling_rate != 100.0 for tr in st):
+        try:
+            st.interpolate(100.0, method="linear")
+        except Exception:
+            st = resampling(st)
+
+    t0 = max(tr.stats.starttime for tr in st)
+    t1 = min(tr.stats.endtime for tr in st)
+    st.trim(t0, t1, pad=False)
+
+    by_last = {}
+    for tr in st:
+        by_last.setdefault(tr.stats.channel[-1], []).append(tr)
+
+    def _best_trace(letter):
+        lst = by_last.get(letter, [])
+        return lst[0] if lst else None
+
+    trE = _best_trace("E") or _best_trace("1")
+    trN = _best_trace("N") or _best_trace("2")
+    trZ = _best_trace("Z")
+
+    missing_components = []
+    if trZ is None:
+        missing_components.append("Z")
+    if trE is None:
+        missing_components.append("E (or 1)")
+    if trN is None:
+        missing_components.append("N (or 2)")
+
+    if missing_components:
+        available_channels = [tr.stats.channel for tr in st]
+        raise ValueError(
+            f"Missing required components for station {station}: {', '.join(missing_components)}. "
+            f"Available channels: {available_channels}. "
+            f"Please ensure the mSEED files contain 3-component data (E/N/Z or 1/2/Z)."
+        )
+
+    out = obspy.Stream(traces=[trE.copy(), trN.copy(), trZ.copy()])
+    out[0].stats.channel = out[0].stats.channel[:-1] + "E"
+    out[1].stats.channel = out[1].stats.channel[:-1] + "N"
+    out[2].stats.channel = out[2].stats.channel[:-1] + "Z"
+
+    return out, freqmin, freqmax
+
+
 def mseed2stream_3c(args, files_list, station):
     """
     Read miniSEED files and return a single 3-component ObsPy Stream
@@ -208,72 +318,4 @@ def mseed2stream_3c(args, files_list, station):
             f"Please check that the mSEED files are valid and contain data."
         )
 
-    # --- 2) Taper ---
-    max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)  # taper ~5 sec worth
-    st.taper(max_percentage=max_percentage, type="cosine")
-
-    # --- 3) Bandpass (station-specific if provided) ---
-    freqmin, freqmax = 1.0, 45.0
-    if args.get("stations_filters") is not None:
-        try:
-            df_filters = args["stations_filters"]
-            row = df_filters[df_filters.sta == station].iloc[0]
-            freqmin, freqmax = float(row["hp"]), float(row["lp"])
-        except Exception:
-            pass
-
-    st.filter("bandpass", freqmin=freqmin, freqmax=freqmax, corners=2, zerophase=True)
-
-    # --- 4) Resample to 100 Hz if needed ---
-    if any(tr.stats.sampling_rate != 100.0 for tr in st):
-        try:
-            st.interpolate(100.0, method="linear")
-        except Exception:
-            st = resampling(st)  # fallback
-
-    # --- 5) Force all traces to the SAME time window (intersection) ---
-    # This is the correct choice for "combine 3 streams into one waveform"
-    t0 = max(tr.stats.starttime for tr in st)
-    t1 = min(tr.stats.endtime for tr in st)
-    st.trim(t0, t1, pad=False)
-
-    # --- 6) Pick the best 3 components: prefer E/N/Z, fallback to 1/2/Z ---
-    by_last = {}
-    for tr in st:
-        by_last.setdefault(tr.stats.channel[-1], []).append(tr)
-
-    def _best_trace(letter):
-        """Choose the first trace for a given last-letter component."""
-        lst = by_last.get(letter, [])
-        return lst[0] if lst else None
-
-    trE = _best_trace("E") or _best_trace("1")
-    trN = _best_trace("N") or _best_trace("2")
-    trZ = _best_trace("Z")
-
-    # Check which components are missing and provide helpful error message
-    missing_components = []
-    if trZ is None:
-        missing_components.append("Z")
-    if trE is None:
-        missing_components.append("E (or 1)")
-    if trN is None:
-        missing_components.append("N (or 2)")
-    
-    if missing_components:
-        available_channels = [tr.stats.channel for tr in st]
-        raise ValueError(
-            f"Missing required components for station {station}: {', '.join(missing_components)}. "
-            f"Available channels: {available_channels}. "
-            f"Please ensure the mSEED files contain 3-component data (E/N/Z or 1/2/Z)."
-        )
-
-    out = obspy.Stream(traces=[trE.copy(), trN.copy(), trZ.copy()])
-
-    # Optional: normalize naming so your plotting labels look nice
-    # (This does NOT rotate; it only renames.)
-    out[0].stats.channel = out[0].stats.channel[:-1] + "E"
-    out[1].stats.channel = out[1].stats.channel[:-1] + "N"
-    out[2].stats.channel = out[2].stats.channel[:-1] + "Z"
-
-    return out, freqmin, freqmax
+    return process_raw_station_stream_3c(args, st, station)

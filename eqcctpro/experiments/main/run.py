@@ -4,9 +4,9 @@ from eqcctpro import RunEQCCTPro, EvaluateSystem, OptimalCPUConfigurationFinder,
 # --- Common Directory Paths (Modify for your local system) ---
 base_dir = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro'
 input_mseed_directory_path = os.path.join(base_dir, 'data/230_stations_1_min_dt')
-output_pick_directory_path = os.path.join(base_dir, 'results/csv/logs')
+output_pick_directory_path = os.path.join(base_dir, 'results/trial/logs')
 log_file_path = os.path.join(output_pick_directory_path, 'eqcctpro.log')
-csv_filepath = os.path.join(base_dir, 'results/csv')
+csv_filepath = os.path.join(base_dir, 'results/trials')
 models_dir = os.path.join(base_dir, 'models/EQCCT')
 tmp_dir = '/lambda1a/skevofilaxc/tmp'
 
@@ -18,7 +18,7 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # runner_eqcct_cpu = RunEQCCTPro(
 #     use_gpu=False,
 #     model_type='eqcct',
-#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'),
 #     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=output_pick_directory_path,
@@ -40,7 +40,7 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # runner_eqcct_gpu = RunEQCCTPro(
 #     use_gpu=True,
 #     model_type='eqcct',
-#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'),
 #     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=output_pick_directory_path,
@@ -107,29 +107,30 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # =============================================================================
 
 # --- Example E: Evaluate System capability using EQCCT Model (CPU) ---
-# eval_eqcct_cpu = EvaluateSystem(
-#     eval_mode='cpu',
-#     model_type='eqcct',
-#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
-#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
-#     input_dir=input_mseed_directory_path,
-#     output_dir=output_pick_directory_path,
-#     log_filepath=log_file_path,
-#     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct'),
-#     cpu_id_list=range(0, 20),
-#     min_cpu_amount=5,
-#     cpu_test_step_size=5,
-#     stations2use=50,
-#     starting_amount_of_stations=10,
-#     station_list_step_size=10,
-#     min_conc_stations=1,
-#     conc_station_tasks_step_size=5,
-#     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
-#     tmp_dir=tmp_dir,
-#     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00'
-# )
-# eval_eqcct_cpu.evaluate()
+eval_eqcct_cpu = EvaluateSystem(
+    eval_mode='cpu',
+    model_type='eqcct',
+    p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'),
+    s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+    input_dir=input_mseed_directory_path,
+    output_dir=output_pick_directory_path,
+    log_filepath=log_file_path,
+    csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct_ripper'),
+    cpu_id_list=range(0, 20),
+    min_cpu_amount=5,
+    cpu_test_step_size=5,
+    stations2use=228,
+    starting_amount_of_stations=10,
+    station_list_step_size=10,
+    min_conc_stations=1,
+    conc_station_tasks_step_size=0,
+    ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
+    tmp_dir=tmp_dir,
+    start_time='2024-12-15 12:00:00',
+    end_time='2024-12-15 12:01:00',
+    ripper=True
+)
+eval_eqcct_cpu.evaluate()
 
 # --- Example F: Evaluate System capability using SeisBench Model (CPU) ---
 # eval_seisbench_cpu = EvaluateSystem(
@@ -158,7 +159,7 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # eval_eqcct_gpu = EvaluateSystem(
 #     eval_mode='gpu',
 #     model_type='eqcct',
-#     p_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'),
 #     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
 #     input_dir=input_mseed_directory_path,
 #     output_dir=output_pick_directory_path,
@@ -213,18 +214,18 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # 3. Optimal Configuration Search (Using Evaluation Data)
 # =============================================================================
 
-# --- CPU Configuration Search ---
+# # --- CPU Configuration Search ---
 # cpu_finder = OptimalCPUConfigurationFinder(
-#     eval_sys_results_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct'), 
+#     eval_sys_results_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct_modelactor'), 
 #     log_file_path=log_file_path
 # )
-# cpu_finder.find_best_overall_usecase()
-# cpu_finder.find_optimal_for(cpu=10, station_count=50)
+# # cpu_finder.find_best_overall_usecase()
+# cpu_finder.find_optimal_for(cpu=20, station_count=228)
 
-# --- GPU Configuration Search ---
+# # --- GPU Configuration Search ---
 # gpu_finder = OptimalGPUConfigurationFinder(
-#     eval_sys_results_dir=os.path.join(csv_filepath, 'eval_gpu_seisbench'), 
+#     eval_sys_results_dir=os.path.join(csv_filepath, 'eval_gpu_eqcct_modelactor'), 
 #     log_file_path=log_file_path
 # )
-# gpu_finder.find_best_overall_usecase()
-# gpu_finder.find_optimal_for(num_cpus=10, gpu_list=[0, 1], station_count=100)
+# # gpu_finder.find_best_overall_usecase()
+# gpu_finder.find_optimal_for(num_cpus=20, gpu_list=[0,1], station_count=228)

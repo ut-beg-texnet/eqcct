@@ -1,0 +1,16 @@
+Model,Device,CPUs,GPUs,Conc. Tasks,Ripper Picking/Total (s)
+PhaseNet,CPU,20,0,91,34.25
+PhaseNetLight,CPU,20,0,91,35.38
+EQTransformer-NC,CPU,20,0,228,35.45
+EQTransformer,CPU,20,0,137,38.42
+EQTransformer,GPU,20,1,22,52.48
+EQTransformer-NC,GPU,20,1,22,53.31
+EQTransformer-NC,GPU,20,2,44,54.17
+EQTransformer,GPU,20,2,44,55.88
+PhaseNetLight,GPU,20,1,22,55.95
+PhaseNet,GPU,20,2,44,56.27
+PhaseNet,GPU,20,1,22,59.32
+PhaseNetLight,GPU,20,2,44,67.61
+EQCCT,CPU,20,0,137,76.07
+EQCCT,GPU,20,2,24,96.1
+EQCCT,GPU,20,1,12,127.35

@@ -141,10 +141,17 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     task_col = 'Number of Concurrent Station Tasks'
     actor_col = 'N ModelActors'
     ripper_task_col = 'Actual Ripper Concurrent Tasks'
-    runtime_col = 'Total Run time for Picker (s)'
     station_col = 'Number of Stations Used'
     timechunk_col = 'Total Number of Timechunks'
     concurrent_tc_col = 'Concurrent Timechunks Used'
+    
+    # Timing columns
+    total_trial_time_col = 'Total Trial Time (s)'           # Entire trial: setup + actor creation + processing
+    actor_creation_time_col = 'Actor Creation Time (s)'     # Time to spin up ModelActors (empty for Ripper)
+    avg_model_load_time_col = 'Avg Model Load Time (s)'     # Average model load time per task (Ripper only)
+    waveform_proc_time_col = 'Waveform Processing Time (s)' # Average time to load waveforms per task
+    picker_runtime_col = 'Total Run time for Picker (s)'    # Total time for all task processing
+    runtime_col = total_trial_time_col  # Default runtime for main plots uses total trial time
     
     # Memory columns (PID-isolated tracking)
     req_vram_actor_col = 'Requested VRAM per Actor (MB)'
@@ -171,9 +178,27 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     is_gpu_trial = df['GPU Count'].max() > 0
     trial_type = "GPU-based" if is_gpu_trial else "CPU-based"
     
-    # Detect execution mode (ModelActor vs Ripper)
+    # Detect execution mode (ModelActor vs Ripper) - MUST BE DONE BEFORE DISPLAY NAME DEFINITIONS
     execution_mode = detect_execution_mode(df)
     concurrency_col = get_concurrency_column(df, execution_mode)
+
+    # Rename for display in correlation matrix and summary
+    display_runtime_col = 'Total Trial Runtime (s)'
+    display_cpu_col = 'Number of CPUs Used'
+    display_gpu_col = 'Number of GPUs Used'
+    display_picking_col = 'Total Picking Time (s)'
+    if execution_mode == 'modelactor':
+        display_concurrency_col = "Number of ModelActor's Created"
+        display_setup_col = 'Actor Creation Time (s)'
+    else:
+        display_concurrency_col = 'Ripper Concurrent Tasks'
+        display_setup_col = 'Avg Model Load Time (s)'
+    
+    display_waveform_col = 'Waveform Processing Time (s)'
+    display_ram_col = 'Process Tree RAM (MB)'
+    display_vram_col = 'Process Tree VRAM (MB)'
+    display_stations_col = 'Number of Stations Used'
+    display_throughput_col = 'Throughput (Stations/s)'
     
     log(f"\n{'='*70}")
     log(f"EQCCTPRO EFFICIENCY ANALYSIS")
@@ -199,7 +224,9 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
         return None
     
     # Convert numeric columns
-    numeric_cols = [cpu_col, task_col, actor_col, ripper_task_col, runtime_col, station_col,
+    numeric_cols = [cpu_col, task_col, actor_col, ripper_task_col, station_col,
+                    total_trial_time_col, actor_creation_time_col, avg_model_load_time_col,
+                    waveform_proc_time_col, picker_runtime_col,
                     total_req_vram_col, total_req_ram_col, actual_vram_col, actual_ram_col,
                     ram_growth_col, vram_util_col, ram_util_col, num_workers_col]
     
@@ -219,11 +246,15 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     # =========================================================================
     # DERIVED METRICS
     # =========================================================================
-    # 1. Throughput (Stations per second)
-    df_success['Throughput (Stations/s)'] = df_success[station_col] / df_success[runtime_col]
+    # 1. Throughput (Stations per second) - based on Total Trial Time
+    df_success['Throughput (Stations/s)'] = df_success[station_col] / df_success[runtime_col].replace(0, np.nan)
+    
+    # 1b. Picker Throughput - based on Total Run time for Picker (pure processing time)
+    if picker_runtime_col in df_success.columns:
+        df_success['Picker Throughput (Stations/s)'] = df_success[station_col] / df_success[picker_runtime_col].replace(0, np.nan)
     
     # 2. Resource Efficiency
-    df_success['Throughput/CPU'] = df_success['Throughput (Stations/s)'] / df_success[cpu_col]
+    df_success['Throughput/CPU'] = df_success['Throughput (Stations/s)'] / df_success[cpu_col].replace(0, np.nan)
     df_success['Throughput/Concurrency'] = df_success['Throughput (Stations/s)'] / df_success['Effective Concurrency'].replace(0, np.nan)
     
     if is_gpu_trial:
@@ -232,11 +263,11 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
         )
 
     # 3. Memory Efficiency Metrics
-    df_success['RAM per Station (MB)'] = df_success[actual_ram_col] / df_success[station_col]
+    df_success['RAM per Station (MB)'] = df_success[actual_ram_col] / df_success[station_col].replace(0, np.nan)
     df_success['RAM per Concurrency Unit (MB)'] = df_success[actual_ram_col] / df_success['Effective Concurrency'].replace(0, np.nan)
     
     if is_gpu_trial:
-        df_success['VRAM per Station (MB)'] = df_success[actual_vram_col] / df_success[station_col]
+        df_success['VRAM per Station (MB)'] = df_success[actual_vram_col] / df_success[station_col].replace(0, np.nan)
         df_success['VRAM per Concurrency Unit (MB)'] = df_success[actual_vram_col] / df_success['Effective Concurrency'].replace(0, np.nan)
 
     # 4. Memory Overhead Analysis
@@ -259,13 +290,24 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     log("="*70)
 
     log("\n--- Analysis Formulas ---")
-    log(f"1. Throughput (Stations/s) = ['{station_col}'] / ['{runtime_col}']")
+    log(f"1. Throughput (Stations/s) = ['{station_col}'] / ['{display_runtime_col}']")
     log("2. Gain % (Diminishing Returns) = ((Current Throughput - Previous Throughput) / Previous Throughput) * 100")
-    log(f"3. Effective Concurrency = ['{concurrency_col}']")
+    log(f"3. {display_concurrency_col} = ['{concurrency_col}']")
     log(f"   (Actual actors spawned for ModelActor mode, or actual/requested tasks for Ripper mode)")
     log("4. Resource Cost Score = CPUs + (GPUs * 10)")
     log("5. RAM Overhead = Process Tree RAM - Total Requested RAM")
     log("6. RAM Utilization = (Process Tree RAM / Total Requested RAM) * 100")
+
+    log("\n--- Key Timing Metrics ---")
+    log(f"Average {display_runtime_col}: {df_success[total_trial_time_col].mean():.2f} s")
+    if picker_runtime_col in df_success.columns:
+        log(f"Average Total Picking Time:  {df_success[picker_runtime_col].mean():.2f} s")
+    if execution_mode == 'modelactor' and actor_creation_time_col in df_success.columns:
+        log(f"Average Actor Creation Time: {df_success[actor_creation_time_col].mean():.2f} s")
+    elif execution_mode == 'ripper' and avg_model_load_time_col in df_success.columns:
+        log(f"Average Model Load Time:     {df_success[avg_model_load_time_col].mean():.4f} s")
+    if waveform_proc_time_col in df_success.columns:
+        log(f"Average Waveform Proc Time:  {df_success[waveform_proc_time_col].mean():.4f} s")
 
     log("\n--- Interpretation Guide ---")
     log(f"A. Correlation Matrix (correlation_matrix_{execution_mode}.png):")
@@ -329,11 +371,14 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     # PERFORMANCE LEVERS ANALYSIS
     # =========================================================================
     log("\n" + "-"*70)
-    log("PERFORMANCE LEVERS (Runtime Correlations)")
+    log(f"PERFORMANCE LEVERS ({display_runtime_col} Correlations)")
     log("-"*70)
     
     def calculate_impact(lever_col):
         if lever_col not in df_success.columns:
+            return np.nan
+        # Avoid correlation calculation if either column has zero variance
+        if df_success[lever_col].nunique() <= 1 or df_success[runtime_col].nunique() <= 1:
             return np.nan
         return df_success[lever_col].corr(df_success[runtime_col])
 
@@ -342,10 +387,10 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     concurrency_impact = calculate_impact('Effective Concurrency')
     station_impact = calculate_impact(station_col)
     
-    log(f"\nCorrelation with Runtime (negative = faster with more):")
-    log(f"  1. Number of Stations:           {station_impact:+.3f} (expected: positive)")
-    log(f"  2. Number of CPUs:               {cpu_impact:+.3f}")
-    log(f"  3. Effective Concurrency:        {concurrency_impact:+.3f}")
+    log(f"\nCorrelation with {display_runtime_col} (negative = faster with more):")
+    log(f"  1. {display_stations_col}:           {station_impact:+.3f} (expected: positive)")
+    log(f"  2. {display_cpu_col}:               {cpu_impact:+.3f}")
+    log(f"  3. {display_concurrency_col}:        {concurrency_impact:+.3f}")
     
     # Optional mode-specific impacts
     if execution_mode == 'ripper':
@@ -355,10 +400,10 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     
     if is_gpu_trial:
         gpu_impact = calculate_impact('GPU Count')
-        log(f"  5. GPU Count:                    {gpu_impact:+.3f}")
+        log(f"  5. {display_gpu_col}:                    {gpu_impact:+.3f}")
     
     log("\n  Interpretation:")
-    log("  - Negative correlation: More of this resource = faster runtime")
+    log(f"  - Negative correlation: More of this resource = faster {display_runtime_col}")
     log("  - Positive correlation: More of this = slower (e.g., more stations = more work)")
     log("  - Close to 0: Weak relationship")
 
@@ -375,14 +420,14 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
         station_col: 'mean',
         'Throughput (Stations/s)': 'mean'
     }).round(2)
-    concurrency_groups.columns = ['Avg Runtime (s)', 'Std Runtime', 'Count', 'Avg Stations', 'Avg Throughput']
+    concurrency_groups.columns = [f'Avg {display_runtime_col}', 'Std Runtime', 'Count', 'Avg Stations', 'Avg Throughput']
     concurrency_groups = concurrency_groups.reset_index()
     
-    log(f"\nPerformance by Effective Concurrency:")
+    log(f"\nPerformance by {display_concurrency_col}:")
     log(concurrency_groups.to_string(index=False))
     
     # Analyze runtime scaling with stations
-    log(f"\n\nRuntime Scaling by Workload Size:")
+    log(f"\n\n{display_runtime_col} Scaling by Workload Size:")
     station_quartiles = df_success[station_col].quantile([0.25, 0.5, 0.75]).values
     
     for q, label in zip([0.25, 0.5, 0.75], ['Small', 'Medium', 'Large']):
@@ -392,7 +437,7 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
             avg_runtime = subset[runtime_col].mean()
             avg_concurrency = subset['Effective Concurrency'].mean()
             avg_throughput = subset['Throughput (Stations/s)'].mean()
-            log(f"  {label} workloads (≤{threshold:.0f} stations): Avg Runtime={avg_runtime:.2f}s, Avg Concurrency={avg_concurrency:.1f}, Throughput={avg_throughput:.2f} st/s")
+            log(f"  {label} workloads (≤{threshold:.0f} stations): Avg {display_runtime_col}={avg_runtime:.2f}s, Avg {display_concurrency_col}={avg_concurrency:.1f}, Throughput={avg_throughput:.2f} st/s")
 
     # =========================================================================
     # SWEET SPOT ANALYSIS
@@ -403,22 +448,22 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     
     best_cost_efficiency = df_success.loc[df_success['Throughput per Cost Unit'].idxmax()]
     log(f"\nBest Throughput per Resource Cost:")
-    log(f"  Configuration: {best_cost_efficiency[cpu_col]:.0f} CPUs, {best_cost_efficiency['GPU Count']:.0f} GPUs, {best_cost_efficiency[task_col]:.0f} Concurrent Tasks")
-    log(f"  Effective Concurrency: {best_cost_efficiency['Effective Concurrency']:.0f}")
+    log(f"  Configuration: {best_cost_efficiency[cpu_col]:.0f} {display_cpu_col}, {best_cost_efficiency['GPU Count']:.0f} {display_gpu_col}, {best_cost_efficiency[task_col]:.0f} Concurrent Tasks")
+    log(f"  {display_concurrency_col}: {best_cost_efficiency['Effective Concurrency']:.0f}")
     log(f"  Stations Processed: {best_cost_efficiency[station_col]:.0f}")
     log(f"  Throughput: {best_cost_efficiency['Throughput (Stations/s)']:.3f} stations/s")
-    log(f"  Total Runtime: {best_cost_efficiency[runtime_col]:.2f}s")
-    log(f"  Process Tree RAM: {best_cost_efficiency[actual_ram_col]:.1f} MB")
+    log(f"  {display_runtime_col}: {best_cost_efficiency[runtime_col]:.2f}s")
+    log(f"  {display_ram_col}: {best_cost_efficiency[actual_ram_col]:.1f} MB")
     if is_gpu_trial and actual_vram_col in df_success.columns:
-        log(f"  Process Tree VRAM: {best_cost_efficiency[actual_vram_col]:.1f} MB")
+        log(f"  {display_vram_col}: {best_cost_efficiency[actual_vram_col]:.1f} MB")
 
     # Fastest overall configuration
     fastest = df_success.loc[df_success[runtime_col].idxmin()]
     log(f"\nFastest Overall Configuration:")
-    log(f"  Configuration: {fastest[cpu_col]:.0f} CPUs, {fastest['GPU Count']:.0f} GPUs, {fastest[task_col]:.0f} Concurrent Tasks")
-    log(f"  Effective Concurrency: {fastest['Effective Concurrency']:.0f}")
+    log(f"  Configuration: {fastest[cpu_col]:.0f} {display_cpu_col}, {fastest['GPU Count']:.0f} {display_gpu_col}, {fastest[task_col]:.0f} Concurrent Tasks")
+    log(f"  {display_concurrency_col}: {fastest['Effective Concurrency']:.0f}")
     log(f"  Stations Processed: {fastest[station_col]:.0f}")
-    log(f"  Total Runtime: {fastest[runtime_col]:.2f}s")
+    log(f"  {display_runtime_col}: {fastest[runtime_col]:.2f}s")
 
     # =========================================================================
     # DIMINISHING RETURNS ANALYSIS
@@ -428,7 +473,7 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     log("-"*70)
     
     # Analyze diminishing returns for concurrency scaling
-    log(f"\n--- Scaling by Effective Concurrency ({execution_mode.upper()}) ---")
+    log(f"\n--- Scaling by {display_concurrency_col} ({execution_mode.upper()}) ---")
     median_stations = df_success[station_col].median()
     tolerance = median_stations * 0.2
     
@@ -468,47 +513,129 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     log("CORRELATION MATRIX")
     log("-"*70)
     
-    # Select columns for correlation matrix
-    corr_cols = [cpu_col, 'Effective Concurrency', station_col, runtime_col, 
-                 'Throughput (Stations/s)', actual_ram_col]
+    # Prepare data for correlation with renamed columns for display and enforced order
+    df_corr = df_success.copy()
     
-    # In ripper mode, 'Effective Concurrency' is the same as task_col.
-    # In modelactor mode, we specifically want to exclude task_col (requested) 
-    # and only use Effective Concurrency (actual actors spawned).
+    # Define mapping for renaming
+    rename_map = {
+        total_trial_time_col: display_runtime_col,
+        'Effective Concurrency': display_concurrency_col,
+        cpu_col: display_cpu_col,
+        'GPU Count': display_gpu_col,
+        picker_runtime_col: display_picking_col,
+        waveform_proc_time_col: display_waveform_col,
+        actual_ram_col: display_ram_col,
+        actual_vram_col: display_vram_col,
+        station_col: display_stations_col
+    }
     
+    # Add mode-specific setup timing to rename map
+    if execution_mode == 'modelactor':
+        rename_map[actor_creation_time_col] = display_setup_col
+    else:
+        rename_map[avg_model_load_time_col] = display_setup_col
+        
+    df_corr = df_corr.rename(columns=rename_map)
+    
+    # Determine if this is a GPU trial (has non-zero GPU usage)
+    is_gpu_trial = trial_type.lower() == 'gpu' or (display_gpu_col in df_corr.columns and df_corr[display_gpu_col].sum() > 0)
+    
+    # Define desired order: Hardware -> Timing -> Memory -> Other
+    # For CPU trials, exclude GPU count and VRAM (not relevant)
+    ordered_cols = [
+        # Hardware - always include CPUs, only include GPUs for GPU trials
+        display_cpu_col,
+    ]
     if is_gpu_trial:
-        if 'GPU Count' in df_success.columns:
-            corr_cols.append('GPU Count')
-        if actual_vram_col in df_success.columns:
-            corr_cols.append(actual_vram_col)
+        ordered_cols.append(display_gpu_col)
+    ordered_cols.append(display_concurrency_col)
     
-    corr_cols = [c for c in corr_cols if c in df_success.columns]
-    corr_matrix = df_success[corr_cols].corr()
+    # Timing
+    ordered_cols.extend([
+        display_runtime_col,
+        display_picking_col,
+        display_setup_col,
+        display_waveform_col,
+    ])
     
-    log(f"\nKey correlations with {runtime_col}:")
-    for col in corr_cols:
-        if col != runtime_col:
-            corr_val = corr_matrix.loc[col, runtime_col] if runtime_col in corr_matrix.columns else np.nan
-            log(f"  {col}: {corr_val:+.3f}")
+    # Memory - always include RAM, only include VRAM for GPU trials
+    ordered_cols.append(display_ram_col)
+    if is_gpu_trial:
+        ordered_cols.append(display_vram_col)
+    
+    # Other
+    ordered_cols.extend([
+        display_stations_col,
+        display_throughput_col
+    ])
+    
+    # Filter to only include columns that exist in the renamed dataframe
+    existing_cols = [c for c in ordered_cols if c in df_corr.columns]
+    
+    # Track columns with constant values (zero variance) - they will show NaN correlations
+    constant_cols = [col for col in existing_cols if df_corr[col].nunique() <= 1]
+    
+    # Include all columns (even constant ones) - constant columns will show NaN correlations
+    # This allows the user to see the full matrix structure even before all trial data is collected
+    corr_cols = existing_cols
+    
+    # Log which columns have constant values
+    if constant_cols:
+        log(f"\nNOTE: The following columns currently have constant values (will show NaN correlations):")
+        for col in constant_cols:
+            unique_val = df_corr[col].iloc[0] if len(df_corr) > 0 else "N/A"
+            log(f"  - {col}: all values = {unique_val}")
+        log("  (Correlations will become meaningful once trial data has variation in these columns)")
+    
+    if not is_gpu_trial:
+        log(f"\nNOTE: GPU-related columns (Number of GPUs Used, Process Tree VRAM) excluded for CPU trials.")
+    
+    if len(corr_cols) > 1:
+        corr_matrix = df_corr[corr_cols].corr()
+        
+        log(f"\nKey correlations with {display_runtime_col}:")
+        for col in corr_cols:
+            if col != display_runtime_col and display_runtime_col in corr_matrix.columns:
+                corr_val = corr_matrix.loc[col, display_runtime_col]
+                if pd.notna(corr_val):
+                    log(f"  {col}: {corr_val:+.3f}")
+                else:
+                    log(f"  {col}: NaN (constant values)")
+    else:
+        log("\nInsufficient columns to calculate correlation matrix.")
+        corr_matrix = pd.DataFrame()
 
     # Save Correlation Matrix as Plot
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f", linewidths=0.5,
-                center=0, vmin=-1, vmax=1)
-    plt.title(f"Correlation Matrix: {model_name} ({trial_type}, {execution_mode.upper()})")
-    plt.tight_layout()
-    
-    plot_name = f"correlation_matrix_{execution_mode}.png"
-    plot_path = os.path.join(output_dir, plot_name) if output_dir else plot_name
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-    log(f"\nCorrelation plot saved to {plot_path}")
+    if not corr_matrix.empty:
+        # Dynamic figure size based on number of columns
+        fig_size = max(10, len(corr_cols) * 1.2)
+        plt.figure(figsize=(fig_size, fig_size * 0.85))
+        
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f", linewidths=0.5,
+                    center=0, vmin=-1, vmax=1)
+        
+        # Build title
+        title = f"Correlation Matrix: {model_name} ({trial_type}, {execution_mode.upper()})\n(Ordered by Hardware, Timing, Memory)"
+        if constant_cols:
+            constant_names = ', '.join(constant_cols)
+            title += f"\nConstant values (NaN): {constant_names}"
+        
+        plt.title(title, fontsize=10)
+        plt.tight_layout()
+        
+        plot_name = f"correlation_matrix_{execution_mode}.png"
+        plot_path = os.path.join(output_dir, plot_name) if output_dir else plot_name
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+        log(f"\nCorrelation plot saved to {plot_path}")
+    else:
+        log("\nSkipping correlation plot due to insufficient columns.")
 
     # =========================================================================
     # ADDITIONAL VISUALIZATIONS
     # =========================================================================
     
-    # 1. Runtime vs Stations by Concurrency
+    # 1. Total Trial Time vs Stations by Concurrency
     plt.figure(figsize=(12, 8))
     
     # Use a scatter plot with a colorbar for rainbow scale
@@ -536,7 +663,7 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
 
     # Set labels
     plt.xlabel('Total Number of Stations to Process', fontsize=12)
-    plt.ylabel('Total Runtime (s)', fontsize=12)
+    plt.ylabel('Total Trial Time (s)', fontsize=12)
     
     # X-axis ticks: step size of 10
     min_stations = int(df_success[station_col].min())
@@ -553,15 +680,53 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     plt.yticks(np.arange(0, y_max_rounded + 6, 5))
     plt.ylim(0, y_max_rounded + 2) # Small buffer
     
-    plt.title(f'Runtime vs Workload Size by Concurrency\n{model_name} ({trial_type}, {execution_mode.upper()})', fontsize=14)
+    plt.title(f'Total Trial Time vs Workload Size by Concurrency\n{model_name} ({trial_type}, {execution_mode.upper()})', fontsize=14)
     plt.grid(True, alpha=0.3, linestyle='--')
     plt.tight_layout()
     
-    plot_name = f"runtime_vs_stations_by_concurrency_{execution_mode}.png"
+    plot_name = f"total_trial_time_vs_stations_by_concurrency_{execution_mode}.png"
     plot_path = os.path.join(output_dir, plot_name) if output_dir else plot_name
     plt.savefig(plot_path, dpi=150)
     plt.close()
-    log(f"Runtime vs Stations plot saved to {plot_path}")
+    log(f"Total Trial Time vs Stations plot saved to {plot_path}")
+
+    # 1b. Picker Runtime vs Stations by Concurrency (pure processing time)
+    if picker_runtime_col in df_success.columns and df_success[picker_runtime_col].notna().any():
+        plt.figure(figsize=(12, 8))
+        
+        scatter = plt.scatter(df_success[station_col], df_success[picker_runtime_col], 
+                             c=df_success['Effective Concurrency'], 
+                             cmap='rainbow', alpha=0.8, s=60, edgecolors='k', linewidths=0.5)
+        
+        cbar = plt.colorbar(scatter, ticks=cbar_ticks)
+        cbar.set_label(conc_label, fontsize=12)
+        
+        if desired_runtime is not None:
+            plt.axhline(y=desired_runtime, color='red', linestyle='--', linewidth=2, 
+                        label=f'Desired Runtime ({desired_runtime}s)')
+            plt.legend(loc='upper left')
+
+        plt.xlabel('Total Number of Stations to Process', fontsize=12)
+        plt.ylabel('Picker Runtime (s)', fontsize=12)
+        
+        plt.xticks(np.arange(x_start, max_stations + 11, 10))
+        
+        max_picker_runtime = df_success[picker_runtime_col].max()
+        if desired_runtime is not None:
+            max_picker_runtime = max(max_picker_runtime, desired_runtime)
+        y_max_rounded = int(np.ceil(max_picker_runtime / 5.0) * 5)
+        plt.yticks(np.arange(0, y_max_rounded + 6, 5))
+        plt.ylim(0, y_max_rounded + 2)
+        
+        plt.title(f'Picker Runtime vs Workload Size by Concurrency\n{model_name} ({trial_type}, {execution_mode.upper()})', fontsize=14)
+        plt.grid(True, alpha=0.3, linestyle='--')
+        plt.tight_layout()
+        
+        plot_name = f"picker_runtime_vs_stations_by_concurrency_{execution_mode}.png"
+        plot_path = os.path.join(output_dir, plot_name) if output_dir else plot_name
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+        log(f"Picker Runtime vs Stations plot saved to {plot_path}")
 
     # 2. Requested vs Actual RAM scatter
     if actual_ram_col in df_success.columns and total_req_ram_col in df_success.columns:
@@ -586,7 +751,15 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
         plt.xlabel('Total Requested RAM (MB)')
         plt.ylabel('Process Tree RAM (MB)')
         plt.title(f'Requested vs Actual RAM\n{model_name} ({trial_type}, {execution_mode.upper()})')
-        plt.legend(loc='upper left')
+        
+        # Add desired runtime line if provided
+        if desired_runtime is not None:
+            plt.axhline(y=desired_runtime, color='red', linestyle='--', linewidth=2, 
+                        label=f'Desired Runtime ({desired_runtime}s)')
+            plt.legend(loc='upper left')
+        else:
+            plt.legend(loc='upper left')
+            
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         
@@ -613,11 +786,13 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
         agg_cols[actual_vram_col] = 'mean'
     
     agg_stats = df_success.groupby([cpu_col, 'GPU Count']).agg(agg_cols).round(2)
-    col_names = ['Avg Runtime (s)', 'Avg Throughput', 'Avg Concurrency', 'Avg RAM (MB)']
+    col_names = [display_cpu_col, display_gpu_col, f'Avg {display_runtime_col}', 'Avg Throughput', f'Avg {display_concurrency_col}', f'Avg {display_ram_col}']
     if is_gpu_trial:
-        col_names.append('Avg VRAM (MB)')
-    agg_stats.columns = col_names
+        col_names.insert(6, f'Avg {display_vram_col}')
+    
+    # Re-order agg_stats columns to match col_names after reset_index
     agg_stats = agg_stats.reset_index()
+    agg_stats.columns = col_names
     log(agg_stats.to_string(index=False))
 
     # =========================================================================
@@ -644,7 +819,7 @@ def analyze_efficiency(csv_path, output_dir=None, verbose=True, desired_runtime=
     return df_success
 
 
-def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None):
+def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None, desired_runtime=None):
     """
     Compare ModelActor and Ripper execution modes side by side.
     """
@@ -683,16 +858,27 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None):
     print(f"Ripper Trials: {len(df_rp)}")
     
     # Column definitions
-    runtime_col = 'Total Run time for Picker (s)'
+    total_trial_time_col = 'Total Trial Time (s)'
+    picker_runtime_col = 'Total Run time for Picker (s)'
+    runtime_col = total_trial_time_col  # Use total trial time for main comparisons
     station_col = 'Number of Stations Used'
     actual_ram_col = 'Process Tree RAM (MB)'
     actual_vram_col = 'Process Tree VRAM (MB)'
     task_col = 'Number of Concurrent Station Tasks'
     actor_col = 'N ModelActors'
+    actor_creation_time_col = 'Actor Creation Time (s)'
+    avg_model_load_time_col = 'Avg Model Load Time (s)'
+    waveform_proc_time_col = 'Waveform Processing Time (s)'
     
-    # Calculate throughput
-    df_ma['Throughput (Stations/s)'] = df_ma[station_col] / df_ma[runtime_col]
-    df_rp['Throughput (Stations/s)'] = df_rp[station_col] / df_rp[runtime_col]
+    # Calculate throughput (using total trial time)
+    df_ma['Throughput (Stations/s)'] = df_ma[station_col] / df_ma[runtime_col].replace(0, np.nan)
+    df_rp['Throughput (Stations/s)'] = df_rp[station_col] / df_rp[runtime_col].replace(0, np.nan)
+    
+    # Calculate picker throughput (pure processing time)
+    if picker_runtime_col in df_ma.columns:
+        df_ma['Picker Throughput (Stations/s)'] = df_ma[station_col] / df_ma[picker_runtime_col].replace(0, np.nan)
+    if picker_runtime_col in df_rp.columns:
+        df_rp['Picker Throughput (Stations/s)'] = df_rp[station_col] / df_rp[picker_runtime_col].replace(0, np.nan)
     
     # Summary statistics
     print(f"\n--- Overall Performance Summary ---")
@@ -700,10 +886,14 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None):
     metrics = {
         'Mean Throughput (st/s)': ('Throughput (Stations/s)', 'mean'),
         'Median Throughput (st/s)': ('Throughput (Stations/s)', 'median'),
-        'Mean Runtime (s)': (runtime_col, 'mean'),
-        'Min Runtime (s)': (runtime_col, 'min'),
-        'Mean RAM (MB)': (actual_ram_col, 'mean'),
+        'Mean Total Runtime (s)': (runtime_col, 'mean'),
+        'Mean Picker Time (s)': (picker_runtime_col, 'mean'),
+        'Mean Waveform Time (s)': (waveform_proc_time_col, 'mean'),
+        'Mean Process RAM (MB)': (actual_ram_col, 'mean'),
     }
+    
+    if is_gpu:
+        metrics['Mean Process VRAM (MB)'] = (actual_vram_col, 'mean')
     
     print(f"\n{'Metric':<30} {'ModelActor':>15} {'Ripper':>15} {'Difference':>15}")
     print("-" * 75)
@@ -747,10 +937,18 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None):
     ax = axes[0, 1]
     ax.scatter(df_ma[station_col], df_ma[runtime_col], alpha=0.5, label='ModelActor', color='blue')
     ax.scatter(df_rp[station_col], df_rp[runtime_col], alpha=0.5, label='Ripper', color='orange')
+    
+    # Add desired runtime line if provided
+    if desired_runtime is not None:
+        ax.axhline(y=desired_runtime, color='red', linestyle='--', linewidth=2, 
+                   label=f'Desired Runtime ({desired_runtime}s)')
+        ax.legend()
+    else:
+        ax.legend()
+        
     ax.set_xlabel('Number of Stations')
     ax.set_ylabel('Runtime (s)')
     ax.set_title('Runtime vs Workload Size')
-    ax.legend()
     
     # 3. RAM usage comparison
     ax = axes[1, 0]
@@ -775,10 +973,13 @@ def compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, output_dir=None):
     ax.set_xticklabels([int(t) for t in ma_by_task.index])
     ax.legend()
     
+    # Sanitize model name for filenames
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+    
     plt.suptitle(f'{model_name} - ModelActor vs Ripper ({trial_type})', fontsize=14)
     plt.tight_layout()
     
-    plot_name = f"comparison_modelactor_vs_ripper_{model_name}_{trial_type.lower()}.png"
+    plot_name = f"comparison_modelactor_vs_ripper_{safe_model_name}_{trial_type.lower()}.png"
     plot_path = os.path.join(output_dir, plot_name) if output_dir else plot_name
     plt.savefig(plot_path, dpi=150)
     plt.close()
@@ -836,7 +1037,18 @@ def batch_analyze(results_root, output_dir=None, desired_runtime=None):
             df['GPU Count'] = df['GPUs Used'].apply(parse_gpu_list)
             trial_type = 'GPU' if df['GPU Count'].max() > 0 else 'CPU'
             
-            df['Throughput (Stations/s)'] = df['Number of Stations Used'] / df['Total Run time for Picker (s)']
+            # Use Total Trial Time as the primary runtime metric
+            total_trial_col = 'Total Trial Time (s)'
+            picker_col = 'Total Run time for Picker (s)'
+            
+            if total_trial_col in df.columns and df[total_trial_col].notna().any():
+                df['Throughput (Stations/s)'] = df['Number of Stations Used'] / df[total_trial_col]
+                runtime_mean = df[total_trial_col].mean()
+                runtime_min = df[total_trial_col].min()
+            else:
+                df['Throughput (Stations/s)'] = df['Number of Stations Used'] / df[picker_col]
+                runtime_mean = df[picker_col].mean()
+                runtime_min = df[picker_col].min()
             
             summary_data.append({
                 'Directory': result_dir,
@@ -845,8 +1057,8 @@ def batch_analyze(results_root, output_dir=None, desired_runtime=None):
                 'Execution Mode': execution_mode,
                 'Total Trials': len(df),
                 'Mean Throughput (st/s)': df['Throughput (Stations/s)'].mean(),
-                'Mean Runtime (s)': df['Total Run time for Picker (s)'].mean(),
-                'Min Runtime (s)': df['Total Run time for Picker (s)'].min(),
+                'Mean Total Trial Time (s)': runtime_mean,
+                'Min Total Trial Time (s)': runtime_min,
             })
     
     # Save summary
@@ -945,7 +1157,7 @@ Examples:
         else:
             modelactor_csv, ripper_csv = find_comparison_files(args.results_root, args.model, args.trial_type)
             if modelactor_csv and ripper_csv:
-                compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, args.output_dir)
+                compare_modelactor_vs_ripper(modelactor_csv, ripper_csv, args.output_dir, desired_runtime=args.desired_runtime)
             else:
                 print(f"Error: Could not find both ModelActor and Ripper results for {args.model} ({args.trial_type})")
                 if not modelactor_csv:

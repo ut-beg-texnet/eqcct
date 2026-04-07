@@ -64,8 +64,13 @@ CANONICAL_CSV_HEADER = [
     "RAM Overhead (MB)",              # Process Tree RAM - Total Requested RAM
     "VRAM Utilization (%)",           # (Actual / Requested) × 100
     "RAM Utilization (%)",            # (Actual / Requested) × 100
-    # ===== PERFORMANCE =====
-    "Total Run time for Picker (s)",
+    # ===== TIMING METRICS =====
+    "Total Trial Time (s)",               # Entire trial: setup + actor creation + processing
+    "Actor Creation Time (s)",            # Time to spin up ModelActors (empty for Ripper mode)
+    "Avg Model Load Time (s)",            # Average model load time per task (Ripper mode only)
+    "Waveform Processing Time (s)",       # Average time to load waveforms into memory per task
+    # ===== PERFORMANCE (Legacy) =====
+    "Total Run time for Picker (s)",      # Total time for all task processing
     "Intra-parallelism Threads",
     "Inter-parallelism Threads",
     "Inference Actor Memory Limit (MB)",  # Legacy/compatibility
@@ -514,20 +519,23 @@ def build_station_list_from_dir(input_dir: str) -> list[str]:
     """
     Robustly discover stations under a timechunk directory.
     Accepts files like *.mseed/*.sac or one-dir-per-station structures.
+    Only includes stations that actually have waveform files.
     """
     stations = set()
 
     # 1) Files directly inside input_dir
     for p in glob.glob(os.path.join(input_dir, "*")):
         base = os.path.basename(p)
-        if os.path.isfile(p):
+        if os.path.isfile(p) and (base.endswith(".mseed") or base.endswith(".sac")):
             # file path — take stem without extension
             stations.add(os.path.splitext(base)[0])
 
     # 2) One subdir per station (e.g., input_dir/AT01/*.mseed)
     for p in glob.glob(os.path.join(input_dir, "*")):
         if os.path.isdir(p):
-            stations.add(os.path.basename(p))
+            # Check if this directory contains any mseed or sac files
+            if glob.glob(os.path.join(p, "*.mseed")) or glob.glob(os.path.join(p, "*.sac")):
+                stations.add(os.path.basename(p))
 
     # Filter out anything that looks like a timechunk id (safety)
     stations = [s for s in stations if not looks_like_timechunk_id(s)]
@@ -542,24 +550,23 @@ def generate_station_list(starting_amount_of_stations, total_num_stations_to_use
     if total_num_stations_to_use == 1:
         return [1]
     elif total_num_stations_to_use < 10:
-        return list(range(1, total_num_stations_to_use + 1))
+        # No 1–9 sweep; one trial at the maximum station count available for small datasets.
+        return [total_num_stations_to_use]
     elif total_num_stations_to_use >= 10 and starting_amount_of_stations == 1 and station_list_step_size == 1:
-        # We want to reduce as much extra testing as needed by applying an iterative approach for marching approach via smart step sizes
-        
-        # We check if we can apply multiples of 5 up to total_num_stations_to_use
+        # March from 10 by 5, then unit steps to the target when the target is not a multiple of 5.
         target = total_num_stations_to_use
-        start = 10 # We start from 10 because we already covered 1-9 in the previous condition
-        step = 5 # Step size of 5 for multiples of 5 (User can change this if desired - To Do add var for this in the future)
-        
-        stp_of_one = list(range(1, start + 1)) # We generate a list of 1-10 with step size of 1 and afterwards we will add multiples of 5
+        start = 10
+        step = 5
 
-        remainder = target % step # We calculate the remainder to see if target is a multiple of 5 or not
-        max_multiple = target - remainder # We calculate what is the maximum multiple of 5 that is less than or equal to the target
-        if remainder != 0:  # We found a number that is not immediately a multiple of 5, so we need to add the remaining numbers after the last multiple of 5 up to the target with step size of 1 
-            marching_scheme = stp_of_one + list(range(start + step, max_multiple + 1, step)) + list(range(max_multiple + 1, target + 1, 1))
+        first_point = [10]
 
-        elif remainder == 0: # We hit that the target is not a multiple of 5, so we start from 20, ..., +5, ..., up to target
-            marching_scheme = stp_of_one + list(range(start + step, target + 1, step))
+        remainder = target % step
+        max_multiple = target - remainder
+        if remainder != 0:
+            marching_scheme = first_point + list(range(start + step, max_multiple + 1, step)) + list(range(max_multiple + 1, target + 1, 1))
+
+        else:
+            marching_scheme = first_point + list(range(start + step, target + 1, step))
 
         return sorted(set(marching_scheme))
     else: 
@@ -899,12 +906,19 @@ update_csv updates a completed trial after the code has exited the mseed_predict
 If the trial either was a success or had errors, we update the last row with the success/error information of the trial. 
 """
 def update_csv(csv_filepath, success, error_message):
-    df = pd.read_csv(csv_filepath)
+    df = pd.read_csv(csv_filepath, keep_default_na=False)
     if "Error Message" not in df.columns:
         df["Error Message"] = ""
 
     # Ensure string dtype
     df["Error Message"] = df["Error Message"].astype("string")
+
+    if df.empty:
+        logging.getLogger("eqcctpro").warning(
+            "update_csv: %s has no data rows; skipping Trial Success update (no trial row to patch).",
+            csv_filepath,
+        )
+        return
 
     last_idx = df.index[-1] # Get last row id number
     df.loc[last_idx, 'Trial Success'] = success # Access value at row last_idx, column 'Trial Success' 
@@ -1136,36 +1150,44 @@ def tf_environ(gpu_id, vram_limit_mb=None, gpus_to_use=None, intra_threads=None,
         # CRITICAL: Enable memory growth FIRST for all GPUs
         # This prevents TensorFlow from pre-allocating all available VRAM
         # and allows multiple actors to coexist on the same GPU(s).
-        for gpu in vis_gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        logger.info(f"Enabled TensorFlow memory growth for {len(vis_gpus)} GPU(s).")
-        logger.info(f"  → This allows multiple ModelActors to share GPU memory dynamically.")
         
+        # Check if logical devices are already configured
+        # If they are, we cannot call set_memory_growth
+        try:
+            for gpu in vis_gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            logger.info(f"Enabled TensorFlow memory growth for {len(vis_gpus)} GPU(s).")
+            logger.info(f"  → This allows multiple ModelActors to share GPU memory dynamically.")
+        except (RuntimeError, ValueError) as e:
+            logger.debug(f"Memory growth already set or virtual devices configured: {e}")
+
         # If a specific VRAM limit is requested, set it as a soft cap via logical device config
         # Note: With memory growth enabled, TF will start small and grow as needed, but won't exceed the limit
         if vram_limit_mb is not None and vram_limit_mb > 0:
-            for gpu in vis_gpus:
-                # One logical device per physical GPU, each with a soft VRAM cap
-                tf.config.set_logical_device_configuration(
-                    gpu, 
-                    [tf.config.LogicalDeviceConfiguration(memory_limit=int(vram_limit_mb))]
+            try:
+                for gpu in vis_gpus:
+                    # One logical device per physical GPU, each with a soft VRAM cap
+                    tf.config.set_logical_device_configuration(
+                        gpu, 
+                        [tf.config.LogicalDeviceConfiguration(memory_limit=int(vram_limit_mb))]
+                    )
+                # Force logical devices to materialize
+                logical = tf.config.list_logical_devices("GPU") 
+                logger.info(
+                    f"Set VRAM soft limit: {vram_limit_mb} MB per logical GPU "
+                    f"({len(logical)} logical over {len(vis_gpus)} physical)."
                 )
-            # Force logical devices to materialize
-            logical = tf.config.list_logical_devices("GPU") 
-            logger.info(
-                f"Set VRAM soft limit: {vram_limit_mb} MB per logical GPU "
-                f"({len(logical)} logical over {len(vis_gpus)} physical)."
-            )
+            except (RuntimeError, ValueError) as e:
+                logger.debug(f"Logical devices already configured: {e}")
         else:
             # No specific limit - TensorFlow will grow memory as needed
             logger.info(f"No VRAM limit set. TensorFlow will allocate memory dynamically as needed.")
             
-    except RuntimeError as e:
-        # Happens if any TF GPU context was already initialized
-        # This is often okay if memory growth was already set
+    except Exception as e:
+        # Catch-all for unexpected configuration issues
         logger.warning(
-            f"Could not configure GPU memory (may already be configured): {e}\n"
-            "If this is a Ray actor, memory growth should be set before model loading."
+            f"Could not configure GPU memory: {e}\n"
+            "If this is a Ray actor, configuration should be set before model loading."
         )
 
 """

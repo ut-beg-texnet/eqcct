@@ -1,0 +1,50 @@
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\small\textit{RAPID --- Draft}}
+\fancyfoot[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\arraystretch}{1.15}
+
+% Scale all images to fit page width
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+\makeatother
+\setkeys{Gin}{width=\maxwidth,keepaspectratio}
+
+% Force figures to appear exactly where placed in the source (no floating)
+\usepackage{letltxmacro}
+\makeatletter
+\LetLtxMacro\oldfigure\figure
+\LetLtxMacro\endoldfigure\endfigure
+\renewenvironment{figure}[1][H]{\oldfigure[H]}{\endoldfigure}
+\makeatother
+
+% Auto-scale longtable columns to fit page width and add spacing between tables
+\usepackage{longtable}
+\usepackage{calc}
+\let\oldlongtable\longtable
+\let\endoldlongtable\endlongtable
+\renewenvironment{longtable}{%
+  \vspace{1em}%
+  \scriptsize%
+  \setlength{\tabcolsep}{1.5pt}%
+  \oldlongtable%
+}{%
+  \endoldlongtable%
+  \vspace{1em}%
+  \normalsize%
+}
+
+% Landscape support for wide tables
+\usepackage{pdflscape}
+
+% Prevent floats from drifting past section boundaries
+\usepackage[section]{placeins}

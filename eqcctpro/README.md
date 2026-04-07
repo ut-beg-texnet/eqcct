@@ -18,7 +18,7 @@ eqcctpro/
 ├── eqcctpro/                   # Core Python package source code
 ├── experiments/                # Pipeline execution and benchmarking
 │   ├── main/                   # Production scripts (run.py)
-│   └── workbench/              # Performance evaluation (test_cpus_and_gpus.py)
+│   └── workbench/              # Performance evaluation (e.g. test_cpus_and_gpus.py, scaling/run_requested_benchmarks.py)
 ├── models/                     # Pre-trained model weights (.h5 files)
 │   └── EQCCT/                  # EQCCT specific model checkpoints
 ├── results/                    # Output artifacts
@@ -80,7 +80,7 @@ pip install eqcctpro
 
 1-minute long sample seismic waveforms from 229 TexNet stations have been provided in the repository under the `230_stations_1_min_dt.zip` file to help users understand the EQCCTPro waveform input style. 
 
-After donwloading the `.zip` file from the repository, run:
+After downloading the `.zip` file from the repository, run:
 ```sh
 unzip 230_stations_1_min_dt.zip
 ```
@@ -131,7 +131,7 @@ The timechunk time length is 1 hour long. At the same time, we use a waveform ov
 
 ## **Dataset creation using a FDSNWS connection**
 
-Through the help of [Donavin97](https://github.com/Donavin97), it is now possible to create the necesary dataset structure with your own data using the 
+Through the help of [Donavin97](https://github.com/Donavin97), it is now possible to create the necessary dataset structure with your own data using the 
 provided `create_dataset.py` script.
 
 `create_dataset.py` can:
@@ -177,7 +177,7 @@ waveforms_directory --chunk 60
 The resulting output folder contains the data to be processed by EQCCTPro.
 
 **Note:** Please make sure that you set a consistant chunk size in the download script, as well as in EQCCTPro itself to avoid issues.
-E.g.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling EQCCTPro. This is so that data won't be processed eroniusly.
+E.g.: If you set a time chunk of 20 minutes in the download script, then also use 20 minutes as chunk size when calling EQCCTPro. This is so that data won't be processed erroneously.
 
 ---
 
@@ -223,6 +223,8 @@ runner.run_eqcctpro()
 - **`use_gpu (bool)`**: Enables GPU acceleration. 
 - **`selected_gpus (list)`**: List of GPU indices (e.g., `[0, 1]`) to utilize.
 - **`vram_mb (float)`**: The hard VRAM limit allocated to **each** station prediction task.
+- **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use for the total pool. Default: `0.95`.
+- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.25` (25%).
 - **`cpu_id_list (list)`**: Specific CPU core IDs to bind the process to (e.g., `range(0, 16)`).
 - **`intra_threads (int)`**: Default = 1; Controls how many intra-parallelism threads Tensorflow can use
 - **`inter_threads (int)`**: Default = 1; Controls how many inter-parallelism threads Tensorflow can use
@@ -242,11 +244,60 @@ runner.run_eqcctpro()
 
 Before running large-scale production jobs, use `EvaluateSystem` to benchmark your hardware. It autonomously runs trials across different concurrency levels to find the "sweet spot" for your system.
 
+### **Trial timing and result CSV metrics**
+
+Trial durations are measured with **`eqcctpro.timing_util.monotonic_s()`**, which wraps Python’s **`time.perf_counter()`**: the clock is monotonic and high-resolution, so elapsed times are not skewed by NTP or manual clock changes the way wall-clock **`time.time()`** can be.
+
+For **SeisBench (PyTorch) on GPU**, **`eqcctpro.timing_util.cuda_synchronize_best_effort()`** runs after weights are moved to the device and again after **`classify`** inside Ripper tasks and inside **`SeisBenchModelActor`**. PyTorch schedules GPU work asynchronously; without an explicit device synchronize, stopwatches can stop before kernels finish. That policy keeps **model load** and **inference** intervals aligned with completed CUDA work where applicable. **EQCCT (TensorFlow)** Ripper paths rely on the standard **`predict`** path, which already blocks the host until batch work completes for the generator-driven workflow.
+
+Trial outputs use the canonical CSV header defined in **`eqcctpro/tools.py`** (see **`CANONICAL_CSV_HEADER`**). The primary timing columns have the following meaning:
+
+| Column | Meaning |
+|--------|---------|
+| **Total Trial Time (s)** | Wall time from the trial’s **initial** timestamp (driver/worker entry for the native process) through the end of the picking phase. |
+| **Total Run time for Picker (s)** | Wall time for the **picker phase** only: from just before the driver merges station mSEED (and registers shared waveform refs) through completion of all station tasks. Compare this across ModelActor, Ripper, and serial baselines. |
+| **Actor Creation Time (s)** | Time to create and warm **ModelActor** (or SeisBench actor) instances; empty in Ripper-only rows. |
+| **Avg Model Load Time (s)** | Mean **per-task** model load interval in **Ripper** mode (each task loads its own model). |
+| **Waveform Processing Time (s)** | Mean **per-station-task** time spent preparing waveforms in the worker (e.g. resolving shared streams and running the same preprocessing wedge as production picking), not including the one-time driver-side merge of all stations into the object store. |
+
+The **`experiments/workbench/scaling/run_requested_benchmarks.py`** script uses the same **`timing_util`** helpers for **raw serial** and **reload-per-waveform** baselines so those CSV rows remain comparable to **`EvaluateSystem`** trial exports for the same column names.
+
 ### **Key Benchmark Optimizations**
 - **20% Step Size**: Automatically tests station concurrency at 20%, 40%, 60%, 80%, and 100% levels.
 - **Redundancy Filtering**: Skips configurations that are already in the results CSV, allowing for interrupted evaluations to resume instantly.
-- **Optimal Actor Pool Architecture**: Deep learning frameworks (TensorFlow/PyTorch) cannot share GPU memory between processes. EQCCTPro creates exactly 1 ModelActor per GPU (or 1 per CPU), with tasks distributed via round-robin. This achieves parallelism without memory conflicts.
+- **Memory-Aware Dynamic Actor Pool**: EQCCTPro automatically calculates how many model instances can safely fit on each GPU based on the specific model's VRAM requirements and the available hardware memory. It utilizes Ray's fractional GPU allocation to stack multiple actors on a single GPU when possible, maximizing throughput while preventing memory conflicts.
+- **cuDNN Stability Logic**: To prevent "DNN library is not found" and "BLAS operation" errors, EQCCTPro enforces a dynamic safety buffer (`cudnn_headroom`). This reserves VRAM specifically for the dynamic workspace memory that TensorFlow/Keras requires during actual inference, which is not captured by static model weights.
 - **Automatic Ray Restart for OOM Prevention**: When increasing concurrency between trials, actors from previous trials may remain in GPU/RAM. If spawning new actors alongside existing ones would exceed the user-defined VRAM/RAM capacity (`max_vram_mb` / `ram_safety_cap`), Ray is automatically restarted to clear memory before the trial runs. This prevents unexpected OOM crashes during benchmark progression.
+
+### **Deep Dive: The cuDNN Safety Calculation**
+
+The calculation logic for GPU actor capping and concurrent prediction limits transforms a static hardware limit into a dynamic, stability-aware execution plan. Here is the step-by-step breakdown:
+
+#### **1. Defining the Total Pool**
+The `max_vram_mb` (or the physical total) is the budget for the **entire system**. 
+*   **Example**: If you have 2 GPUs and set `max_vram_mb = 93100`, the budget per card is calculated as:
+    `Per-GPU Budget = 93100 / 2 = 46550 MB`
+
+#### **2. Theoretical Capacity**
+The system determines how many models could *physically* fit if memory usage were perfectly static (model weights only). It uses the `per_actor_vram_mb`, which already includes a fixed Ray/CUDA buffer (e.g., 1024 MB).
+*   **Example**: `46550 MB / 2756 MB per actor ≈ 16.9 actors`.
+
+#### **3. Applying the cuDNN Headroom (ModelActor Mode)**
+This is the most critical step for stability in **ModelActor mode**. TensorFlow/Keras models allocate **dynamic workspace memory** during actual prediction (for convolution algorithms and BLAS operations). This memory is not reserved at startup. 
+
+The `cudnn_headroom` (default **25%**) is applied to the theoretical capacity to reserve a "cushion" for these dynamic spikes:
+*   `Safe Max Per GPU = floor(16.9 × 0.75) = 12 actors`
+*   `Max Actors Total = 12 × 2 GPUs = 24 actors`
+
+**Note**: For **Ripper Mode**, a different, more optimized calculation is used (see below).
+
+#### **4. Why this prevents OOM**
+The `max_vram_mb` acts as the ceiling, but the **Headroom** acts as the safety net. 
+*   **Without Headroom**: If you loaded 16 models on one 46GB GPU, you would use ~44GB for weights. When those 16 models all start a prediction simultaneously, they each try to grab ~500MB+ for cuDNN workspaces ($16 \times 500\text{MB} = 8\text{GB}$ extra). Total needed: $44\text{GB} + 8\text{GB} = 52\text{GB}$, leading to an **immediate crash (OOM)**.
+*   **With 25% Headroom**: By capping at 12 models, you use ~33GB for weights. This leaves **~13GB of free VRAM** specifically for the dynamic cuDNN workspaces. Even if all 12 models hit a heavy convolution at the same time, they have plenty of room to "breathe."
+
+#### **5. Interaction with Concurrency Limits**
+The final piece ensures that `max_pending_tasks` (the number of stations processed at once) matches this safety calculation. EQCCTPro caps the task submission to the `Max Actors Total` (e.g., 26). Even if the user requested 100 concurrent tasks, the code only allows 26 to enter the GPU pipeline at a time. This prevents the "Idle Actor" problem, where actors exist and consume VRAM for weights but starve the active tasks of the dynamic memory they need to finish.
 
 ### **Optimal Actor Pool Architecture (Technical Details)**
 
@@ -254,24 +305,23 @@ EQCCTPro uses a hardware-aware actor pool design for maximum efficiency:
 
 | Mode | Actor Creation | Concurrency Method |
 |------|----------------|-------------------|
-| **GPU** | 1 ModelActor per physical GPU | Task queue with round-robin |
-| **CPU** | 1 ModelActor per physical CPU | Task queue with round-robin |
+| **GPU** | Multiple ModelActors per physical GPU (VRAM dependent) | Task queue with round-robin |
+| **CPU** | 1 ModelActor per physical CPU core (RAM dependent) | Task queue with round-robin |
 
 **Why not create N actors for N concurrent tasks?**
-- **GPU**: TensorFlow/PyTorch allocate GPU memory based on their own configs, not Ray's fractional GPU hints. Multiple actors on the same GPU cause OOM.
-- **CPU**: Each actor loads a full model copy into RAM. More actors than CPUs wastes memory and causes thrashing.
+- **GPU**: Deep learning frameworks (TensorFlow/PyTorch) allocate GPU memory based on their internal runtimes. EQCCTPro calculates a `MIN_FRACTIONAL_GPU` value dynamically for each model (e.g., PhaseNet needs ~1.6% of a 93GB GPU, while EQCCT needs ~3%). By accurately matching the actor count to available VRAM, we achieve maximum parallelism without OOM.
+- **CPU**: Each actor loads a full model copy into RAM. EQCCTPro caps the actor count based on available system RAM and a safety buffer to prevent thrashing and system instability.
 
 **How concurrency works:**
 ```
-Example: 2 GPUs, 50 stations to process
-- 2 ModelActors created (1 per GPU)
-- 50 tasks submitted to queue
-- Tasks round-robin distributed: Actor 0 gets tasks 0,2,4,...; Actor 1 gets tasks 1,3,5,...
-- Both actors process in parallel, each handling 25 tasks sequentially
-- Result: 2x parallelism without memory conflicts
+Example: 1 GPU (93GB), PhaseNet model (~1.5GB VRAM), 60 stations to process
+- EQCCTPro calculates that ~57 actors can fit on the GPU (95% headroom / 1.6% per actor)
+- 60 tasks submitted to queue
+- Tasks are distributed across the 57 actors
+- Result: High degree of parallelism (~57x) on a single GPU
 ```
 
-The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to memory limits). When these differ, the `Comments` column explains the constraint (e.g., "Requested 10 actors, created 2 (VRAM limited to 8000 MB, 2756 MB/actor)").
+The `Number of Concurrent Station Tasks` column in CSV reports the *requested* concurrency, while `N ModelActors` reports the *actual* actors created (capped to hardware and memory limits). When these differ, the `Comments` column explains the constraint (e.g., "Requested 100 actors, created 57 (VRAM limited to 93100 MB, 1524 MB/actor)").
 
 ---
 
@@ -306,6 +356,7 @@ runner = RunEQCCTPro(
 | **GPU Scheduling** | 1 actor per physical GPU, round-robin tasks | Multiple tasks can share GPU memory dynamically |
 | **Overhead** | Lower (no repeated model loading) | Higher (model loaded per task) |
 | **VRAM Flexibility** | Fixed actor pool, constrained by `MIN_FRACTIONAL_GPU` | More dynamic memory sharing |
+| **Timing Pattern** | High upfront `Actor Creation Time`, then fast processing | Zero actor creation, but consistent `Avg Model Load Time` per task |
 | **Best For** | Production workloads, consistent throughput | Experimentation, memory-constrained environments |
 
 #### **When to Use Ripper Mode**
@@ -315,59 +366,73 @@ runner = RunEQCCTPro(
 - **Variable Workloads**: When task memory requirements vary significantly
 - **Legacy Compatibility**: Matches the original EQCCTPro behavior before ModelActor optimization
 
-#### **Memory Management in Ripper Mode**
+#### **Memory Management in Ripper Mode (Empirically Calibrated)**
 
-Ripper mode benefits from the same automatic OOM prevention mechanisms as ModelActor mode, plus additional runtime memory checking for both GPU and CPU modes.
+Ripper mode uses a simplified but highly optimized memory calculation derived from actual GPU test trials. Unlike ModelActor mode which stacks multiple fixed buffers, Ripper mode uses **model-specific initialization multipliers** and a fixed **concurrency headroom**.
 
-##### **GPU Ripper Mode: VRAM-Aware Concurrency Limiting**
+##### **1. Per-Task Initialization Multiplier**
+Each Ripper task loads its own model. The peak memory during initialization (graph construction, library loading, and weight allocation) is higher than the steady-state inference memory. We use empirically-calibrated multipliers to account for this:
 
-Before each trial, ripper queries **actual free VRAM** from the GPU(s) using `pynvml`:
+| Model | Multiplier | Rationale |
+|-------|------------|-----------|
+| **EQCCT** | **2.0×** | Empirical 1.94× measured + safety margin |
+| **EQTransformer** | **2.0×** | Large model architecture, similar to EQCCT |
+| **PhaseNet / Light** | **1.7×** | Smaller models, higher relative CUDA context overhead |
+| **GPD** | **1.8×** | Medium-sized model |
+
+##### **2. Concurrency Headroom (10%)**
+When many Ripper tasks run **simultaneously**, they compete for cuDNN workspace memory and CUDA context switching. To prevent `CUDNN_STATUS_EXECUTION_FAILED` errors during high-concurrency peaks, EQCCTPro reserves a fixed **10% concurrency headroom**.
+
+##### **3. GPU Ripper Concurrency Calculation**
+Before each trial, EQCCTPro queries **actual free VRAM** from the GPU(s) using `pynvml` and applies the following logic:
+
+```text
+# 1. Get the pool
+effective_vram_pool = min(user_defined_pool, actual_free_vram)
+
+# 2. Reserve 10% for concurrent task interference
+usable_vram = effective_vram_pool × (1.0 - 0.10)
+
+# 3. Calculate tasks per GPU using the init multiplier
+vram_per_task = base_model_vram × model_multiplier
+max_concurrent = floor(usable_vram / vram_per_task)
 ```
-effective_vram = min(user_defined_pool / num_gpus, actual_free_vram)
-max_concurrent = (effective_vram × ripper_headroom) / vram_per_task
-```
 
-This prevents OOM when:
-- User's `max_vram_mb` is for multiple GPUs but only a subset is used
-- Other processes are using GPU memory
-- Previous trials haven't fully released VRAM
+**Why this is better:** 
+- **No Double-Counting**: It avoids stacking `VRAM_BUFFER`, `cudnn_headroom`, and `ripper_multiplier` additively.
+- **Empirically Proven**: This logic enabled **24-26 concurrent EQCCT tasks** on a dual-49GB GPU system, whereas conservative stacking would have limited it to ~20.
+- **Smart Slicing**: Each task is assigned a `gpu_memory_limit_mb` (TensorFlow soft cap) equal to the fair share of the usable VRAM pool.
 
-##### **CPU Ripper Mode: RAM-Aware Concurrency Limiting**
-
+##### **4. CPU Ripper Mode: RAM-Aware Concurrency Limiting**
 Before each trial, ripper queries **actual available RAM** using `psutil`:
+```text
+usable_ram = actual_available_ram × ram_safety_cap
+max_concurrent = floor(usable_ram / ram_per_task)
 ```
-usable_ram = actual_available_ram × ripper_ram_headroom
-max_concurrent = usable_ram / ram_per_task
-```
-
-This prevents OOM when:
-- Other processes are consuming system RAM
-- Previous trials haven't fully released RAM
-- The user requests more concurrent tasks than RAM can support
+This prevents system instability and swap-thrashing when many tasks load models simultaneously.
 
 ##### **Tunable Headroom Variables**
 
-Both headroom factors can be adjusted in `parallelization.py` (search for these variable names):
-
-| Variable | Default | Location | Mode | Description |
-|----------|---------|----------|------|-------------|
-| `ripper_headroom` | `0.85` | ~line 1011 | GPU | Fraction of effective VRAM to use |
-| `ripper_ram_headroom` | `0.80` | ~line 1061 | CPU | Fraction of available RAM to use |
+| Variable | Parameter | Default | Mode | Description |
+|----------|-----------|---------|------|-------------|
+| `cudnn_headroom` | `cudnn_headroom` | `0.25` | GPU | **(ModelActor Only)** Reserved for cuDNN workspace |
+| `Ripper Headroom` | *Internal* | `0.10` | GPU | **(Ripper Only)** Reserved for concurrency interference |
+| `ram_safety_cap` | `ram_safety_cap` | `0.90` | CPU | Fraction of Total System RAM to use |
 
 ##### **Recommended Values and Risks**
 
-| Value Range | Use Case | Risk Level |
-|-------------|----------|------------|
-| **0.70 - 0.75** | Shared systems, other GPU/CPU-intensive processes running | Very Safe |
-| **0.80 - 0.85** | Dedicated systems with moderate background processes | Safe (Default) |
-| **0.90 - 0.95** | Dedicated systems with minimal background processes | Moderate Risk |
-| **> 0.95** | Not recommended | High Risk of OOM |
+| cuDNN Headroom | Use Case | Risk Level |
+|----------------|----------|------------|
+| **0.25 - 0.30** | Shared systems, other GPU-intensive processes running | Very Safe |
+| **0.25** | Dedicated systems with moderate background processes | Safe (Default) |
+| **0.15 - 0.20** | Dedicated systems with minimal background processes | Moderate Risk |
+| **< 0.05** | Not recommended | High Risk of OOM |
 
 **Risks of Higher Values:**
 - **GPU (VRAM)**: Memory fragmentation can cause `CUDNN_STATUS_EXECUTION_FAILED` or `DNN library is not found` errors even when theoretical VRAM is available. TensorFlow's XLA compilation can cause temporary memory spikes.
 - **CPU (RAM)**: System may become unresponsive if RAM is exhausted. Linux OOM killer may terminate processes unexpectedly. Swap usage causes severe performance degradation.
 
-**Recommendation**: Start with the defaults (`0.85` for GPU, `0.80` for CPU). If you encounter OOM errors, reduce the headroom. If tasks complete reliably, you can gradually increase to maximize throughput.
+**Recommendation**: Start with the defaults (`0.25` for GPU, `0.90` for CPU). If you encounter OOM errors, increase the headroom (reduce `ram_safety_cap`). If tasks complete reliably, you can gradually decrease headroom to maximize throughput.
 
 ##### **Other OOM Prevention Mechanisms**
 
@@ -409,7 +474,8 @@ eval_gpu.evaluate()
 ### **Evaluation Parameters**
 - **`eval_mode (str)`**: `'cpu'` or `'gpu'`.
 - **`max_vram_mb (float)`**: The total aggregate VRAM budget across all GPUs for the evaluation. If not provided, it is calculated from physical VRAM.
-- **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use. Default: `0.95`.
+- **`gpu_vram_safety_cap (float)`**: The fraction of VRAM (0.0 to 1.0) EQCCTPro is allowed to use for the total pool. Default: `0.95`.
+- **`cudnn_headroom (float)`**: The fraction of GPU VRAM (0.0 to 0.80) to reserve specifically for cuDNN workspace overhead during concurrent predictions. Default: `0.25` (25%).
 - **`ram_safety_cap (float)`**: The fraction of Total System RAM (0.0 to 0.98) EQCCTPro is allowed to use. Default: `0.90`.
 - **`stations2use (int)`**: The maximum number of stations to test in the benchmark.
 - **`min_cpu_amount / cpu_test_step_size (int)`**: Controls the iterative testing of CPU core counts.
@@ -440,8 +506,9 @@ python scripts/analysis/analyze_trial_results_efficiency.py --compare --model eq
 ```
 
 ### **Key Metrics Defined**
-- **Effective Concurrency**: A unified metric for parallelism. In **ModelActor** mode, it represents the number of persistent actors spawned. In **Ripper** mode, it represents the actual number of concurrent tasks executed.
+- **Effective Concurrency**: A unified metric for parallelism. In **ModelActor** mode, it represents the **number of persistent actors spawned**. In **Ripper** mode, it represents the **actual number of concurrent tasks executed**.
 - **Throughput (Stations/s)**: The total number of stations processed divided by the total runtime.
+- **RAM Utilization (%)**: A measure of memory efficiency, calculated as `(Process Tree RAM / Total Requested RAM) × 100`. Values < 100% indicate efficient memory sharing (e.g., via Copy-on-Write), while values > 100% indicate that overhead (Ray/Framework) has exceeded the allocated safety buffers.
 - **Resource Cost Score**: A weighted score (CPUs + GPUs × 10) to evaluate the efficiency of hardware utilization.
 
 ### **Generated Artifacts**
@@ -460,15 +527,33 @@ The `visualize_trial_results.py` script generates high-fidelity, interactive vis
 
 ### **Usage Examples**
 ```sh
-# Single file visualization
+# Single file visualization (auto-detects model name from CSV)
 python scripts/visualization/visualize_trial_results.py /path/to/results/cpu_test_results.csv --output_dir vis/
 
-# Batch visualization (creates separate folders per trial)
+# Batch visualization (creates separate folders per trial subdirectory)
 python scripts/visualization/visualize_trial_results.py --batch --results_root results/csv/ --output_dir batch_vis/
 
-# Compare ModelActor vs Ripper performance
-python scripts/visualization/visualize_trial_results.py --compare --model eqcct --trial_type gpu --results_root results/csv/
+# Compare ModelActor vs Ripper performance for a specific model (fixed hardware)
+python scripts/visualization/visualize_trial_results.py --compare --model phasenetlight --trial_type cpu
+
+# Universal Comparison (CPU vs GPU across both methods)
+# Omitting --trial_type triggers a comprehensive 4-way comparison
+python scripts/visualization/visualize_trial_results.py --compare --model eqcct --output_dir vis/universal/
+
+# Optimal Configuration Visualization (from optimal_configurations_*.csv files)
+# Single model comparison (CPU vs GPU, ModelActor vs Ripper)
+python scripts/visualization/visualize_trial_results.py --optimal --compare --model eqcct --results_root results/trials/ --output_dir vis/optimal_comparisons/
+
+# Batch optimal comparison (all models, auto-discovers from results/trials/)
+python scripts/visualization/visualize_trial_results.py --optimal --compare --batch --results_root results/trials/ --output_dir visualizations/optimal_comparisons/
+
+# Batch optimal comparison via shell script (alternative; edit MODELS in script for custom list)
+./scripts/visualization/batch_optimal_comparison.sh results/trials/ visualizations/optimal_comparisons/
 ```
+
+### **Optimal Configuration Plots**
+- **3D Scatter**: CPUs (x) vs Stations (y) vs Runtime/Picking Time (z), with rainbow color scale for concurrent tasks and marker shapes for GPU count and execution mode.
+- **Comparison Table**: GPU columns separated by count (e.g., GPU (1), GPU (2)), plus Mean VRAM, Actor Creation Time, and Model Load Time.
 
 ### **Interactive Plot Features**
 - **3D Resource Plots**: Explore the relationship between **CPUs**, **Total Stations**, and **Runtime/RAM/VRAM** in interactive 3D space.
@@ -562,8 +647,8 @@ The `EvaluateSystem` functionality generates a CSV file (e.g., `cpu_test_results
 - **`Total Waveform Analysis Timespace (min)`**: Total duration of the analyzed waveforms.
 
 ### **Model-Requested Memory (Theoretical)**
-*These values represent the expected memory footprint based on empirical model data.*
-- **`Requested VRAM per Actor (MB)`**: Theoretical VRAM required for one model instance (GPU trials only). **Includes safety buffer** (1024 MB).
+*These values represent the expected memory footprint based on empirical model data, calibrated from GPU test trials (2x 49GB GPUs, 93100 MB pool).*
+- **`Requested VRAM per Actor (MB)`**: Theoretical VRAM required for one model instance (GPU trials only). **Includes safety buffer** (1024 MB, empirically calibrated).
 - **`Requested RAM per Actor (MB)`**: Theoretical system RAM required for one model instance. In CPU trials, this is the primary memory footprint; in GPU trials, this tracks the system RAM overhead for the GPU process. **Includes safety buffer** (1536 MB).
 - **`Total Requested VRAM (MB)`**: The total theoretical VRAM footprint expected (`N ModelActors × Requested per Actor + N × 128 MB overhead`).
 - **`Total Requested RAM (MB)`**: The total theoretical RAM footprint expected (`N ModelActors × Requested per Actor + N × 256 MB overhead`).
@@ -590,7 +675,7 @@ The overhead typically consists of:
 2. **Ray Raylets**: ~100-200 MB per Raylet process for Ray's distributed runtime.
 3. **Ray Workers**: ~50-150 MB per worker process for Python interpreter and framework imports.
 4. **TensorFlow/PyTorch Buffers**: Variable memory for gradient caching, intermediate tensors, and framework-specific optimizations.
-5. **Safety Buffer**: ~1024 MB (1 GB) for VRAM and ~1536 MB (1.5 GB) for RAM reserved for operational stability and framework overhead.
+5. **Safety Buffer**: ~1024 MB (1 GB) for VRAM and ~1536 MB (1.5 GB) for RAM reserved for operational stability and framework overhead. These values are empirically calibrated from GPU test trials.
 6. **Per-Task Overheads**: ~128 MB VRAM and ~256 MB RAM per concurrent task for waveform data handling and processing.
 
 ### **Efficiency & Performance**
@@ -599,7 +684,15 @@ The overhead typically consists of:
         - In **Ripper mode**, this equals either `Actual Ripper Concurrent Tasks` (if available) or `Number of Concurrent Station Tasks` (the number of simultaneous tasks requested).
 - **`VRAM Utilization (%)`**: How much VRAM is actually being used relative to what was requested (`Process Tree VRAM / Total Requested VRAM × 100`). Values **>100%** indicate overhead exceeds buffer allocations; values **<100%** indicate underutilization or efficient memory sharing.
 - **`RAM Utilization (%)`**: How much RAM is actually being used relative to what was requested (`Process Tree RAM / Total Requested RAM × 100`). Similar interpretation to VRAM utilization.
-- **`Total Run time for Picker (s)`**: The wall-clock time taken to complete the workload.
+- **`Total Trial Time (s)`**: The absolute wall-clock duration of the entire trial, from the very start of the `run_eqcctpro` call to its completion. This includes setup, ModelActor creation (if applicable), and all waveform processing.
+- **`Actor Creation Time (s)`**: 
+    - In **ModelActor mode**: The time taken to spin up persistent Ray actors and load their models into memory.
+    - In **Ripper mode**: This field is empty (N/A).
+- **`Avg Model Load Time (s)`**: 
+    - In **ModelActor mode**: This field is empty (N/A).
+    - In **Ripper mode**: The average time taken to load the model into memory *per station task*. Since models are loaded/unloaded for every station in Ripper mode, this represents the recurring overhead.
+- **`Waveform Processing Time (s)`**: The average time to load waveforms (mSEED files) into memory per station task. This measures the `_mseed2nparray` (EQCCT) or `mseed2stream_3c` (SeisBench) call duration.
+- **`Total Run time for Picker (s)`**: The total wall-clock time for all station task processing (task submission, waveform loading, and inference combined).
 - **`Intra-parallelism Threads`**: Number of threads TensorFlow uses for individual operations.
 - **`Inter-parallelism Threads`**: Number of threads TensorFlow uses for independent operations in parallel.
 - **`Inference Actor Memory Limit (MB)`**: Legacy VRAM ceiling per shared inference actor.
@@ -623,7 +716,7 @@ When analyzing evaluation results, it's important to understand why memory value
 
 | Column | Formula | Description |
 |--------|---------|-------------|
-| **Requested RAM per Actor** | `Model_RAM + RAM_BUFFER (1536 MB)` | Theoretical per-actor cost from isolated testing |
+| **Requested RAM per Actor** | `Model_RAM + RAM_BUFFER (1536 MB)` | Theoretical per-actor cost from isolated testing (empirically calibrated) |
 | **Total Requested RAM** | `N × Requested_per_Actor + N × 256 MB` | Worst-case estimate for N fresh actors |
 | **Process Tree RAM** | `sum(RSS of main + all children)` | Actual total footprint at snapshot time |
 | **RAM Growth** | `Process_Tree_RAM(after) - Process_Tree_RAM(before)` | What THIS specific trial added |
@@ -636,9 +729,9 @@ When a trial needs **more actors than currently exist in the Ray session**, new 
 
 | Trial | N Actors | RAM Growth | What Happened |
 |-------|----------|------------|---------------|
-| 1 | 1 | +1128 MB | 🆕 First actor spawned |
-| 3 | 2 | +1596 MB | 🆕 Second actor spawned |
-| 6 | 3 | +2931 MB | 🆕 Third actor spawned |
+| 1 | 1 | +1128 MB | First actor spawned |
+| 3 | 2 | +1596 MB | Second actor spawned |
+| 6 | 3 | +2931 MB | Third actor spawned |
 
 Each new actor costs ~1500-3000 MB (model weights + TensorFlow runtime + Ray worker).
 
@@ -648,9 +741,9 @@ When a trial needs **fewer or equal actors** than already exist, Ray reuses them
 
 | Trial | N Actors | RAM Growth | What Happened |
 |-------|----------|------------|---------------|
-| 4 | 1 | -61 MB | ♻️ Reused existing actor |
-| 7 | 1 | +3.74 MB | ♻️ Reused existing actor |
-| 8 | 2 | +1.94 MB | ♻️ Reused existing actors |
+| 4 | 1 | -61 MB | Reused existing actor |
+| 7 | 1 | +3.74 MB | Reused existing actor |
+| 8 | 2 | +1.94 MB | Reused existing actors |
 
 **Idle actors stay in memory** - Ray doesn't deallocate them between trials within the same session.
 
