@@ -2,16 +2,23 @@
 """
 Benchmark peak memory when N model instances are loaded simultaneously.
 
-For each (model, hardware, strategy) combination matching the optimal trial
-configs at 228 stations, this script:
+For each (model, hardware, strategy) combination matching the paper trial
+selection at 228 stations (Ripper and Model-Actor: Ray CPUs 5–20 only; global
+minimum total time within that grid), this script:
   1. Starts Ray with the same CPU/GPU constraints as the trial
-  2. Creates N Ray actors, each loading the model
-  3. Waits for all actors to finish loading
-  4. Measures total process-tree RAM (psutil) and VRAM (pynvml)
-  5. Shuts down Ray and records the values
+  2. Creates N Ray actors (Ripper = concurrent workers, Model-Actor = actors),
+     each loading the model — no picking workload; load-only
+  3. Waits until every instance reports ready (all models resident)
+  4. Keeps all actors alive and samples process-tree RAM + GPU VRAM on an
+     interval; records the maximum observed (peak)
+  5. Shuts down Ray and writes results
+
+Re-run with conda + python3:
+  conda run -n eqcctpro python3 experiments/workbench/memory/benchmark_peak_memory.py
 
 Output: results/benchmark_results/peak_memory_measured.json
 """
+import argparse
 import os
 import sys
 import json
@@ -19,12 +26,16 @@ import time
 import csv
 import gc
 import psutil
-import numpy as np
 from pathlib import Path
+
+DEFAULT_HOLD_SECONDS = 25.0
+DEFAULT_SAMPLE_INTERVAL = 1.25
 
 # .../eqcctpro/experiments/workbench/memory/benchmark_peak_memory.py -> repo root is parents[3]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "visualization"))
+from ripper_combined_minima import paper_ma_ray_cpus_ok, paper_ripper_ray_cpus_ok  # noqa: E402
 
 EQCCT_P = "/home/skevofilaxc/model/ModelPS/test_trainer_024.h5"
 EQCCT_S = "/home/skevofilaxc/model/ModelPS/test_trainer_021.h5"
@@ -56,9 +67,12 @@ def get_optimal_configs():
                         v = (row.get("Trial Success") or "").strip().lower()
                         if v not in ("1", "true", "yes", "1.0"):
                             continue
-                        cpub = int(float(row.get("Number of CPUs Allocated for Ray to Use", -1) or -1))
-                        if cpub in (41, 46):
-                            continue
+                        if orch_key == "Ripper":
+                            if not paper_ripper_ray_cpus_ok(row):
+                                continue
+                        else:
+                            if not paper_ma_ray_cpus_ok(row):
+                                continue
                         tt = float(row.get("Total Trial Time (s)", 0) or 0)
                         if best_tt is None or tt < best_tt:
                             best_tt = tt
@@ -118,8 +132,19 @@ def get_vram_mb(gpu_indices):
         return 0.0
 
 
-def measure_loaded_memory(display_name, sb_parent, sb_child, hw, n_instances,
-                          num_cpus, gpu_indices, ram_per_mb, vram_per_mb):
+def measure_loaded_memory(
+    display_name,
+    sb_parent,
+    sb_child,
+    hw,
+    n_instances,
+    num_cpus,
+    gpu_indices,
+    ram_per_mb,
+    vram_per_mb,
+    hold_seconds: float,
+    sample_interval: float,
+):
     import ray
 
     use_gpu = hw == "GPU"
@@ -194,18 +219,30 @@ def measure_loaded_memory(display_name, sb_parent, sb_child, hw, n_instances,
     print(f"  Waiting for {n_instances} actors to load...")
     ready_refs = [a.ready.remote() for a in actors]
     ray.get(ready_refs)
-    print(f"  All {n_instances} actors loaded. Measuring memory...")
+    print(
+        f"  All {n_instances} workers loaded; holding {hold_seconds:.0f}s "
+        f"(sample every {sample_interval:.1f}s) for peak RAM/VRAM..."
+    )
 
-    time.sleep(3)
-
-    ram_after = get_process_tree_ram_mb()
-    vram_after = get_vram_mb(gpu_indices) if use_gpu else 0.0
+    deadline = time.monotonic() + hold_seconds
+    peak_ram = 0.0
+    peak_vram = 0.0
+    n_samples = 0
+    while time.monotonic() < deadline:
+        ram_s = get_process_tree_ram_mb()
+        vram_s = get_vram_mb(gpu_indices) if use_gpu else 0.0
+        peak_ram = max(peak_ram, ram_s)
+        peak_vram = max(peak_vram, vram_s)
+        n_samples += 1
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(sample_interval, max(0.05, remaining)))
 
     budget_ram = n_instances * ram_per_mb / 1024
     budget_vram = n_instances * vram_per_mb / 1024
 
-    print(f"  Process-tree RAM:  {ram_after:.0f} MB  ({ram_after/1024:.1f} GB)")
-    print(f"  Process-tree VRAM: {vram_after:.0f} MB  ({vram_after/1024:.1f} GB)")
+    print(f"  Peak process-tree RAM (max over {n_samples} samples):  {peak_ram:.0f} MB  ({peak_ram/1024:.1f} GB)")
+    print(f"  Peak process-tree VRAM: {peak_vram:.0f} MB  ({peak_vram/1024:.1f} GB)")
     print(f"  Budget cap RAM:    {budget_ram:.1f} GB")
     print(f"  Budget cap VRAM:   {budget_vram:.1f} GB")
 
@@ -215,15 +252,33 @@ def measure_loaded_memory(display_name, sb_parent, sb_child, hw, n_instances,
     time.sleep(2)
 
     return {
-        "tree_ram_mb": round(ram_after, 1),
-        "tree_vram_mb": round(vram_after, 1),
+        "tree_ram_mb": round(peak_ram, 1),
+        "tree_vram_mb": round(peak_vram, 1),
         "budget_ram_gb": round(budget_ram, 1),
         "budget_vram_gb": round(budget_vram, 1),
         "n_instances": n_instances,
+        "hold_seconds": hold_seconds,
+        "sample_interval_s": sample_interval,
+        "n_peak_samples": n_samples,
     }
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Peak RAM/VRAM with all model workers loaded and held.")
+    ap.add_argument(
+        "--hold-seconds",
+        type=float,
+        default=DEFAULT_HOLD_SECONDS,
+        help=f"Keep all actors loaded this long while sampling peak memory (default {DEFAULT_HOLD_SECONDS})",
+    )
+    ap.add_argument(
+        "--sample-interval",
+        type=float,
+        default=DEFAULT_SAMPLE_INTERVAL,
+        help=f"Seconds between RAM/VRAM samples while holding (default {DEFAULT_SAMPLE_INTERVAL})",
+    )
+    args = ap.parse_args()
+
     configs = get_optimal_configs()
     results = {}
 
@@ -244,6 +299,8 @@ def main():
             display, sb_parent, sb_child, hw, n,
             cfg["cpus"], gpu_indices,
             cfg["ram_per"], cfg["vram_per"],
+            hold_seconds=args.hold_seconds,
+            sample_interval=args.sample_interval,
         )
         key = f"{display}_{hw}_{orch}"
         results[key] = result

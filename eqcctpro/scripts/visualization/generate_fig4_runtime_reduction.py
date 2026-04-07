@@ -2,94 +2,45 @@
 """
 Generate fig4: Runtime Reduction barplot comparing Ripper vs Model-Actor at 228 stations.
 Runtime Reduction = (1 - MA Total / Ripper Total) × 100%
-Data: minimum Total Trial Time at 228 stations from trial CSVs (same source as fig5).
 
-X-axis: model names; device legend (CPU / GPU bar colors) is centered below the Model label.
+Uses the same row-selection rules as generate_fig5_runtime_comparison.py (via paper_runtime_raw_dict).
 """
-import csv
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.ticker
 import numpy as np
 from pathlib import Path
+import sys
 
-BASE = Path(__file__).resolve().parents[2] / "results" / "trials"
-MODEL_MAP = {
-    "phasenet_original":             "PhaseNet",
-    "phasenetlight_stead":           "PhaseNetLight",
-    "eqtransformer_original":        "EQTransformer",
-    "eqtransformer_nonconservative": "EQT-NC",
-    "eqcct":                         "EQCCT",
-}
+_VIZ = Path(__file__).resolve().parent
+if str(_VIZ) not in sys.path:
+    sys.path.insert(0, str(_VIZ))
 
-_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+from ripper_combined_minima import paper_runtime_raw_dict  # noqa: E402
 
-
-def min_tt_228(csv_path):
-    best = None
-    try:
-        with open(csv_path) as f:
-            for row in csv.DictReader(f):
-                try:
-                    n = int(float(row["Number of Stations Used"]))
-                except (KeyError, ValueError):
-                    continue
-                if n != 228:
-                    continue
-                v = (row.get("Trial Success") or "").strip().lower()
-                if v not in ("1", "true", "yes", "1.0"):
-                    continue
-                try:
-                    c = int(float(row["Number of CPUs Allocated for Ray to Use"]))
-                except (KeyError, ValueError, TypeError):
-                    continue
-                if c in _EXCLUDED_RAY_CPUS:
-                    continue
-                tt = float(row.get("Total Trial Time (s)", 0) or 0)
-                if best is None or tt < best:
-                    best = tt
-    except FileNotFoundError:
-        pass
-    return best
-
-raw = {}
-for d in BASE.iterdir():
-    if not d.is_dir():
-        continue
-    name = d.name
-    if name.startswith("eval_cpu_"):
-        hw, frag = "CPU", name[len("eval_cpu_"):]
-    elif name.startswith("eval_gpu_"):
-        hw, frag = "GPU", name[len("eval_gpu_"):]
-    else:
-        continue
-    if frag.endswith("_modelactor"):
-        orch, mfrag = "MA", frag[:-len("_modelactor")]
-    elif frag.endswith("_ripper"):
-        orch, mfrag = "Ripper", frag[:-len("_ripper")]
-    else:
-        continue
-    model = MODEL_MAP.get(mfrag)
-    if model is None:
-        continue
-    csv_file = d / f"{'cpu' if hw == 'CPU' else 'gpu'}_test_results.csv"
-    val = min_tt_228(csv_file)
-    if val is not None:
-        raw[(model, hw, orch)] = val
+BASE_ROOT = Path(__file__).resolve().parents[2] / "results"
+TRIALS = BASE_ROOT / "trials"
+RIPPER_CPU_228 = BASE_ROOT / "ripper_228_conc_sweep"
 
 models = ["PhaseNet", "PhaseNetLight", "EQTransformer", "EQT-NC", "EQCCT"]
+raw = paper_runtime_raw_dict(TRIALS, RIPPER_CPU_228)
+
 cpu_vals = []
 gpu_vals = []
 for m in models:
-    r_cpu = raw.get((m, "CPU", "Ripper"))
-    m_cpu = raw.get((m, "CPU", "MA"))
-    r_gpu = raw.get((m, "GPU", "Ripper"))
-    m_gpu = raw.get((m, "GPU", "MA"))
-    cpu_vals.append(round((1 - m_cpu / r_cpu) * 100) if r_cpu and m_cpu and r_cpu > 0 else 0)
-    gpu_vals.append(round((1 - m_gpu / r_gpu) * 100) if r_gpu and m_gpu and r_gpu > 0 else 0)
+    r_cpu = raw.get((m, "CPU", "Ripper"), (None, 0))[0]
+    m_cpu = raw.get((m, "CPU", "MA"), (None, 0))[0]
+    r_gpu = raw.get((m, "GPU", "Ripper"), (None, 0))[0]
+    m_gpu = raw.get((m, "GPU", "MA"), (None, 0))[0]
+    cpu_vals.append(
+        round((1 - m_cpu / r_cpu) * 100) if r_cpu and m_cpu and r_cpu > 0 else 0
+    )
+    gpu_vals.append(
+        round((1 - m_gpu / r_gpu) * 100) if r_gpu and m_gpu and r_gpu > 0 else 0
+    )
 
-# ── Layout ─────────────────────────────────────────────────────────────────────
 x        = np.arange(len(models))
 bar_w    = 0.35
 fig, ax  = plt.subplots(figsize=(10, 5.5))
@@ -154,3 +105,5 @@ fig.savefig(
     pad_inches=0.15,
 )
 print(f"Saved {Path(__file__).resolve().parents[2] / 'docs/figures/fig4.png'}")
+print(f"CPU reductions: {dict(zip(models, cpu_vals))}")
+print(f"GPU reductions: {dict(zip(models, gpu_vals))}")

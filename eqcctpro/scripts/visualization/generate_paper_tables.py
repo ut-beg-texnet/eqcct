@@ -5,7 +5,8 @@ Generate paper tables for EQCCTPro methodology section.
 Creates:
 - Table 1: Per-model memory requirements (from parallelization.py)
 - Table 2: Optimal configuration picking times and actor creation (from trial results)
-- Table 3: Best Ripper run at 228 stations (CPU: ripper_228_conc_sweep; GPU: min over trials eval_gpu_*_ripper + ripper_228_conc_sweep GPU sweep logs)
+- Table 3: Best Ripper at 228 (Ray CPUs 5–20): one CPU row per model + best 1-GPU and 2-GPU rows per model, sorted by runtime
+- Table 4–5: Model-Actor minima at 228 (paper Ray CPU grid); Table 4 includes separate 1- and 2-GPU rows when present, sorted by total time
 
 Usage:
     python generate_paper_tables.py [--output_dir PATH]
@@ -23,8 +24,11 @@ _VIZ = Path(__file__).resolve().parent
 sys.path.insert(0, str(_VIZ))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ripper_combined_minima import (  # noqa: E402
-    best_gpu_ripper_row_at_228,
-    row_to_table3_gpu_entry,
+    paper_ma_ray_cpus_ok,
+    table3_ripper_rows_sorted,
+    table4_ma_entries_with_raw,
+    table4_ma_rows_sorted,
+    trial_success,
 )
 from eqcctpro.parallelization import (
     SEISBENCH_MODEL_VRAM_MB,
@@ -102,11 +106,6 @@ def build_table1_memory(output_path: Path):
     return rows
 
 
-def _trial_success(row: dict) -> bool:
-    v = (row.get("Trial Success") or "").strip().lower()
-    return v in ("1", "true", "yes", "1.0")
-
-
 def _gpu_count_from_field(raw: str | None) -> int:
     raw = (raw or "").strip()
     if not raw or raw == "[]":
@@ -125,82 +124,8 @@ def build_table3_ripper(
     trials_root: Path,
     output_path: Path,
 ):
-    """Table 3: Min successful 228-station Ripper time per model/device (combined log corpus)."""
-    cpu_map = {
-        "eval_sweep_ripper_cpu_phasenet_original": ("PhaseNet", "CPU"),
-        "eval_sweep_ripper_cpu_phasenetlight_stead": ("PhaseNetLight", "CPU"),
-        "eval_sweep_ripper_cpu_eqtransformer_original": ("EQTransformer", "CPU"),
-        "eval_sweep_ripper_cpu_eqtransformer_nc": ("EQTransformer-NC", "CPU"),
-        "eval_sweep_ripper_cpu_eqcct": ("EQCCT", "CPU"),
-    }
-    rows_out: list[dict] = []
-
-    for subdir, (model, dev) in cpu_map.items():
-        p = ripper_cpu_root / subdir / "cpu_test_results.csv"
-        best = None
-        best_row = None
-        if p.is_file():
-            with p.open(newline="", encoding="utf-8", errors="replace") as f:
-                for row in csv.DictReader(f):
-                    try:
-                        n = int(float(row.get("Number of Stations Used") or 0))
-                    except (ValueError, TypeError):
-                        continue
-                    if n != 228 or not _trial_success(row):
-                        continue
-                    tt = _safe_float(row.get("Total Trial Time (s)"), 1e9)
-                    if best is None or tt < best:
-                        best = tt
-                        best_row = row
-        if best_row is None:
-            continue
-        cpus = int(_safe_float(best_row.get("Number of CPUs Allocated for Ray to Use"), 0))
-        conc = int(
-            _safe_float(
-                best_row.get("Actual Ripper Concurrent Tasks")
-                or best_row.get("Number of Concurrent Station Tasks"),
-                0,
-            )
-        )
-        rows_out.append(
-            {
-                "Model": model,
-                "Device": dev,
-                "CPUs": cpus,
-                "GPUs": 0,
-                "Conc. Tasks": conc,
-                "Ripper Picking/Total (s)": round(_safe_float(best_row.get("Total Trial Time (s)")), 2),
-            }
-        )
-
-    gpu_winners = best_gpu_ripper_row_at_228(trials_root, ripper_cpu_root)
-    gpu_order = [
-        "PhaseNetLight",
-        "EQTransformer",
-        "EQTransformer-NC",
-        "PhaseNet",
-        "EQCCT",
-    ]
-    for model in gpu_order:
-        row = gpu_winners.get(model)
-        if row is None:
-            continue
-        rows_out.append(row_to_table3_gpu_entry(model, row))
-
-    order = [
-        ("PhaseNet", "CPU"),
-        ("PhaseNetLight", "CPU"),
-        ("EQTransformer", "CPU"),
-        ("EQTransformer-NC", "CPU"),
-        ("PhaseNetLight", "GPU"),
-        ("EQTransformer", "GPU"),
-        ("EQTransformer-NC", "GPU"),
-        ("PhaseNet", "GPU"),
-        ("EQCCT", "CPU"),
-        ("EQCCT", "GPU"),
-    ]
-    rank = {k: i for i, k in enumerate(order)}
-    rows_out.sort(key=lambda r: rank.get((r["Model"], r["Device"]), 99))
+    """Table 3: global-best Ripper at 228 per model (Ray CPUs 5–20); GPU split by 1 vs 2 GPUs; sorted by time."""
+    rows_out = table3_ripper_rows_sorted(trials_root, ripper_cpu_root)
 
     if not rows_out:
         print("No data for Table 3")
@@ -233,7 +158,10 @@ def build_table2_timing(results_root: Path, output_path: Path):
                 r = csv.DictReader(fp)
                 for row in r:
                     n = int(_safe_float(row.get("Number of Stations Used", 0)))
-                    if n != 228: continue
+                    if n != 228:
+                        continue
+                    if not paper_ma_ray_cpus_ok(row):
+                        continue
                     pt = _safe_float(row.get("Total Run time for Picker (s)", 0))
                     tt = _safe_float(row.get("Total Trial Time (s)", 0))
                     act = _safe_float(row.get("Actor Creation Time (s)", 0))
@@ -277,6 +205,56 @@ def build_table2_timing(results_root: Path, output_path: Path):
     return rows
 
 
+def build_table4_modelactor(trials_root: Path, output_path: Path):
+    """Table 4: Model-Actor minima at 228 (paper CPU grid); separate 1- and 2-GPU rows when present."""
+    trials_dir = trials_root / "trials" if (trials_root / "trials").is_dir() else trials_root
+    rows_out = table4_ma_rows_sorted(trials_dir)
+    if not rows_out:
+        print("No data for Table 4")
+        return []
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
+        w.writeheader()
+        w.writerows(rows_out)
+    print(f"Wrote {output_path}")
+    return rows_out
+
+
+def build_table5_memory(trials_root: Path, output_path: Path):
+    """Process-tree / requested RAM & VRAM at each Table 4 Model-Actor configuration."""
+    trials_dir = trials_root / "trials" if (trials_root / "trials").is_dir() else trials_root
+    entries = table4_ma_entries_with_raw(trials_dir)
+    rows_out: list[dict] = []
+    for disp, row in entries:
+        rows_out.append({
+            "Model": disp["Model"],
+            "Device": disp["Device"],
+            "CPUs": disp["CPUs"],
+            "GPUs": disp["GPUs"],
+            "Act.": disp["Actors"],
+            "Req. RAM": int(round(_safe_float(row.get("Total Requested RAM (MB)"), 0))),
+            "Tree RAM": int(round(_safe_float(row.get("Process Tree RAM (MB)"), 0))),
+            "Req. VRAM": int(round(_safe_float(row.get("Total Requested VRAM (MB)"), 0))),
+            "Tree VRAM": int(round(_safe_float(row.get("Process Tree VRAM (MB)"), 0))),
+            "Peak RAM": int(round(_safe_float(row.get("Peak RAM (MB)"), 0))),
+            "_sort_tot": disp["Total (s)"],
+        })
+    rows_out.sort(key=lambda r: r["_sort_tot"])
+    for r in rows_out:
+        del r["_sort_tot"]
+    if not rows_out:
+        print("No data for Table 5")
+        return []
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows_out[0].keys()))
+        w.writeheader()
+        w.writerows(rows_out)
+    print(f"Wrote {output_path}")
+    return rows_out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--output_dir", default="docs/tables", help="Output directory for CSV tables")
@@ -295,6 +273,8 @@ def main():
     build_table1_memory(out / "table1_memory_requirements.csv")
     build_table2_timing(results, out / "table2_optimal_picking_times.csv")
     build_table3_ripper(ripper_cpu, trials, out / "table3_ripper_228_stations.csv")
+    build_table4_modelactor(trials, out / "table4_modelactor_228.csv")
+    build_table5_memory(trials, out / "table5_modelactor_memory.csv")
 
 
 if __name__ == "__main__":

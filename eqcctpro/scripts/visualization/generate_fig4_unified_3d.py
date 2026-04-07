@@ -47,7 +47,7 @@ MARKER_MAP = {
     ("ModelActor", 2): ("s", "full"),
 }
 GREY = "#666666"
-_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+_PROTOCOL_CPUS = frozenset({5, 8, 11, 14, 17, 20})
 
 
 def _trial_ok(row) -> bool:
@@ -60,7 +60,7 @@ def _ray_cpus_allowed(row) -> bool:
         c = int(float(row.get("Number of CPUs Allocated for Ray to Use", -1)))
     except (TypeError, ValueError):
         return False
-    return c not in _EXCLUDED_RAY_CPUS
+    return c in _PROTOCOL_CPUS
 
 
 def parse_gpu_count(gpu_str):

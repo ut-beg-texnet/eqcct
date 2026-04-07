@@ -12,8 +12,13 @@ hardware class (CPU, 1 GPU, 2 GPUs), we take the model with the lowest mean
 successful total trial time over the station grid (5, 10, …, 225, 228) and
 Ray CPU allocations (5, 8, 11, 14, 17, 20). If no data exist for a slot, the
 script falls back to the previous static choice for that slot.
+
+Serial (per-station streaming) curves read ``docs/tables/serial_classify_spotcheck_cpu.json``
+when present (from ``benchmark_serial_classify_spotcheck.py``) and interpolate CPU
+``classify()`` minima; otherwise they scale linearly from Table~1 ``Classify-Per-Stn`` at 228.
 """
 import csv
+import json
 from pathlib import Path
 
 import matplotlib
@@ -93,7 +98,52 @@ MARKER_STYLE = {
 }
 
 LINE_WIDTH = 3.0
-_EXCLUDED_RAY_CPUS = frozenset({41, 46})
+
+SERIAL_SPOTCHECK_JSON = BASE / "docs" / "tables" / "serial_classify_spotcheck_cpu.json"
+
+
+def _load_serial_spotcheck() -> dict | None:
+    if not SERIAL_SPOTCHECK_JSON.is_file():
+        return None
+    try:
+        return json.loads(SERIAL_SPOTCHECK_JSON.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _serial_streaming_times(model: str, station_grid: np.ndarray, empirical: dict | None) -> np.ndarray:
+    """
+    CPU-only ``classify()`` wall time vs. station count (no model load in the plotted time).
+
+    With empirical JSON: use measured minima at 10,20,30,40,…,228 and linearly interpolate
+    on ``station_grid``; below the smallest / above the largest anchor, fall back to
+    ``Classify-Per-Stn`` at 228 scaled by *n*/228.
+    """
+    key_cpu = (model, "CPU")
+    if key_cpu not in SERIAL_TABLE:
+        return np.zeros(len(station_grid))
+    _load, _ann228, cls228 = SERIAL_TABLE[key_cpu]
+    analytic = np.array([cls228 * (float(n) / 228.0) for n in station_grid], dtype=float)
+    if not empirical:
+        return analytic
+    raw = empirical.get("models", {}).get(model)
+    if not raw:
+        return analytic
+    d = {int(k): float(v) for k, v in raw.items()}
+    if not d:
+        return analytic
+    xp = sorted(d.keys())
+    fp = [d[x] for x in xp]
+    out = []
+    for n in station_grid:
+        nn = int(n)
+        if nn in d:
+            out.append(d[nn])
+        elif nn < xp[0] or nn > xp[-1]:
+            out.append(cls228 * (nn / 228.0))
+        else:
+            out.append(float(np.interp(nn, xp, fp)))
+    return np.array(out)
 
 
 def _trial_ok(row) -> bool:
@@ -106,7 +156,7 @@ def _ray_cpus_allowed(row) -> bool:
         c = int(float(row.get("Number of CPUs Allocated for Ray to Use", -1)))
     except (TypeError, ValueError):
         return False
-    return c not in _EXCLUDED_RAY_CPUS
+    return c in _PROTOCOL_CPUS
 
 
 def parse_gpu_count(gpu_str):
@@ -291,12 +341,14 @@ def make_figure(
 
     fig_models = set(cfg[0] for cfg in configs)
     serial_models = fig_models & serial_whitelist
+    serial_empirical = _load_serial_spotcheck()
     serial_curves = {}
     for model in serial_models:
         key_cpu = (model, "CPU")
         if key_cpu in SERIAL_TABLE:
-            _load, _ann228, cls228 = SERIAL_TABLE[key_cpu]
-            serial_curves[(model, "streaming")] = np.array([cls228 * (n / 228.0) for n in station_grid])
+            serial_curves[(model, "streaming")] = _serial_streaming_times(
+                model, station_grid, serial_empirical
+            )
 
     fig = plt.figure(figsize=(20, 12))
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.25)
