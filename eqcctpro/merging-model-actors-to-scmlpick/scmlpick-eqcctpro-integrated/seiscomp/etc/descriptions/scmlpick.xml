@@ -114,6 +114,21 @@
                                             SeisBench model.classify Detection_threshold (0–1). EQCCT picking uses eqcctPthr / eqcctSthr instead.
                                         </description>
                                 </parameter>
+                                <parameter name="waveformFilterType" type="string" default="bandpass">
+                                        <description>
+                                            ObsPy Stream.filter type before 100 Hz resampling: bandpass, bandstop, lowpass, or highpass (same as eqcctpro.waveform_filter). profiles.*.filter BW(hp,lp) still supplies corners when matched.
+                                        </description>
+                                </parameter>
+                                <parameter name="waveformFilterCorners" type="int" default="2">
+                                        <description>
+                                            Filter order corners passed to ObsPy (eqcctpro default 2).
+                                        </description>
+                                </parameter>
+                                <parameter name="waveformFilterZerophase" type="boolean" default="true">
+                                        <description>
+                                            If true, use forward-backward (zero-phase) filtering (ObsPy zerophase=True).
+                                        </description>
+                                </parameter>
                                 <parameter name="gpuID" type="int" default="0">
                                         <description>
                                             Primary CUDA device index when ray.gpuDeviceIds is unset: use -1 for CPU-only. If ray.gpuDeviceIds is set, it defines all GPU IDs and Ray num_gpus = len(list).

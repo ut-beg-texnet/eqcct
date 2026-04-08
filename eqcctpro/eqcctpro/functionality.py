@@ -64,7 +64,13 @@ class RunEQCCTPro():
                 # Ripper mode - uses old task-based approach instead of ModelActors
                 ripper: bool = False,  # If True, use task-based parallel_predict instead of ModelActor pool
                 ripper_ignore_cpu_ram_cap: bool = False,  # CPU Ripper: skip RAM-based max_pending_tasks clamp
-                ignore_cpu_ram_cap: bool = False):  # CPU: skip RAM caps in mseed_predictor (ModelActor pool + Ripper queue)
+                ignore_cpu_ram_cap: bool = False,  # CPU: skip RAM caps in mseed_predictor (ModelActor pool + Ripper queue)
+                waveform_filter_type: str = 'bandpass',
+                waveform_filter_freqmin: float = 1.0,
+                waveform_filter_freqmax: float = 45.0,
+                waveform_filter_corners: int = 2,
+                waveform_filter_zerophase: bool = True,
+                pick_output_format: str = 'xml'):
          
         self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
         self.input_dir = input_dir
@@ -84,6 +90,13 @@ class RunEQCCTPro():
         self.vram_mb = vram_mb
         self.stations2use = stations2use
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
+
+        self.waveform_filter_type = waveform_filter_type
+        self.waveform_filter_freqmin = waveform_filter_freqmin
+        self.waveform_filter_freqmax = waveform_filter_freqmax
+        self.waveform_filter_corners = waveform_filter_corners
+        self.waveform_filter_zerophase = waveform_filter_zerophase
+        self.pick_output_format = pick_output_format
         
         if cudnn_headroom > 0.80:
             raise ValueError(f"cudnn_headroom cannot exceed 0.80 (80%), got {cudnn_headroom}. This is required for system stability.")
@@ -314,7 +327,13 @@ class RunEQCCTPro():
                                         cudnn_headroom=self.cudnn_headroom,
                                         ripper=self.ripper,
                                         ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
-                                        ignore_cpu_ram_cap=self.ignore_cpu_ram_cap))
+                                        ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                                        waveform_filter_type=self.waveform_filter_type,
+                                        waveform_filter_freqmin=self.waveform_filter_freqmin,
+                                        waveform_filter_freqmax=self.waveform_filter_freqmax,
+                                        waveform_filter_corners=self.waveform_filter_corners,
+                                        waveform_filter_zerophase=self.waveform_filter_zerophase,
+                                        pick_output_format=self.pick_output_format))
                     break
                 
                 else: # If there are more tasks than maximum, just process them
@@ -470,7 +489,13 @@ class EvaluateSystem():
                  # Ripper mode - uses old task-based approach instead of ModelActors
                  ripper: bool = False,
                  ripper_ignore_cpu_ram_cap: bool = False,
-                 ignore_cpu_ram_cap: bool = False):
+                 ignore_cpu_ram_cap: bool = False,
+                 waveform_filter_type: str = 'bandpass',
+                 waveform_filter_freqmin: float = 1.0,
+                 waveform_filter_freqmax: float = 45.0,
+                 waveform_filter_corners: int = 2,
+                 waveform_filter_zerophase: bool = True,
+                 pick_output_format: str = 'xml'):
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
@@ -528,6 +553,13 @@ class EvaluateSystem():
         self.ripper = ripper
         self.ripper_ignore_cpu_ram_cap = ripper_ignore_cpu_ram_cap
         self.ignore_cpu_ram_cap = ignore_cpu_ram_cap
+
+        self.waveform_filter_type = waveform_filter_type
+        self.waveform_filter_freqmin = waveform_filter_freqmin
+        self.waveform_filter_freqmax = waveform_filter_freqmax
+        self.waveform_filter_corners = waveform_filter_corners
+        self.waveform_filter_zerophase = waveform_filter_zerophase
+        self.pick_output_format = pick_output_format
 
         # Validate model type and parameters
         if self.model_type not in ['eqcct', 'seisbench']:
@@ -1228,7 +1260,13 @@ class EvaluateSystem():
                                                             cudnn_headroom=self.cudnn_headroom,
                                                             ripper=self.ripper,
                                                             ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
-                                                            ignore_cpu_ram_cap=self.ignore_cpu_ram_cap))
+                                                            ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                                                            waveform_filter_type=self.waveform_filter_type,
+                                                            waveform_filter_freqmin=self.waveform_filter_freqmin,
+                                                            waveform_filter_freqmax=self.waveform_filter_freqmax,
+                                                            waveform_filter_corners=self.waveform_filter_corners,
+                                                            waveform_filter_zerophase=self.waveform_filter_zerophase,
+                                                            pick_output_format=self.pick_output_format))
                                     
                                         break
                                 
@@ -1871,6 +1909,12 @@ class EvaluateSystem():
                                 ripper=self.ripper,
                                 ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
                                 ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                                waveform_filter_type=self.waveform_filter_type,
+                                waveform_filter_freqmin=self.waveform_filter_freqmin,
+                                waveform_filter_freqmax=self.waveform_filter_freqmax,
+                                waveform_filter_corners=self.waveform_filter_corners,
+                                waveform_filter_zerophase=self.waveform_filter_zerophase,
+                                pick_output_format=self.pick_output_format,
                             )
                             
                             # Wait for result

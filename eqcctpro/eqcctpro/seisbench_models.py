@@ -5,6 +5,8 @@ import time
 import random
 from pathlib import Path
 
+from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
+
 class SeisBenchModels:
     def __init__(self, parent_model_name, child_model_name, validate_pretrained=True):
         """
@@ -142,7 +144,7 @@ class SeisBenchModels:
             )
 
 
-def resampling(st):
+def resampling(st, antialias_lowpass_hz=45.0):
     """
     Perform resampling on ObsPy stream objects.
     Fallback resampling method when interpolate() fails.
@@ -161,7 +163,7 @@ def resampling(st):
     if len(need_resampling) > 0:
         for indx, tr in enumerate(need_resampling):
             if tr.stats.delta < 0.01:
-                tr.filter('lowpass', freq=45, zerophase=True)
+                tr.filter('lowpass', freq=float(antialias_lowpass_hz), zerophase=True)
             tr.resample(100)
             tr.stats.sampling_rate = 100
             tr.stats.delta = 0.01
@@ -194,22 +196,14 @@ def process_raw_station_stream_3c(args, st, station):
     max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)
     st.taper(max_percentage=max_percentage, type="cosine")
 
-    freqmin, freqmax = 1.0, 45.0
-    if args.get("stations_filters") is not None:
-        try:
-            df_filters = args["stations_filters"]
-            row = df_filters[df_filters.sta == station].iloc[0]
-            freqmin, freqmax = float(row["hp"]), float(row["lp"])
-        except Exception:
-            pass
-
-    st.filter("bandpass", freqmin=freqmin, freqmax=freqmax, corners=2, zerophase=True)
+    ftype, freqmin, freqmax, f_corners, f_zp = resolve_waveform_filter_params(args, station)
+    apply_waveform_filter(st, ftype, freqmin, freqmax, f_corners, f_zp)
 
     if any(tr.stats.sampling_rate != 100.0 for tr in st):
         try:
             st.interpolate(100.0, method="linear")
         except Exception:
-            st = resampling(st)
+            st = resampling(st, antialias_lowpass_hz=freqmax)
 
     t0 = max(tr.stats.starttime for tr in st)
     t1 = min(tr.stats.endtime for tr in st)

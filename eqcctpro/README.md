@@ -238,6 +238,29 @@ runner.run_eqcctpro()
 - **`waveform_overlap (int)`**: Overlap between chunks in minutes to ensure no events are missed at boundaries.
 - **`best_usecase_config (bool)`**: If `True`, overrides parallelism settings with the optimal values found by `EvaluateSystem`.
 
+#### **Waveform band-limiting (EQCCT + SeisBench paths)**
+
+Before resampling to 100 Hz, traces are filtered using [ObsPy’s `Stream.filter`](https://docs.obspy.org/packages/autogen/obspy.core.stream.Stream.filter.html). You can set this from `RunEQCCTPro` / `EvaluateSystem` (it is forwarded into each Ray worker’s `args` dict):
+
+- **`waveform_filter_type (str)`**: One of **`bandpass`**, **`bandstop`**, **`lowpass`**, **`highpass`** (same set as ObsPy exposes for these modes). Default: **`bandpass`** (legacy behavior).
+- **`waveform_filter_freqmin (float)`**: For **`bandpass`** / **`bandstop`**, the lower corner (Hz). For **`highpass`**, the corner frequency (Hz). Default: **`1.0`**.
+- **`waveform_filter_freqmax (float)`**: For **`bandpass`** / **`bandstop`**, the upper corner (Hz). For **`lowpass`**, the corner frequency (Hz). Default: **`45.0`**.
+- **`waveform_filter_corners (int)`**: Number of corners (filter order per ObsPy). Default: **`2`**.
+- **`waveform_filter_zerophase (bool)`**: If `True`, apply the forward-backward filter for zero phase shift (ObsPy `zerophase=True`). Default: **`True`**.
+
+If the worker **`args`** dictionary includes **`stations_filters`** (pandas `DataFrame` with columns **`sta`**, **`hp`**, **`lp`**), per-station **`hp`** / **`lp`** still override **`waveform_filter_freqmin`** / **`waveform_filter_freqmax`** for that station, matching the previous hard-coded override behavior (same mechanism as **`mseed_predictor(..., stations_filters=...)`**).
+
+#### **Pick output format**
+
+Each station directory gets `<station>_outputs/` with a single result file:
+
+- **`pick_output_format (str)`**: **`xml`** (default), **`ascii`**, or **`csv`**.
+  - **XML**: UTF-8 document `X_prediction_results.xml` with one `<pick>` element per row; child tags match the historical CSV columns (`file_name`, `network`, `station`, …).
+  - **ASCII**: file `X_prediction_results.ascii`; currently the same comma-separated / quoted row layout as CSV (a dedicated fixed-width layout may be added later).
+  - **CSV**: legacy `X_prediction_results.csv`.
+
+The same option applies in **Ripper** mode and for **EvaluateSystem** trials that call `mseed_predictor`.
+
 ---
 
 # **2. System Evaluation (EvaluateSystem)**

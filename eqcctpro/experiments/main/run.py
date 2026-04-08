@@ -4,9 +4,9 @@ from eqcctpro import RunEQCCTPro, EvaluateSystem, OptimalCPUConfigurationFinder,
 # --- Common Directory Paths (Modify for your local system) ---
 base_dir = '/home/skevofilaxc/workspace/clean_eqcct/eqcct/eqcctpro'
 input_mseed_directory_path = os.path.join(base_dir, 'data/230_stations_1_min_dt')
-output_pick_directory_path = os.path.join(base_dir, 'results/trial/logs')
+output_pick_directory_path = os.path.join(base_dir, 'results/test')
 log_file_path = os.path.join(output_pick_directory_path, 'eqcctpro.log')
-csv_filepath = os.path.join(base_dir, 'results/trials')
+csv_filepath = os.path.join(base_dir, 'results/test')
 models_dir = os.path.join(base_dir, 'models/EQCCT')
 tmp_dir = '/lambda1a/skevofilaxc/tmp'
 
@@ -61,24 +61,32 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # runner_eqcct_gpu.run_eqcctpro()
 
 # --- Example C: SeisBench PhaseNet (original) on CPU ---
-# runner_phasenet_cpu = RunEQCCTPro(
-#     use_gpu=False,
-#     model_type='seisbench',
-#     seisbench_parent_model='PhaseNet',
-#     seisbench_child_model='original',
-#     input_dir=input_mseed_directory_path,
-#     output_dir=output_pick_directory_path,
-#     log_filepath=log_file_path,
-#     cpu_id_list=range(0, 10),
-#     number_of_concurrent_station_predictions=5,
-#     P_threshold=0.3,
-#     S_threshold=0.3,
-#     Detection_threshold=0.3,
-#     start_time='2024-12-15 12:00:00',
-#     end_time='2024-12-15 12:01:00',
-#     tmp_dir=tmp_dir
-# )
-# runner_phasenet_cpu.run_eqcctpro()
+runner_phasenet_cpu = RunEQCCTPro(
+    use_gpu=False,
+    model_type='seisbench',
+    seisbench_parent_model='PhaseNet',
+    seisbench_child_model='original',
+    input_dir=input_mseed_directory_path,
+    output_dir=output_pick_directory_path,
+    log_filepath=log_file_path,
+    cpu_id_list=range(0, 10),
+    number_of_concurrent_station_predictions=5,
+    P_threshold=0.3,
+    S_threshold=0.3,
+    Detection_threshold=0.3,
+    start_time='2024-12-15 12:00:00',
+    end_time='2024-12-15 12:01:00',
+    tmp_dir=tmp_dir,
+    # Waveform preprocessing (ObsPy Stream.filter); per-station hp/lp still override via stations_filters when used.
+    waveform_filter_type='bandpass',
+    waveform_filter_freqmin=1.0,
+    waveform_filter_freqmax=45.0,
+    waveform_filter_corners=2,
+    waveform_filter_zerophase=True,
+    # Per-station picks: 'xml' (default), 'ascii' (interim CSV-like rows in .ascii), or 'csv'.
+    pick_output_format='xml',
+)
+runner_phasenet_cpu.run_eqcctpro()
 
 # --- Example D: SeisBench EQTransformer (original_nonconservative) on GPU ---
 # runner_eqt_gpu = RunEQCCTPro(
@@ -107,30 +115,30 @@ tmp_dir = '/lambda1a/skevofilaxc/tmp'
 # =============================================================================
 
 # --- Example E: Evaluate System capability using EQCCT Model (CPU) ---
-eval_eqcct_cpu = EvaluateSystem(
-    eval_mode='cpu',
-    model_type='eqcct',
-    p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'),
-    s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
-    input_dir=input_mseed_directory_path,
-    output_dir=output_pick_directory_path,
-    log_filepath=log_file_path,
-    csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct_ripper'),
-    cpu_id_list=range(0, 20),
-    min_cpu_amount=5,
-    cpu_test_step_size=5,
-    stations2use=228,
-    starting_amount_of_stations=10,
-    station_list_step_size=10,
-    min_conc_stations=1,
-    conc_station_tasks_step_size=0,
-    ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
-    tmp_dir=tmp_dir,
-    start_time='2024-12-15 12:00:00',
-    end_time='2024-12-15 12:01:00',
-    ripper=True
-)
-eval_eqcct_cpu.evaluate()
+# eval_eqcct_cpu = EvaluateSystem(
+#     eval_mode='cpu',
+#     model_type='eqcct',
+#     p_model_filepath=os.path.join(models_dir, 'test_trainer_024.h5'),
+#     s_model_filepath=os.path.join(models_dir, 'test_trainer_021.h5'),
+#     input_dir=input_mseed_directory_path,
+#     output_dir=output_pick_directory_path,
+#     log_filepath=log_file_path,
+#     csv_dir=os.path.join(csv_filepath, 'eval_cpu_eqcct_ripper'),
+#     cpu_id_list=range(0, 20),
+#     min_cpu_amount=5,
+#     cpu_test_step_size=5,
+#     stations2use=228,
+#     starting_amount_of_stations=10,
+#     station_list_step_size=10,
+#     min_conc_stations=1,
+#     conc_station_tasks_step_size=0,
+#     ram_safety_cap=0.95,             # Limit system RAM usage to 95% of total
+#     tmp_dir=tmp_dir,
+#     start_time='2024-12-15 12:00:00',
+#     end_time='2024-12-15 12:01:00',
+#     ripper=True
+# )
+# eval_eqcct_cpu.evaluate()
 
 # --- Example F: Evaluate System capability using SeisBench Model (CPU) ---
 # eval_seisbench_cpu = EvaluateSystem(

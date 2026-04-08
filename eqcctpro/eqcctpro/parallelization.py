@@ -22,6 +22,8 @@ import traceback
 import numpy as np
 from eqcctpro.tools import *
 from eqcctpro.timing_util import cuda_synchronize_best_effort, monotonic_s
+from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
+from eqcctpro.pick_output import PickOutputSink, normalize_pick_output_format, prediction_results_path
 from os import listdir
 from obspy import UTCDateTime
 from datetime import datetime, timedelta 
@@ -375,22 +377,14 @@ def _eqcct_stream_to_nparray(args, st, station, files_list=None):
 
     max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)
     st.taper(max_percentage=max_percentage, type='cosine')
-    freqmin = 1.0
-    freqmax = 45.0
-    if args["stations_filters"] is not None:
-        try:
-            df_filters = args["stations_filters"]
-            freqmin = df_filters[df_filters.sta == station].iloc[0]["hp"]
-            freqmax = df_filters[df_filters.sta == station].iloc[0]["lp"]
-        except Exception:
-            pass
-    st.filter(type='bandpass', freqmin=freqmin, freqmax=freqmax, corners=2, zerophase=True)
+    ftype, freqmin, freqmax, f_corners, f_zp = resolve_waveform_filter_params(args, station)
+    apply_waveform_filter(st, ftype, freqmin, freqmax, f_corners, f_zp)
 
     if any(tr.stats.sampling_rate != 100.0 for tr in st):
         try:
             st.interpolate(100, method="linear")
         except Exception:
-            st = _resampling(st)
+            st = _resampling(st, antialias_lowpass_hz=freqmax)
 
     st.trim(min(tr.stats.starttime for tr in st), max(tr.stats.endtime for tr in st), pad=True, fill_value=0)
     start_time = st[0].stats.starttime
@@ -533,22 +527,16 @@ def _stream_select_for_station_task(full_st: obspy.Stream, station: str) -> obsp
     return obspy.Stream(traces=[tr.copy() for tr in full_st if _trace_matches_station_task(tr, station)])
 
 
-def _output_writter_prediction(meta, csvPr, Ppicks, Pprob, Spicks, Sprob, detection_memory,prob_memory,predict_writer, idx, cq, cqq):
+def _output_writter_prediction(meta, sink, Ppicks, Pprob, Spicks, Sprob, detection_memory, prob_memory, idx, cq, cqq):
 
     """ 
     
-    Writes the detection & picking results into a CSV file.
+    Writes one detection / picking row via ``sink`` (CSV, ASCII, or XML).
 
     Parameters
     ----------
-    dataset: hdf5 obj
-        Dataset object of the trace.
-
-    predict_writer: obj
-        For writing out the detection/picking results in the CSV file. 
-       
-    csvPr: obj
-        For writing out the detection/picking results in the CSV file.  
+    sink: PickOutputSink
+        Output sink for this station's pick file.
 
     matches: dic
         It contains the information for the detected and picked event.  
@@ -632,25 +620,22 @@ def _output_writter_prediction(meta, csvPr, Ppicks, Pprob, Spicks, Sprob, detect
     p_prob = np.array(p_prob)
     PdateTime = np.array(PdateTime)
         
-    predict_writer.writerow([meta["trace_name"], 
-                     network_name,
-                     station_name, 
-                     instrument_type,
-                     station_lat, 
-                     station_lon,
-                     station_elv,
-                     PdateTime[0], 
-                     p_prob[0],
-                     SdateTime[0], 
-                     s_prob[0]
-                     ]) 
+    sink.write_pick_row([
+        meta["trace_name"],
+        network_name,
+        station_name,
+        instrument_type,
+        station_lat,
+        station_lon,
+        station_elv,
+        PdateTime[0],
+        p_prob[0],
+        SdateTime[0],
+        s_prob[0],
+    ])
+    sink.flush()
 
-
-
-    csvPr.flush()                
-
-
-    return detection_memory,prob_memory  
+    return detection_memory, prob_memory
 
 
 def _get_snr(data, pat, window=200):
@@ -856,7 +841,7 @@ def _picker(args, yh3, thr_type='P_threshold'):
     return Ppickall, Pproball
 
 
-def _resampling(st):
+def _resampling(st, antialias_lowpass_hz=45.0):
     'perform resampling on Obspy stream objects'
     
     need_resampling = [tr for tr in st if tr.stats.sampling_rate != 100.0]
@@ -864,7 +849,7 @@ def _resampling(st):
        # print('resampling ...', flush=True)    
         for indx, tr in enumerate(need_resampling):
             if tr.stats.delta < 0.01:
-                tr.filter('lowpass',freq=45,zerophase=True)
+                tr.filter('lowpass', freq=float(antialias_lowpass_hz), zerophase=True)
             tr.resample(100)
             tr.stats.sampling_rate = 100
             tr.stats.delta = 0.01
@@ -957,7 +942,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
               ignore_cpu_ram_cap=False,
               # If set, use this exact station order/count (deterministic benchmarks).
               # Skips random.sample(stations2use) and specific_stations filtering.
-              fixed_station_list=None):
+              fixed_station_list=None,
+              waveform_filter_type='bandpass',
+              waveform_filter_freqmin=1.0,
+              waveform_filter_freqmax=45.0,
+              waveform_filter_corners=2,
+              waveform_filter_zerophase=True,
+              pick_output_format='xml'):
     
     """ 
     
@@ -1056,7 +1047,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
     "model_type": model_type,
     "seisbench_parent_model": seisbench_parent_model,
     "seisbench_child_model": seisbench_child_model,
-    "Detection_threshold": Detection_threshold
+    "Detection_threshold": Detection_threshold,
+    "waveform_filter_type": waveform_filter_type,
+    "waveform_filter_freqmin": waveform_filter_freqmin,
+    "waveform_filter_freqmax": waveform_filter_freqmax,
+    "waveform_filter_corners": waveform_filter_corners,
+    "waveform_filter_zerophase": waveform_filter_zerophase,
+    "pick_output_format": pick_output_format,
     }
 
     logger.info(f"------- Hardware Configuration -------")
@@ -2285,7 +2282,6 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     """
     import glob
     import shutil
-    import csv
     import logging
     from logging.handlers import QueueHandler
     from eqcctpro.seisbench_models import mseed2stream_3c, process_raw_station_stream_3c
@@ -2305,173 +2301,149 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         logger.addHandler(QueueHandler(args['log_queue']))
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
+    out_path = prediction_results_path(save_dir, pick_fmt)
 
-    if os.path.isfile(csv_filename):
+    if os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
 
     os.makedirs(save_dir, exist_ok=True)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
+    sink = PickOutputSink(out_path, pick_fmt)
     try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
-                csvPr_gen.close()
-                return (f"{pos} {station}: FAILED - No traces for station in shared Stream.", None)
-            stream3c, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            if not files_list:
-                csvPr_gen.close()
-                return (f"{pos} {station}: FAILED - No mSEED files found.", None)
-            stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
-    except Exception as e:
-        csvPr_gen.close()
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
-        return (f"{pos} {station}: {err_msg}", None)
-    waveform_load_time = monotonic_s() - waveform_load_start
+        sink.write_header()
+        sink.flush()
 
-    try:
-        # Get picks from SeisBench model
-        # Use ray.get with a timeout or just normally if we fixed the CPU deadlock
-        classify_output = ray.get(model_actor.classify.remote(
-            stream3c,
-            P_threshold=args.get('P_threshold', 0.3),
-            S_threshold=args.get('S_threshold', 0.3),
-            Detection_threshold=args.get('Detection_threshold', 0.3),
-            strict=False,
-            flexible_horizontal_components=True
-        ))
-        
-        # Extract metadata from stream
-        station_code = stream3c[0].stats.station if len(stream3c) > 0 else station
-        network_code = stream3c[0].stats.network if len(stream3c) > 0 else ""
-        # Try to get coordinates from stream metadata if available
-        station_lat = getattr(stream3c[0].stats, 'coordinates', {}).get('latitude', 0.0) if len(stream3c) > 0 else 0.0
-        station_lon = getattr(stream3c[0].stats, 'coordinates', {}).get('longitude', 0.0) if len(stream3c) > 0 else 0.0
-        station_elv = getattr(stream3c[0].stats, 'coordinates', {}).get('elevation', 0.0) if len(stream3c) > 0 else 0.0
-        
-        # Extract picks from ClassifyOutput
-        picks = classify_output.picks if hasattr(classify_output, 'picks') else []
-        
-        # Group picks by time to write to CSV
-        # SeisBench picks are individual. We'll group them if they are very close or just write them.
-        # To match EQCCT style, we'll try to find P and S pairs within a 10s window? 
-        # Actually, let's just write them as they come for now, or use a simple grouping.
-        
-        p_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'P']
-        s_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'S']
-        
-        # Simple pairing: for each P, find the first S that comes after it within 30s
-        used_s = set()
-        for p in p_picks:
-            # Robust attribute extraction for SeisBench Pick objects
-            p_time = getattr(p, 'peak_time', getattr(p, 'start_time', getattr(p, 'time', None)))
-            p_prob = getattr(p, 'peak_value', getattr(p, 'score', getattr(p, 'value', 0.0)))
-            
-            if p_time is None:
-                continue
-            
-            match_s = None
-            for s in s_picks:
-                s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
-                if s not in used_s and s_time and 0 < (s_time - p_time) < 30:
-                    match_s = s
-                    used_s.add(s)
-                    break
-            
-            if match_s:
-                ms_time = getattr(match_s, 'peak_time', getattr(match_s, 'start_time', getattr(match_s, 'time', None)))
-                ms_prob = getattr(match_s, 'peak_value', getattr(match_s, 'score', getattr(match_s, 'value', 0.0)))
-                s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
-                s_prob_str = f"{ms_prob:.6f}"
+        start_Predicting = monotonic_s()
+
+        # ===== TIMING: Track waveform loading time =====
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    return (f"{pos} {station}: FAILED - No traces for station in shared Stream.", None)
+                stream3c, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
             else:
-                s_time_str = ''
-                s_prob_str = ''
-            
-            predict_writer.writerow([
-                station_code,
-                network_code,
-                station_code,
-                0,  # instrument_type
-                station_lat,
-                station_lon,
-                station_elv,
-                p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                f"{p_prob:.6f}",
-                s_time_str,
-                s_prob_str
-            ])
-            
-        # Write remaining S picks
-        for s in s_picks:
-            if s not in used_s:
-                s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
-                s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
-                if s_time:
-                    predict_writer.writerow([
-                        station_code,
-                        network_code,
-                        station_code,
-                        0,  # instrument_type
-                        station_lat,
-                        station_lon,
-                        station_elv,
-                        '',
-                        '',
-                        s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                        f"{s_prob:.6f}"
-                    ])
-        
-        # If no picks found at all, write one row with station info
-        if not picks:
-            predict_writer.writerow([
-                station_code,
-                network_code,
-                station_code,
-                0,  # instrument_type
-                station_lat,
-                station_lon,
-                station_elv,
-                '', '', '', ''
-            ])
-            
-        csvPr_gen.flush()
-        csvPr_gen.close()
-        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        # Return tuple: (log_message, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", waveform_load_time)
+                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                if not files_list:
+                    return (f"{pos} {station}: FAILED - No mSEED files found.", None)
+                stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
+            return (f"{pos} {station}: {err_msg}", None)
+        waveform_load_time = monotonic_s() - waveform_load_start
 
-    except Exception as exp:
-        if 'csvPr_gen' in locals():
-            csvPr_gen.close()
-        # Return tuple with waveform_load_time if available
-        load_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+        try:
+            # Get picks from SeisBench model
+            classify_output = ray.get(model_actor.classify.remote(
+                stream3c,
+                P_threshold=args.get('P_threshold', 0.3),
+                S_threshold=args.get('S_threshold', 0.3),
+                Detection_threshold=args.get('Detection_threshold', 0.3),
+                strict=False,
+                flexible_horizontal_components=True
+            ))
+
+            # Extract metadata from stream
+            station_code = stream3c[0].stats.station if len(stream3c) > 0 else station
+            network_code = stream3c[0].stats.network if len(stream3c) > 0 else ""
+            station_lat = getattr(stream3c[0].stats, 'coordinates', {}).get('latitude', 0.0) if len(stream3c) > 0 else 0.0
+            station_lon = getattr(stream3c[0].stats, 'coordinates', {}).get('longitude', 0.0) if len(stream3c) > 0 else 0.0
+            station_elv = getattr(stream3c[0].stats, 'coordinates', {}).get('elevation', 0.0) if len(stream3c) > 0 else 0.0
+
+            picks = classify_output.picks if hasattr(classify_output, 'picks') else []
+
+            p_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'P']
+            s_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'S']
+
+            used_s = set()
+            for p in p_picks:
+                p_time = getattr(p, 'peak_time', getattr(p, 'start_time', getattr(p, 'time', None)))
+                p_prob = getattr(p, 'peak_value', getattr(p, 'score', getattr(p, 'value', 0.0)))
+
+                if p_time is None:
+                    continue
+
+                match_s = None
+                for s in s_picks:
+                    s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
+                    if s not in used_s and s_time and 0 < (s_time - p_time) < 30:
+                        match_s = s
+                        used_s.add(s)
+                        break
+
+                if match_s:
+                    ms_time = getattr(match_s, 'peak_time', getattr(match_s, 'start_time', getattr(match_s, 'time', None)))
+                    ms_prob = getattr(match_s, 'peak_value', getattr(match_s, 'score', getattr(match_s, 'value', 0.0)))
+                    s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
+                    s_prob_str = f"{ms_prob:.6f}"
+                else:
+                    s_time_str = ''
+                    s_prob_str = ''
+
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    f"{p_prob:.6f}",
+                    s_time_str,
+                    s_prob_str
+                ])
+
+            for s in s_picks:
+                if s not in used_s:
+                    s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
+                    s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
+                    if s_time:
+                        sink.write_pick_row([
+                            station_code,
+                            network_code,
+                            station_code,
+                            0,
+                            station_lat,
+                            station_lon,
+                            station_elv,
+                            '',
+                            '',
+                            s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                            f"{s_prob:.6f}"
+                        ])
+
+            if not picks:
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    '', '', '', ''
+                ])
+
+            sink.flush()
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", waveform_load_time)
+
+        except Exception as exp:
+            load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass
 
 
 @ray.remote
@@ -2483,7 +2455,6 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     """
     import glob
     import shutil
-    import csv
     import logging
     from logging.handlers import QueueHandler
     # --- QUIET TF C++/Python LOGS BEFORE ANY TF IMPORT --- 
@@ -2526,102 +2497,97 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     # NOTE: Model is shared via model_actor when model_actor is not None
 
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
+    out_path = prediction_results_path(save_dir, pick_fmt)
 
-    if os.path.isfile(csv_filename):
+    if os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
 
     os.makedirs(save_dir)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
+    sink = PickOutputSink(out_path, pick_fmt)
     try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
-                return (f"{pos} {station}: FAILED no traces for station in shared Stream.", None)
-            packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
-            if packed is None:
-                return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
-            meta, data_set, hp, lp = packed
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
-            if meta is None:
-                return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
-    except Exception as e:
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-        return (f"{pos} {station}: {err_msg}", None)
-    waveform_load_time = monotonic_s() - waveform_load_start
+        sink.write_header()
+        sink.flush()
 
-    try:
-        # Load model ONLY if we don't have a shared model_actor (RIPPER mode)
-        if model_actor is None:
-            logger.info("RIPPER MODE: Loading EQCCT model inside task...")
-            # Configure GPU for this specific task process
-            if gpu:
-                from eqcctpro.tools import tf_environ
-                # Set a per-task VRAM limit if provided in args
-                vram_limit = args.get('gpu_memory_limit_mb')
-                tf_environ(gpu_id=0, vram_limit_mb=vram_limit, use_gpu=True, logger=logger)
-            
-            from eqcctpro.eqcct_tf_models import load_eqcct_model
-            model = load_eqcct_model(args['p_model'], args['s_model'])
-            logger.info("Model loaded inside task.")
-            
-            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
-            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-            predP, predS = model.predict(pred_generator, verbose=0)
-        else:
-            # Standard mode: Use the shared ModelActor
-            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
-            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-            
-            # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
-            # predP, predS = ray.get(model_actor.predict.remote(pred_generator))\
-            predP, predS = ray.get(model_actor.predict_from_arrays.remote(
-                                meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
-        
-        detection_memory = []
-        prob_memory = []
-        for ix in range(len(predP)):
-            Ppicks, Pprob = _picker(args, predP[ix,:, 0])   
-            Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+        start_Predicting = monotonic_s()
 
-            detection_memory, prob_memory = _output_writter_prediction(
-                meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, 
-                detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
-            )
-                                        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        # Return tuple: (log_message, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", waveform_load_time)
+        # ===== TIMING: Track waveform loading time =====
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    return (f"{pos} {station}: FAILED no traces for station in shared Stream.", None)
+                packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+                if packed is None:
+                    return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
+                meta, data_set, hp, lp = packed
+            else:
+                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
+                if meta is None:
+                    return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            return (f"{pos} {station}: {err_msg}", None)
+        waveform_load_time = monotonic_s() - waveform_load_start
 
-    except Exception as exp:
-        # Return tuple with waveform_load_time if available
-        load_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+        try:
+            # Load model ONLY if we don't have a shared model_actor (RIPPER mode)
+            if model_actor is None:
+                logger.info("RIPPER MODE: Loading EQCCT model inside task...")
+                # Configure GPU for this specific task process
+                if gpu:
+                    from eqcctpro.tools import tf_environ
+                    # Set a per-task VRAM limit if provided in args
+                    vram_limit = args.get('gpu_memory_limit_mb')
+                    tf_environ(gpu_id=0, vram_limit_mb=vram_limit, use_gpu=True, logger=logger)
+
+                from eqcctpro.eqcct_tf_models import load_eqcct_model
+                model = load_eqcct_model(args['p_model'], args['s_model'])
+                logger.info("Model loaded inside task.")
+
+                params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+                pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+                predP, predS = model.predict(pred_generator, verbose=0)
+            else:
+                # Standard mode: Use the shared ModelActor
+                params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+                pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+
+                # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
+                predP, predS = ray.get(model_actor.predict_from_arrays.remote(
+                                    meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
+
+            detection_memory = []
+            prob_memory = []
+            for ix in range(len(predP)):
+                Ppicks, Pprob = _picker(args, predP[ix,:, 0])
+                Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+
+                detection_memory, prob_memory = _output_writter_prediction(
+                    meta, sink, Ppicks, Pprob, Spicks, Sprob,
+                    detection_memory, prob_memory, ix, len(predP), len(predS)
+                )
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            # Return tuple: (log_message, waveform_load_time) for timing analysis
+            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", waveform_load_time)
+
+        except Exception as exp:
+            # Return tuple with waveform_load_time if available
+            load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass
 
 
 # =====================================================================
@@ -2707,7 +2673,6 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     """
     import glob
     import shutil
-    import csv
     import logging
     import sys
     
@@ -2761,99 +2726,89 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     model_load_start = monotonic_s()
     model = load_eqcct_model(args["p_model"], args["s_model"])
     model_load_time = monotonic_s() - model_load_start
-    
-    save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
 
-    if os.path.isfile(csv_filename):
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
+    out_path = prediction_results_path(save_dir, pick_fmt)
+
+    if os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            # Return 3-tuple for consistency with caller unpacking logic
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
 
     os.makedirs(save_dir)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
+    sink = PickOutputSink(out_path, pick_fmt)
     try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
+        sink.write_header()
+        sink.flush()
+
+        start_Predicting = monotonic_s()
+
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    return (
+                        f"{pos} {station}: FAILED no traces for station in shared Stream.",
+                        model_load_time,
+                        None,
+                    )
+                packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+            else:
+                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                packed = _mseed2nparray(args, files_list, station)
+            if packed is None:
                 return (
-                    f"{pos} {station}: FAILED no traces for station in shared Stream.",
+                    f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).",
                     model_load_time,
                     None,
                 )
-            packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            packed = _mseed2nparray(args, files_list, station)
-        if packed is None:
-            return (
-                f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).",
-                model_load_time,
-                None,
-            )
-        meta, data_set, hp, lp = packed
-    except Exception as e:
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-        return (f"{pos} {station}: {err_msg}", model_load_time, None)
-    waveform_load_time = monotonic_s() - waveform_load_start
+            meta, data_set, hp, lp = packed
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            return (f"{pos} {station}: {err_msg}", model_load_time, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
 
-    try:
-        params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
-        pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-        
-        # RIPPER MODE: Use the locally loaded model directly
-        predP, predS = model.predict(pred_generator, verbose=0)
-        
-        detection_memory = []
-        prob_memory = []
-        for ix in range(len(predP)):
-            Ppicks, Pprob = _picker(args, predP[ix,:, 0])   
-            Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
-
-            detection_memory, prob_memory = _output_writter_prediction(
-                meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, 
-                detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
-            )
-                                        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        
-        # Clean up model to free GPU memory
-        del model
         try:
-            import tensorflow as tf
-            tf.keras.backend.clear_session()
+            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+
+            predP, predS = model.predict(pred_generator, verbose=0)
+
+            detection_memory = []
+            prob_memory = []
+            for ix in range(len(predP)):
+                Ppicks, Pprob = _picker(args, predP[ix,:, 0])
+                Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+
+                detection_memory, prob_memory = _output_writter_prediction(
+                    meta, sink, Ppicks, Pprob, Spicks, Sprob,
+                    detection_memory, prob_memory, ix, len(predP), len(predS)
+                )
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+
+            del model
+            try:
+                import tensorflow as tf
+                tf.keras.backend.clear_session()
+            except Exception:
+                pass
+
+            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", model_load_time, waveform_load_time)
+
+        except Exception as exp:
+            wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
+    finally:
+        try:
+            sink.close()
         except Exception:
             pass
-        
-        # Return tuple: (log_message, model_load_time, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", model_load_time, waveform_load_time)
-
-    except Exception as exp:
-        # Return tuple with available times
-        wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
 
 
 @ray.remote(max_calls=1, max_retries=1)
@@ -2876,7 +2831,6 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     """
     import glob
     import shutil
-    import csv
     import logging
     import sys
 
@@ -2913,116 +2867,96 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     model_load_time = monotonic_s() - model_load_start
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
+    out_path = prediction_results_path(save_dir, pick_fmt)
 
-    if os.path.isfile(csv_filename):
+    if os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            # Return 3-tuple for consistency with caller unpacking logic
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
 
     os.makedirs(save_dir, exist_ok=True)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
+    sink = PickOutputSink(out_path, pick_fmt)
     try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
-                csvPr_gen.close()
-                return (
-                    f"{pos} {station}: FAILED no traces for station in shared Stream.",
-                    model_load_time,
-                    None,
-                )
-            stream, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            result = mseed2stream_3c(args, files_list, station)
-            if result is None:
-                csvPr_gen.close()
-                return (f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).", model_load_time, None)
-            stream, freqmin, freqmax = result
-    except Exception as e:
-        csvPr_gen.close()
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-        return (f"{pos} {station}: {err_msg}", model_load_time, None)
-    waveform_load_time = monotonic_s() - waveform_load_start
+        sink.write_header()
+        sink.flush()
 
-    try:
-        # Run SeisBench model prediction using the model wrapper's classify method
-        # IMPORTANT: strict=False and flexible_horizontal_components=True are needed
-        # to handle streams that don't perfectly match expected channel names
-        classify_output = model_wrapper.classify(
-            stream,
-            P_threshold=args.get('P_threshold', 0.3),
-            S_threshold=args.get('S_threshold', 0.3),
-            Detection_threshold=Detection_threshold,
-            strict=False,
-            flexible_horizontal_components=True,
-        )
-        if gpu:
-            cuda_synchronize_best_effort()
-        
-        # Extract picks from ClassifyOutput
-        picks = classify_output.picks if hasattr(classify_output, 'picks') else []
-        
-        # Process picks and write to CSV
-        for pick in picks:
-            pick_time = getattr(pick, 'peak_time', getattr(pick, 'start_time', getattr(pick, 'time', None)))
-            pick_prob = getattr(pick, 'peak_value', getattr(pick, 'score', getattr(pick, 'value', 0.0)))
-            pick_phase = getattr(pick, 'phase', 'P').upper()
-            
-            if pick_time is not None:
-                predict_writer.writerow([
-                    args['input_dir'].split('/')[-1],  # file_name
-                    '',  # network
-                    station,  # station
-                    '',  # instrument_type
-                    '',  # station_lat
-                    '',  # station_lon
-                    '',  # station_elv
-                    str(pick_time) if pick_phase == 'P' else '',  # p_arrival_time
-                    f"{pick_prob:.6f}" if pick_phase == 'P' else '',  # p_probability
-                    str(pick_time) if pick_phase == 'S' else '',  # s_arrival_time
-                    f"{pick_prob:.6f}" if pick_phase == 'S' else ''  # s_probability
-                ])
-        csvPr_gen.flush()
-        csvPr_gen.close()
-                                        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        
-        # Clean up model to free GPU memory
-        del model_wrapper
-        if gpu and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Return tuple: (log_message, model_load_time, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", model_load_time, waveform_load_time)
+        start_Predicting = monotonic_s()
 
-    except Exception as exp:
-        if 'csvPr_gen' in locals():
-            csvPr_gen.close()
-        # Return tuple with available times
-        ml_time = model_load_time if 'model_load_time' in locals() else None
-        wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time)
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    return (
+                        f"{pos} {station}: FAILED no traces for station in shared Stream.",
+                        model_load_time,
+                        None,
+                    )
+                stream, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
+            else:
+                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                result = mseed2stream_3c(args, files_list, station)
+                if result is None:
+                    return (f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).", model_load_time, None)
+                stream, freqmin, freqmax = result
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            return (f"{pos} {station}: {err_msg}", model_load_time, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+
+        try:
+            classify_output = model_wrapper.classify(
+                stream,
+                P_threshold=args.get('P_threshold', 0.3),
+                S_threshold=args.get('S_threshold', 0.3),
+                Detection_threshold=Detection_threshold,
+                strict=False,
+                flexible_horizontal_components=True,
+            )
+            if gpu:
+                cuda_synchronize_best_effort()
+
+            picks = classify_output.picks if hasattr(classify_output, 'picks') else []
+
+            for pick in picks:
+                pick_time = getattr(pick, 'peak_time', getattr(pick, 'start_time', getattr(pick, 'time', None)))
+                pick_prob = getattr(pick, 'peak_value', getattr(pick, 'score', getattr(pick, 'value', 0.0)))
+                pick_phase = getattr(pick, 'phase', 'P').upper()
+
+                if pick_time is not None:
+                    sink.write_pick_row([
+                        args['input_dir'].split('/')[-1],
+                        '',
+                        station,
+                        '',
+                        '',
+                        '',
+                        '',
+                        str(pick_time) if pick_phase == 'P' else '',
+                        f"{pick_prob:.6f}" if pick_phase == 'P' else '',
+                        str(pick_time) if pick_phase == 'S' else '',
+                        f"{pick_prob:.6f}" if pick_phase == 'S' else ''
+                    ])
+            sink.flush()
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+
+            del model_wrapper
+            if gpu and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", model_load_time, waveform_load_time)
+
+        except Exception as exp:
+            ml_time = model_load_time if 'model_load_time' in locals() else None
+            wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass

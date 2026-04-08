@@ -31,8 +31,32 @@ import ray
 from datetime import datetime, timedelta
 
 from eqcctpro.eqcct_tf_models import load_eqcct_model, PreLoadGeneratorTest
+from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
 
 _logger = logging.getLogger(__name__)
+
+
+def _apply_scmlpick_chunk_waveform_filter(
+    st,
+    station_id,
+    fmin,
+    fmax,
+    stations_filters,
+    waveform_filter_type="bandpass",
+    waveform_filter_corners=2,
+    waveform_filter_zerophase=True,
+):
+    """Apply the same ObsPy filter semantics as ``eqcctpro.waveform_filter`` to a Stream."""
+    wf_args = {
+        "waveform_filter_type": waveform_filter_type,
+        "waveform_filter_freqmin": float(fmin),
+        "waveform_filter_freqmax": float(fmax),
+        "waveform_filter_corners": int(waveform_filter_corners),
+        "waveform_filter_zerophase": bool(waveform_filter_zerophase),
+        "stations_filters": stations_filters,
+    }
+    ftype, lo, hi, fc, fz = resolve_waveform_filter_params(wf_args, station_id)
+    apply_waveform_filter(st, ftype, lo, hi, fc, fz)
 
 
 def _bandpass_hz_from_scmlpick_bindings(stations_filters, net_sta):
@@ -89,6 +113,9 @@ def mseed_predictor(
     model_actor=None,
     inference_mode="model_actor",
     ripper_gpu_memory_limit_mb=None,
+    waveform_filter_type="bandpass",
+    waveform_filter_corners=2,
+    waveform_filter_zerophase=True,
 ):
     """Run picking for one station × time window.
 
@@ -129,6 +156,9 @@ def mseed_predictor(
             and int(gpu_id) >= 0
         ),
         "ripper_gpu_memory_limit_mb": ripper_gpu_memory_limit_mb,
+        "waveform_filter_type": waveform_filter_type,
+        "waveform_filter_corners": waveform_filter_corners,
+        "waveform_filter_zerophase": waveform_filter_zerophase,
     }
 
     if playback:
@@ -349,6 +379,9 @@ def mseed_predictor_seisbench(
     inference_mode="model_actor",
     gpu_id=None,
     ripper_gpu_memory_limit_mb=None,
+    waveform_filter_type="bandpass",
+    waveform_filter_corners=2,
+    waveform_filter_zerophase=True,
 ):
     """One station × window via SeisBench ``classify``; output compatible with ``scPhase``."""
     net, sta, t0, t1 = wfinfo
@@ -370,13 +403,18 @@ def mseed_predictor_seisbench(
                 resolved_bp[1],
             )
 
+    _wf = dict(
+        waveform_filter_type=waveform_filter_type,
+        waveform_filter_corners=waveform_filter_corners,
+        waveform_filter_zerophase=waveform_filter_zerophase,
+    )
     if playback:
         st = prepare_station_chunk(
-            files, net_sta, t0, t1, stations_filters=None, default_band=resolved_bp
+            files, net_sta, t0, t1, stations_filters=None, default_band=resolved_bp, **_wf
         )
     else:
         st = prepare_station_chunk(
-            stream, net_sta, t0, t1, stations_filters=None, default_band=resolved_bp
+            stream, net_sta, t0, t1, stations_filters=None, default_band=resolved_bp, **_wf
         )
 
     if not st or len(st) == 0:
@@ -480,10 +518,19 @@ def get_stream_filtered(net_sta: str,start,end,files):
     print(f"Stream ready: {net}.{sta} in window [{start} .. {end}] with {len(st)} traces")
     return st
 
-def prepare_station_chunk(st_or_files, net_sta, t0, t1, stations_filters=None,
-                          default_band=(1.0, 45.0)):
+def prepare_station_chunk(
+    st_or_files,
+    net_sta,
+    t0,
+    t1,
+    stations_filters=None,
+    default_band=(1.0, 45.0),
+    waveform_filter_type="bandpass",
+    waveform_filter_corners=2,
+    waveform_filter_zerophase=True,
+):
 
-    net, sta = net_sta.split(".")
+    net, sta = net_sta.split(".", 1)
 
     # -------- REAL-TIME --------
     if isinstance(st_or_files, obspy.Stream):
@@ -509,7 +556,16 @@ def prepare_station_chunk(st_or_files, net_sta, t0, t1, stations_filters=None,
             resolved = _bandpass_hz_from_scmlpick_bindings(stations_filters, net_sta)
             if resolved is not None:
                 fmin, fmax = resolved
-        st.filter(type="bandpass", freqmin=fmin, freqmax=fmax, corners=2, zerophase=True)
+        _apply_scmlpick_chunk_waveform_filter(
+            st,
+            sta,
+            fmin,
+            fmax,
+            stations_filters,
+            waveform_filter_type=waveform_filter_type,
+            waveform_filter_corners=waveform_filter_corners,
+            waveform_filter_zerophase=waveform_filter_zerophase,
+        )
 
         # 4) Resample to 100 Hz if required (interpolate first, fallback to resample)
         if any(tr.stats.sampling_rate != 100.0 for tr in st):
@@ -584,16 +640,34 @@ def prepare_station_chunk(st_or_files, net_sta, t0, t1, stations_filters=None,
         if resolved is not None:
             fmin, fmax = resolved
 
-    # Apply bandpass (fallback per-trace if needed)
     try:
-        st.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=2, zerophase=True)
+        _apply_scmlpick_chunk_waveform_filter(
+            st,
+            sta,
+            fmin,
+            fmax,
+            stations_filters,
+            waveform_filter_type=waveform_filter_type,
+            waveform_filter_corners=waveform_filter_corners,
+            waveform_filter_zerophase=waveform_filter_zerophase,
+        )
     except Exception:
         new_st = obspy.Stream()
         for tr in st:
             try:
                 tr2 = tr.copy()
-                tr2.filter("bandpass", freqmin=fmin, freqmax=fmax, corners=2, zerophase=True)
-                new_st += tr2
+                s1 = obspy.Stream(traces=[tr2])
+                _apply_scmlpick_chunk_waveform_filter(
+                    s1,
+                    sta,
+                    fmin,
+                    fmax,
+                    stations_filters,
+                    waveform_filter_type=waveform_filter_type,
+                    waveform_filter_corners=waveform_filter_corners,
+                    waveform_filter_zerophase=waveform_filter_zerophase,
+                )
+                new_st += s1[0]
             except Exception:
                 new_st += tr.copy()
         st = new_st
@@ -623,16 +697,23 @@ def prepare_station_chunk(st_or_files, net_sta, t0, t1, stations_filters=None,
 
 
 def _readnparray(stream, args, st_name):
+    _wf = dict(
+        waveform_filter_type=args.get("waveform_filter_type", "bandpass"),
+        waveform_filter_corners=int(args.get("waveform_filter_corners", 2)),
+        waveform_filter_zerophase=bool(args.get("waveform_filter_zerophase", True)),
+    )
     # 1) Station-prepared Stream
     if args["playback"]:
         st = prepare_station_chunk(
             args["files"], args["station"], args["t_ini"], args["t_end"],
-            stations_filters=args.get("stations_filters")
+            stations_filters=args.get("stations_filters"),
+            **_wf,
         )
     else:
         st = prepare_station_chunk(
             stream, args["station"], args["t_ini"], args["t_end"],
-            stations_filters=args.get("stations_filters")
+            stations_filters=args.get("stations_filters"),
+            **_wf,
         )
     if not st:
         raise RuntimeError("Empty stream: no traces loaded.")
@@ -1170,7 +1251,7 @@ def _picker(args, yh3, thr_type='P_threshold'):
     return Ppickall, Pproball
 
 
-def _resampling(st):
+def _resampling(st, antialias_lowpass_hz=45.0):
     'perform resampling on Obspy stream objects'
     
     need_resampling = [tr for tr in st if tr.stats.sampling_rate != 100.0]
@@ -1178,7 +1259,7 @@ def _resampling(st):
        # print('resampling ...', flush=True)    
         for indx, tr in enumerate(need_resampling):
             if tr.stats.delta < 0.01:
-                tr.filter('lowpass',freq=45,zerophase=True)
+                tr.filter('lowpass', freq=float(antialias_lowpass_hz), zerophase=True)
             tr.resample(100)
             tr.stats.sampling_rate = 100
             tr.stats.delta = 0.01

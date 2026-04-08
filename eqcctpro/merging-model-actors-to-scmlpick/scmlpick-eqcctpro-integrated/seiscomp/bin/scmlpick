@@ -243,6 +243,23 @@ class scmlpick(StreamApplication):
             logging.info("eqcct.detectionThreshold could not be read (default 0.3): %s", e)
             self.detection_threshold = 0.3
 
+        # EQCCTPro-aligned ObsPy waveform filter (prepare_station_chunk); bindings still set hp/lp (or BW corners).
+        self.waveform_filter_type = "bandpass"
+        self.waveform_filter_corners = 2
+        self.waveform_filter_zerophase = True
+        try:
+            self.waveform_filter_type = self.configGetString("eqcct.waveformFilterType").strip()
+        except Exception as e:
+            logging.info("eqcct.waveformFilterType could not be read (default bandpass): %s", e)
+        try:
+            self.waveform_filter_corners = int(self.configGetInt("eqcct.waveformFilterCorners"))
+        except Exception as e:
+            logging.info("eqcct.waveformFilterCorners could not be read (default 2): %s", e)
+        try:
+            self.waveform_filter_zerophase = bool(self.configGetBool("eqcct.waveformFilterZerophase"))
+        except Exception as e:
+            logging.info("eqcct.waveformFilterZerophase could not be read (default true): %s", e)
+
         self.profilesConfig()
 
         #RAY
@@ -513,6 +530,9 @@ class scmlpick(StreamApplication):
             "default_picker_model_resolved": scmlpick._normalize_picker_model_label(
                 getattr(self, "default_picker_model", "EQCCT")
             ),
+            "waveform_filter_type": getattr(self, "waveform_filter_type", "bandpass"),
+            "waveform_filter_corners": getattr(self, "waveform_filter_corners", 2),
+            "waveform_filter_zerophase": getattr(self, "waveform_filter_zerophase", True),
             }
         try:
             self.params["model_actor_pools"] = self._spawn_inference_actor_pools()
@@ -2294,6 +2314,9 @@ class scmlpick(StreamApplication):
                     model_actor=model_actor,
                     inference_mode=params.get("inference_mode", "model_actor"),
                     ripper_gpu_memory_limit_mb=params.get("ripper_gpu_memory_limit_mb"),
+                    waveform_filter_type=params.get("waveform_filter_type", "bandpass"),
+                    waveform_filter_corners=params.get("waveform_filter_corners", 2),
+                    waveform_filter_zerophase=params.get("waveform_filter_zerophase", True),
                 )
             else:
                 parent_model, child_model = picker_spec.split("|", 1)
@@ -2319,6 +2342,9 @@ class scmlpick(StreamApplication):
                     inference_mode=params.get("inference_mode", "model_actor"),
                     gpu_id=params["gpu_id"],
                     ripper_gpu_memory_limit_mb=params.get("ripper_gpu_memory_limit_mb"),
+                    waveform_filter_type=params.get("waveform_filter_type", "bandpass"),
+                    waveform_filter_corners=params.get("waveform_filter_corners", 2),
+                    waveform_filter_zerophase=params.get("waveform_filter_zerophase", True),
                 )
 
             picks["ok"] = True
