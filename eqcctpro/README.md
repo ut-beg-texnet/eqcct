@@ -256,7 +256,7 @@ Each station directory gets `<station>_outputs/` with a single result file:
 
 - **`pick_output_format (str)`**: **`xml`** (default), **`ascii`**, or **`csv`**.
   - **XML**: UTF-8 document `X_prediction_results.xml` with one `<pick>` element per row; child tags match the historical CSV columns (`file_name`, `network`, `station`, …).
-  - **ASCII**: file `X_prediction_results.ascii`; currently the same comma-separated / quoted row layout as CSV (a dedicated fixed-width layout may be added later).
+  - **ASCII**: file `X_prediction_results.ascii` — a tab-separated **per-station summary** (header + one data row). **`Time_of_the_picks`** is the full analysis window length in **minutes** (from the driver’s `start_time` / `end_time`, forwarded as `analysis_period_minutes` in worker `args`). **`P_Phase`** and **`S_Phase`** list all pick times for that station in this task, semicolon-separated and sorted (ISO-like `YYYY-MM-DD HH:MM:SS.ffffff`). **`Model_name`** is **`EQCCT`** or SeisBench **`Parent/Child`**. **`Detection_Confidence_Threshold`** encodes the thresholds used (see `format_detection_confidence_threshold_summary` in `eqcctpro/pick_output.py`).
   - **CSV**: legacy `X_prediction_results.csv`.
 
 The same option applies in **Ripper** mode and for **EvaluateSystem** trials that call `mseed_predictor`.

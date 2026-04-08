@@ -23,7 +23,15 @@ import numpy as np
 from eqcctpro.tools import *
 from eqcctpro.timing_util import cuda_synchronize_best_effort, monotonic_s
 from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
-from eqcctpro.pick_output import PickOutputSink, normalize_pick_output_format, prediction_results_path
+from eqcctpro.pick_output import (
+    PickOutputSink,
+    format_detection_confidence_threshold_summary,
+    format_pick_time_cell,
+    normalize_pick_output_format,
+    prediction_results_path,
+    resolve_picker_model_label,
+    write_ascii_station_summary,
+)
 from os import listdir
 from obspy import UTCDateTime
 from datetime import datetime, timedelta 
@@ -527,16 +535,31 @@ def _stream_select_for_station_task(full_st: obspy.Stream, station: str) -> obsp
     return obspy.Stream(traces=[tr.copy() for tr in full_st if _trace_matches_station_task(tr, station)])
 
 
-def _output_writter_prediction(meta, sink, Ppicks, Pprob, Spicks, Sprob, detection_memory, prob_memory, idx, cq, cqq):
+def _output_writter_prediction(
+    meta,
+    sink,
+    Ppicks,
+    Pprob,
+    Spicks,
+    Sprob,
+    detection_memory,
+    prob_memory,
+    idx,
+    cq,
+    cqq,
+    ascii_p_list=None,
+    ascii_s_list=None,
+):
 
     """ 
     
-    Writes one detection / picking row via ``sink`` (CSV, ASCII, or XML).
+    Writes one detection / picking row via ``sink`` (CSV or XML), and/or appends to
+    *ascii_p_list* / *ascii_s_list* for the per-station ASCII summary.
 
     Parameters
     ----------
-    sink: PickOutputSink
-        Output sink for this station's pick file.
+    sink: PickOutputSink | None
+        Output sink for this station's pick file; omit when only collecting ASCII phases.
 
     matches: dic
         It contains the information for the detected and picked event.  
@@ -619,21 +642,31 @@ def _output_writter_prediction(meta, sink, Ppicks, Pprob, Spicks, Sprob, detecti
     
     p_prob = np.array(p_prob)
     PdateTime = np.array(PdateTime)
-        
-    sink.write_pick_row([
-        meta["trace_name"],
-        network_name,
-        station_name,
-        instrument_type,
-        station_lat,
-        station_lon,
-        station_elv,
-        PdateTime[0],
-        p_prob[0],
-        SdateTime[0],
-        s_prob[0],
-    ])
-    sink.flush()
+
+    if ascii_p_list is not None:
+        p_cell = format_pick_time_cell(PdateTime[0])
+        if p_cell:
+            ascii_p_list.append(p_cell)
+    if ascii_s_list is not None:
+        s_cell = format_pick_time_cell(SdateTime[0])
+        if s_cell:
+            ascii_s_list.append(s_cell)
+
+    if sink is not None:
+        sink.write_pick_row([
+            meta["trace_name"],
+            network_name,
+            station_name,
+            instrument_type,
+            station_lat,
+            station_lon,
+            station_elv,
+            PdateTime[0],
+            p_prob[0],
+            SdateTime[0],
+            s_prob[0],
+        ])
+        sink.flush()
 
     return detection_memory, prob_memory
 
@@ -1029,6 +1062,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # ===== TIMING: Start tracking total trial time =====
     trial_start_time = monotonic_s()
 
+    analysis_period_minutes = None
+    if total_analysis_time is not None:
+        try:
+            analysis_period_minutes = float(total_analysis_time.total_seconds()) / 60.0
+        except Exception:
+            analysis_period_minutes = None
+
     args = {
     "input_dir": input_dir,
     "output_dir": output_dir,
@@ -1054,7 +1094,12 @@ def mseed_predictor(input_dir='downloads_mseeds',
     "waveform_filter_corners": waveform_filter_corners,
     "waveform_filter_zerophase": waveform_filter_zerophase,
     "pick_output_format": pick_output_format,
+    "analysis_period_minutes": analysis_period_minutes,
+    "picker_model_label": resolve_picker_model_label(
+        model_type, seisbench_parent_model, seisbench_child_model
+    ),
     }
+    args["detection_confidence_threshold"] = format_detection_confidence_threshold_summary(args)
 
     logger.info(f"------- Hardware Configuration -------")
     try:
@@ -2311,10 +2356,14 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
 
     os.makedirs(save_dir, exist_ok=True)
-    sink = PickOutputSink(out_path, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
     try:
-        sink.write_header()
-        sink.flush()
+        if sink is not None:
+            sink.write_header()
+            sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -2368,6 +2417,9 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                 if p_time is None:
                     continue
 
+                if use_ascii_summary:
+                    ascii_p_phases.append(p_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
+
                 match_s = None
                 for s in s_picks:
                     s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
@@ -2381,56 +2433,75 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     ms_prob = getattr(match_s, 'peak_value', getattr(match_s, 'score', getattr(match_s, 'value', 0.0)))
                     s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
                     s_prob_str = f"{ms_prob:.6f}"
+                    if use_ascii_summary and ms_time:
+                        ascii_s_phases.append(ms_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
                 else:
                     s_time_str = ''
                     s_prob_str = ''
 
-                sink.write_pick_row([
-                    station_code,
-                    network_code,
-                    station_code,
-                    0,
-                    station_lat,
-                    station_lon,
-                    station_elv,
-                    p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                    f"{p_prob:.6f}",
-                    s_time_str,
-                    s_prob_str
-                ])
+                if not use_ascii_summary:
+                    sink.write_pick_row([
+                        station_code,
+                        network_code,
+                        station_code,
+                        0,
+                        station_lat,
+                        station_lon,
+                        station_elv,
+                        p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                        f"{p_prob:.6f}",
+                        s_time_str,
+                        s_prob_str
+                    ])
 
             for s in s_picks:
                 if s not in used_s:
                     s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
                     s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
                     if s_time:
-                        sink.write_pick_row([
-                            station_code,
-                            network_code,
-                            station_code,
-                            0,
-                            station_lat,
-                            station_lon,
-                            station_elv,
-                            '',
-                            '',
-                            s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                            f"{s_prob:.6f}"
-                        ])
+                        if use_ascii_summary:
+                            ascii_s_phases.append(s_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
+                        else:
+                            sink.write_pick_row([
+                                station_code,
+                                network_code,
+                                station_code,
+                                0,
+                                station_lat,
+                                station_lon,
+                                station_elv,
+                                '',
+                                '',
+                                s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                                f"{s_prob:.6f}"
+                            ])
 
             if not picks:
-                sink.write_pick_row([
-                    station_code,
-                    network_code,
-                    station_code,
-                    0,
-                    station_lat,
-                    station_lon,
-                    station_elv,
-                    '', '', '', ''
-                ])
+                if not use_ascii_summary:
+                    sink.write_pick_row([
+                        station_code,
+                        network_code,
+                        station_code,
+                        0,
+                        station_lat,
+                        station_lon,
+                        station_elv,
+                        '', '', '', ''
+                    ])
 
-            sink.flush()
+            if use_ascii_summary:
+                write_ascii_station_summary(
+                    out_path,
+                    station_name=str(station_code).strip(),
+                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                    model_name=args.get("picker_model_label", "SeisBench"),
+                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
+                )
+
+            if sink is not None:
+                sink.flush()
 
             end_Predicting = monotonic_s()
             delta = (end_Predicting - start_Predicting)
@@ -2441,7 +2512,8 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
             return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
     finally:
         try:
-            sink.close()
+            if sink is not None:
+                sink.close()
         except Exception:
             pass
 
@@ -2507,10 +2579,14 @@ def parallel_predict(predict_args, model_actor, gpu=False):
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
 
     os.makedirs(save_dir)
-    sink = PickOutputSink(out_path, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
     try:
-        sink.write_header()
-        sink.flush()
+        if sink is not None:
+            sink.write_header()
+            sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -2569,9 +2645,23 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                 Ppicks, Pprob = _picker(args, predP[ix,:, 0])
                 Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
 
+                ap = ascii_p_phases if use_ascii_summary else None
+                asp = ascii_s_phases if use_ascii_summary else None
                 detection_memory, prob_memory = _output_writter_prediction(
                     meta, sink, Ppicks, Pprob, Spicks, Sprob,
-                    detection_memory, prob_memory, ix, len(predP), len(predS)
+                    detection_memory, prob_memory, ix, len(predP), len(predS),
+                    ascii_p_list=ap, ascii_s_list=asp,
+                )
+
+            if use_ascii_summary:
+                write_ascii_station_summary(
+                    out_path,
+                    station_name=str(station),
+                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                    model_name=args.get("picker_model_label", "EQCCT"),
+                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
                 )
 
             end_Predicting = monotonic_s()
@@ -2585,7 +2675,8 @@ def parallel_predict(predict_args, model_actor, gpu=False):
             return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
     finally:
         try:
-            sink.close()
+            if sink is not None:
+                sink.close()
         except Exception:
             pass
 
@@ -2738,10 +2829,14 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
 
     os.makedirs(save_dir)
-    sink = PickOutputSink(out_path, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
     try:
-        sink.write_header()
-        sink.flush()
+        if sink is not None:
+            sink.write_header()
+            sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -2768,7 +2863,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                 )
             meta, data_set, hp, lp = packed
         except Exception as e:
-            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else 'FAILED reading mSEED (corrupted or empty files).'
             return (f"{pos} {station}: {err_msg}", model_load_time, None)
         waveform_load_time = monotonic_s() - waveform_load_start
 
@@ -2784,9 +2879,23 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                 Ppicks, Pprob = _picker(args, predP[ix,:, 0])
                 Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
 
+                ap = ascii_p_phases if use_ascii_summary else None
+                asp = ascii_s_phases if use_ascii_summary else None
                 detection_memory, prob_memory = _output_writter_prediction(
                     meta, sink, Ppicks, Pprob, Spicks, Sprob,
-                    detection_memory, prob_memory, ix, len(predP), len(predS)
+                    detection_memory, prob_memory, ix, len(predP), len(predS),
+                    ascii_p_list=ap, ascii_s_list=asp,
+                )
+
+            if use_ascii_summary:
+                write_ascii_station_summary(
+                    out_path,
+                    station_name=str(station),
+                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                    model_name=args.get("picker_model_label", "EQCCT"),
+                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
                 )
 
             end_Predicting = monotonic_s()
@@ -2806,7 +2915,8 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
             return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
     finally:
         try:
-            sink.close()
+            if sink is not None:
+                sink.close()
         except Exception:
             pass
 
@@ -2877,10 +2987,14 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
 
     os.makedirs(save_dir, exist_ok=True)
-    sink = PickOutputSink(out_path, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
     try:
-        sink.write_header()
-        sink.flush()
+        if sink is not None:
+            sink.write_header()
+            sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -2926,7 +3040,15 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                 pick_prob = getattr(pick, 'peak_value', getattr(pick, 'score', getattr(pick, 'value', 0.0)))
                 pick_phase = getattr(pick, 'phase', 'P').upper()
 
-                if pick_time is not None:
+                if pick_time is None:
+                    continue
+                if use_ascii_summary:
+                    t_str = pick_time.strftime('%Y-%m-%d %H:%M:%S.%f') if hasattr(pick_time, 'strftime') else str(pick_time)
+                    if pick_phase == 'P':
+                        ascii_p_phases.append(t_str)
+                    elif pick_phase == 'S':
+                        ascii_s_phases.append(t_str)
+                else:
                     sink.write_pick_row([
                         args['input_dir'].split('/')[-1],
                         '',
@@ -2940,7 +3062,20 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                         str(pick_time) if pick_phase == 'S' else '',
                         f"{pick_prob:.6f}" if pick_phase == 'S' else ''
                     ])
-            sink.flush()
+
+            if use_ascii_summary:
+                write_ascii_station_summary(
+                    out_path,
+                    station_name=str(station).strip(),
+                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                    model_name=args.get("picker_model_label", "SeisBench"),
+                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
+                )
+
+            if sink is not None:
+                sink.flush()
 
             end_Predicting = monotonic_s()
             delta = (end_Predicting - start_Predicting)
@@ -2957,6 +3092,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
             return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time)
     finally:
         try:
-            sink.close()
+            if sink is not None:
+                sink.close()
         except Exception:
             pass
