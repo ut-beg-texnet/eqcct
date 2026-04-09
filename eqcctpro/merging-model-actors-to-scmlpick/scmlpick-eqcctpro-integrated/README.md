@@ -6,11 +6,13 @@ This tree is a **working duplicate** of the scmlpick SeisComP module with **mini
 
 | Area | Change |
 |------|--------|
-| **`predictor/predictor.py`** | Drops duplicated Keras EQCCT graph; imports **`eqcctpro.eqcct_tf_models`** and **`eqcctpro.waveform_filter`**. **`prepare_station_chunk`** uses **`apply_waveform_filter`** / **`resolve_waveform_filter_params`** so filter type, corners, and zerophase match EQCCTPro. **`mseed_predictor`** / **`mseed_predictor_seisbench`** accept **`waveform_filter_*`** (forwarded from **`params`**). |
+| **`predictor/predictor.py`** | Drops duplicated Keras EQCCT graph; imports **`eqcctpro.eqcct_tf_models`** and **`eqcctpro.waveform_filter`**. **`prepare_station_chunk`** applies **`_apply_scmlpick_chunk_waveform_filter`**, which builds the same argument dict shape as **`RunEQCCTPro`** workers (module **`waveform_filter_type`** / **corners** / **zerophase** from cfg; **Hz** corners from binding **`BW(hp,lp)`** or **`default_band`**). **`mseed_predictor`** / **`mseed_predictor_seisbench`** take **`waveform_filter_*`** from **`params`**. |
 | **`seiscomp/bin/scmlpick`** | **`ray.init(num_gpus=len(ray_gpu_device_ids))`** with **`CUDA_VISIBLE_DEVICES`** from **`ray.gpuDeviceIds`** or **`eqcct.gpuID`**. **`ray.inferenceMode`**: **`modelActor`** spawns ModelActors; **`ripper`** skips actors. **`ray.numModelActors`** (0=auto) and **`ray.maxTasksQueue`** cap concurrency. CLI: **`--inference-mode`**, **`--gpu-devices`**, **`--num-model-actors`**. |
-| **`etc/descriptions/scmlpick.xml`**, **`etc/defaults/scmlpick.cfg`** | Document **`ray.inferenceMode`**, **`ray.numModelActors`**, **`ray.gpuDeviceIds`**, **`ray.actorGpuMemoryLimitMB`**, **`ray.ripperGpuMemoryLimitMB`**, **`eqcct.waveformFilterType`**, **`eqcct.waveformFilterCorners`**, **`eqcct.waveformFilterZerophase`**. |
+| **`etc/descriptions/scmlpick.xml`**, **`etc/defaults/scmlpick.cfg`** | Document **`ray.inferenceMode`**, **`ray.numModelActors`**, **`ray.gpuDeviceIds`**, **`ray.actorGpuMemoryLimitMB`**, **`ray.ripperGpuMemoryLimitMB`**, **`eqcct.waveformFilterType`**, **`eqcct.waveformFilterCorners`**, **`eqcct.waveformFilterZerophase`** (ObsPy semantics aligned with **`eqcctpro.waveform_filter`**; see **`INTEGRATION_GUIDE.md` section 5** for parity with **`waveform_filter_freqmin`** / **`freqmax`** in batch **`RunEQCCTPro`**). |
 
 ### Configuration (module, not station bindings)
+
+Module **`eqcct.waveformFilter*`** keys control filter **shape** (type, corners, zerophase). **Hz** band limits for each station still come from binding **`profiles.*.filter`** strings such as **`BW(2,hp,lp)`**, unless you rely on the predictor’s **1–45 Hz** fallback when no row matches.
 
 | Key | Role |
 |-----|------|
@@ -35,7 +37,7 @@ If **`_spawn_eqcctpro_model_actors`** fails, **`model_actors`** is set to **`[]`
 
 ## Limits
 
-- This README’s “Limits” section is historical: the integrated **`scmlpick`** and **`predictor`** also support **SeisBench** pools when bindings set **`pickerModel`** (see **`INTEGRATION_GUIDE.md`**). Batch-style **`X_prediction_results.xml`** output remains **`RunEQCCTPro`** only; scmlpick uses **`scPhase`**.
+- This README’s “Limits” section is historical: the integrated **`scmlpick`** and **`predictor`** also support **SeisBench** pools when bindings set **`pickerModel`** (see **`INTEGRATION_GUIDE.md`**). **Batch** pick files (**`summary_results.ascii`**, **`X_prediction_results.xml`** / **`.csv`**, **`pick_output_format`**, **`ascii_station_pick_format`**, **`overwrite`**) are **`RunEQCCTPro`** / **`EvaluateSystem`** only; live scmlpick uses **`scPhase`**.
 - GPU **fractional** scheduling is simplified (`≤4` actors, `0.95/n` GPU fraction each); tune against your VRAM.
 - **`eqcct.gpuLimit`** is passed through as **`gpu_memory_limit_mb`** to **`ModelActor`** when `> 0`; confirm units match your site config.
 
