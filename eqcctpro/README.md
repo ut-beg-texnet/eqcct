@@ -268,7 +268,7 @@ EQCCTPro forwards **`P_threshold`**, **`S_threshold`**, and **`Detection_thresho
 - **`timechunk_dt (int)`**: **Required.** Duration of each processing chunk in minutes (no default). Together with `start_time`, `end_time`, and `waveform_overlap`, it defines how many timechunk directories are expected and—when you place continuous multi-station miniSEED only under `input_dir/`—how EQCCTPro slices that archive into `input_dir/<chunk_id>/abstracted_waveforms/...`. Example: `1440` for one 24 h segment per chunk when your window is one day.
 - **`waveform_overlap (int)`**: Overlap between chunks in minutes to ensure no events are missed at boundaries.
 - **`best_usecase_config (bool)`**: If `True`, overrides parallelism settings with the optimal values found by `EvaluateSystem`.
-- **`overwrite (bool)`**: If `True`, existing per-station XML/CSV under `<station>_outputs/` may be removed when a worker re-runs, and **`summary_results.ascii`** (ASCII mode) is deleted at the start of a timechunk job so picks are regenerated. Default: **`False`**. With **`overwrite=False`**, an existing **`summary_results.ascii`** causes the run to **skip** that job (same as prior per-station “already exists” guard).
+- **`overwrite (bool)`**: If `True`, workers may remove a station’s existing **`X_prediction_results.xml`** / **`.csv`** directory tree when that station is re-run, and **`summary_results.ascii`** (ASCII mode) is deleted at the start of the timechunk job so the summary is rebuilt. Default: **`False`**. With **`overwrite=False`**, a station task is **skipped** if its per-station result file already exists; the run-level ASCII table is **merged** so rows for stations that did run replace older entries for those stations only, while skipped stations keep their previous summary rows.
 
 #### **Waveform band-limiting (EQCCT + SeisBench paths)**
 
@@ -286,9 +286,11 @@ If the worker **`args`** dictionary includes **`stations_filters`** (pandas `Dat
 
 - **`pick_output_format (str)`**: **`xml`** (default), **`ascii`**, or **`csv`**.
   - **XML** / **CSV**: Each station directory gets `<station>_outputs/` with `X_prediction_results.xml` or `X_prediction_results.csv` (row-per-pick layout for XML/CSV).
-  - **ASCII**: One run-level table **`summary_results.ascii`** under **`output_dir`** (fixed-width columns, ` | ` separators). Each row is one station. Columns include **`Analysis_time_window`** (full run window from `start_time` / `end_time`, or chunk bounds fallback), **`N_P_picks`** / **`N_S_picks`**, **`Model_name`**, **`Detection_Confidence_Threshold`** (string from `format_detection_confidence_threshold_summary` in `eqcctpro/pick_output.py`), and semicolon-sorted **`P_Phase_times`** / **`S_Phase_times`** as the last columns. If `total_timechunks > 1`, per-chunk files are named `summary_results_<timechunk_id>.ascii` so chunks do not overwrite each other.
+  - **ASCII**: Always writes one run-level table **`summary_results.ascii`** under **`output_dir`** (fixed-width columns, ` | ` separators). Each row is one station. Columns include **`Analysis_time_window`** (full run window from `start_time` / `end_time`, or chunk bounds fallback), **`N_P_picks`** / **`N_S_picks`**, **`Model_name`**, **`Detection_Confidence_Threshold`** (string from `format_detection_confidence_threshold_summary` in `eqcctpro/pick_output.py`), and semicolon-sorted **`P_Phase_times`** / **`S_Phase_times`** as the last columns. In addition, each station still gets a detailed per-station file under `<station>_outputs/` in the format you choose with **`ascii_station_pick_format`** (below). If `total_timechunks > 1`, per-chunk summaries are named `summary_results_<timechunk_id>.ascii` so chunks do not overwrite each other.
 
-The same option applies in **Ripper** mode and for **EvaluateSystem** trials that call `mseed_predictor`.
+- **`ascii_station_pick_format (str)`**: Used **only when** **`pick_output_format='ascii'`**. Sets the per-station detail file to **`xml`** (default) or **`csv`**. Ignored when **`pick_output_format`** is **`xml`** or **`csv`** (those modes use the same format for both the main option and the station file). Pass this on **`RunEQCCTPro`** / **`EvaluateSystem`** alongside **`pick_output_format`**.
+
+The same options apply in **Ripper** mode and for **EvaluateSystem** trials that call `mseed_predictor`.
 
 ---
 

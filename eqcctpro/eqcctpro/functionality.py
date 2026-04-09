@@ -71,6 +71,7 @@ class RunEQCCTPro():
                 waveform_filter_corners: int = 2,
                 waveform_filter_zerophase: bool = True,
                 pick_output_format: str = 'xml',
+                ascii_station_pick_format: str = 'xml',
                 overwrite: bool = False):
          
         self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
@@ -98,6 +99,7 @@ class RunEQCCTPro():
         self.waveform_filter_corners = waveform_filter_corners
         self.waveform_filter_zerophase = waveform_filter_zerophase
         self.pick_output_format = pick_output_format
+        self.ascii_station_pick_format = ascii_station_pick_format
         self.overwrite = overwrite
 
         if cudnn_headroom > 0.80:
@@ -339,6 +341,7 @@ class RunEQCCTPro():
                                         waveform_filter_corners=self.waveform_filter_corners,
                                         waveform_filter_zerophase=self.waveform_filter_zerophase,
                                         pick_output_format=self.pick_output_format,
+                                        ascii_station_pick_format=self.ascii_station_pick_format,
                                         analysis_window_start_str=self.start_time,
                                         analysis_window_end_str=self.end_time))
                     break
@@ -509,6 +512,7 @@ class EvaluateSystem():
                  waveform_filter_corners: int = 2,
                  waveform_filter_zerophase: bool = True,
                  pick_output_format: str = 'xml',
+                 ascii_station_pick_format: str = 'xml',
                  overwrite: bool = False):
         
         valid_modes = {"cpu", "gpu"}
@@ -574,6 +578,7 @@ class EvaluateSystem():
         self.waveform_filter_corners = waveform_filter_corners
         self.waveform_filter_zerophase = waveform_filter_zerophase
         self.pick_output_format = pick_output_format
+        self.ascii_station_pick_format = ascii_station_pick_format
         self.overwrite = overwrite
 
         # Validate model type and parameters
@@ -1292,6 +1297,7 @@ class EvaluateSystem():
                                                             waveform_filter_corners=self.waveform_filter_corners,
                                                             waveform_filter_zerophase=self.waveform_filter_zerophase,
                                                             pick_output_format=self.pick_output_format,
+                                                            ascii_station_pick_format=self.ascii_station_pick_format,
                                                             analysis_window_start_str=self.start_time,
                                                             analysis_window_end_str=self.end_time))
                                     
@@ -1946,6 +1952,7 @@ class EvaluateSystem():
                                 waveform_filter_corners=self.waveform_filter_corners,
                                 waveform_filter_zerophase=self.waveform_filter_zerophase,
                                 pick_output_format=self.pick_output_format,
+                                ascii_station_pick_format=self.ascii_station_pick_format,
                                 analysis_window_start_str=self.start_time,
                                 analysis_window_end_str=self.end_time,
                             )

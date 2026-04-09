@@ -29,6 +29,8 @@ from eqcctpro.pick_output import (
     build_ascii_summary_row_tuple,
     format_detection_confidence_threshold_summary,
     format_pick_time_cell,
+    merge_ascii_summary_rows,
+    normalize_ascii_station_pick_format,
     normalize_pick_output_format,
     prediction_results_path,
     resolve_picker_model_label,
@@ -620,6 +622,21 @@ def _stream_select_for_station_task(full_st: obspy.Stream, station: str) -> obsp
     return obspy.Stream(traces=[tr.copy() for tr in full_st if _trace_matches_station_task(tr, station)])
 
 
+def _station_sink_format_for_worker(args: dict) -> tuple[str, bool]:
+    """
+    Per-station file format and whether the driver aggregates a run-level ASCII summary.
+    When the main format is ``ascii``, the station file is ``xml`` or ``csv`` per
+    ``args['ascii_station_pick_format']``.
+    """
+    pick_fmt = normalize_pick_output_format(args.get("pick_output_format", "xml"))
+    use_ascii_summary = pick_fmt == "ascii"
+    if use_ascii_summary:
+        sink_fmt = normalize_ascii_station_pick_format(args.get("ascii_station_pick_format"))
+    else:
+        sink_fmt = pick_fmt
+    return sink_fmt, use_ascii_summary
+
+
 def _output_writter_prediction(
     meta,
     sink,
@@ -644,7 +661,7 @@ def _output_writter_prediction(
     Parameters
     ----------
     sink: PickOutputSink | None
-        Output sink for this station's pick file; omit when only collecting ASCII phases.
+        Output sink for this station's pick file (XML/CSV); None only if the caller omits file output.
 
     matches: dic
         It contains the information for the detected and picked event.  
@@ -1067,6 +1084,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
               waveform_filter_corners=2,
               waveform_filter_zerophase=True,
               pick_output_format='xml',
+              ascii_station_pick_format='xml',
               analysis_window_start_str=None,
               analysis_window_end_str=None):
     
@@ -1156,6 +1174,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
         except Exception:
             analysis_period_minutes = None
 
+    _pick_norm = normalize_pick_output_format(pick_output_format)
+    _ascii_station_norm = (
+        normalize_ascii_station_pick_format(ascii_station_pick_format)
+        if _pick_norm == "ascii"
+        else "xml"
+    )
+
     args = {
     "input_dir": input_dir,
     "output_dir": output_dir,
@@ -1181,6 +1206,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     "waveform_filter_corners": waveform_filter_corners,
     "waveform_filter_zerophase": waveform_filter_zerophase,
     "pick_output_format": pick_output_format,
+    "ascii_station_pick_format": _ascii_station_norm,
     "analysis_period_minutes": analysis_period_minutes,
     "timechunk_id": timechunk_id,
     "analysis_time_window_str": _format_analysis_time_window(
@@ -1240,21 +1266,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
         total_timechunks=total_timechunks,
     )
     _pick_fmt0 = normalize_pick_output_format(pick_output_format)
-    if _pick_fmt0 == "ascii":
-        if os.path.isfile(_ascii_summary_path) and not overwrite:
-            logger.info(
-                "Skipping EQCCTPro run: %s exists (overwrite=False).",
-                _ascii_summary_path,
-            )
-            return (
-                f"Skipped: ASCII summary already exists at {_ascii_summary_path} "
-                f"(overwrite=False)."
-            )
-        if overwrite and os.path.isfile(_ascii_summary_path):
-            try:
-                os.remove(_ascii_summary_path)
-            except OSError:
-                pass
+    if _pick_fmt0 == "ascii" and overwrite and os.path.isfile(_ascii_summary_path):
+        try:
+            os.remove(_ascii_summary_path)
+        except OSError:
+            pass
 
     if not station_list or (fixed_station_list is None and any(looks_like_timechunk_id(x) for x in station_list)):
         # Rebuild from the actual contents of the timechunk dir
@@ -1550,8 +1566,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 submit_index=_ripper_submit_index,
             )
             if normalize_pick_output_format(pick_output_format) == "ascii":
-                ripper_ascii_rows.sort(key=lambda r: str(r[0]).upper())
-                write_ascii_run_summary(_ascii_summary_path, ripper_ascii_rows)
+                merged = merge_ascii_summary_rows(_ascii_summary_path, ripper_ascii_rows)
+                write_ascii_run_summary(_ascii_summary_path, merged)
             logger.info("")
             
             # Calculate average model load time
@@ -2238,8 +2254,8 @@ def mseed_predictor(input_dir='downloads_mseeds',
             avg_waveform_load_time = 0.0
 
         if normalize_pick_output_format(pick_output_format) == "ascii":
-            ascii_summary_rows.sort(key=lambda r: str(r[0]).upper())
-            write_ascii_run_summary(_ascii_summary_path, ascii_summary_rows)
+            merged = merge_ascii_summary_rows(_ascii_summary_path, ascii_summary_rows)
+            write_ascii_run_summary(_ascii_summary_path, merged)
 
     except Exception as e:
         avg_waveform_load_time = 0.0  # Default if error occurs before collecting any times
@@ -2483,12 +2499,8 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         logger.addHandler(QueueHandler(args['log_queue']))
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    use_ascii_summary = pick_fmt == "ascii"
-    if use_ascii_summary:
-        out_path = None
-    else:
-        out_path = prediction_results_path(save_dir, pick_fmt)
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
 
     if out_path and os.path.isfile(out_path):
         if args['overwrite']:
@@ -2496,15 +2508,13 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         else:
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0, None)
 
-    if not use_ascii_summary:
-        os.makedirs(save_dir, exist_ok=True)
-    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
     try:
-        if sink is not None:
-            sink.write_header()
-            sink.flush()
+        sink.write_header()
+        sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -2580,20 +2590,19 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     s_time_str = ''
                     s_prob_str = ''
 
-                if not use_ascii_summary:
-                    sink.write_pick_row([
-                        station_code,
-                        network_code,
-                        station_code,
-                        0,
-                        station_lat,
-                        station_lon,
-                        station_elv,
-                        p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                        f"{p_prob:.6f}",
-                        s_time_str,
-                        s_prob_str
-                    ])
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    f"{p_prob:.6f}",
+                    s_time_str,
+                    s_prob_str
+                ])
 
             for s in s_picks:
                 if s not in used_s:
@@ -2602,33 +2611,31 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     if s_time:
                         if use_ascii_summary:
                             ascii_s_phases.append(s_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
-                        else:
-                            sink.write_pick_row([
-                                station_code,
-                                network_code,
-                                station_code,
-                                0,
-                                station_lat,
-                                station_lon,
-                                station_elv,
-                                '',
-                                '',
-                                s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                                f"{s_prob:.6f}"
-                            ])
+                        sink.write_pick_row([
+                            station_code,
+                            network_code,
+                            station_code,
+                            0,
+                            station_lat,
+                            station_lon,
+                            station_elv,
+                            '',
+                            '',
+                            s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                            f"{s_prob:.6f}"
+                        ])
 
             if not picks:
-                if not use_ascii_summary:
-                    sink.write_pick_row([
-                        station_code,
-                        network_code,
-                        station_code,
-                        0,
-                        station_lat,
-                        station_lon,
-                        station_elv,
-                        '', '', '', ''
-                    ])
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    '', '', '', ''
+                ])
 
             if use_ascii_summary:
                 ascii_row = build_ascii_summary_row_tuple(
@@ -2640,8 +2647,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
             else:
                 ascii_row = None
 
-            if sink is not None:
-                sink.flush()
+            sink.flush()
 
             end_Predicting = monotonic_s()
             delta = (end_Predicting - start_Predicting)
@@ -2656,8 +2662,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
             return (f"{pos} {station}: FAILED the prediction. {exp}", load_time, None)
     finally:
         try:
-            if sink is not None:
-                sink.close()
+            sink.close()
         except Exception:
             pass
 
@@ -2713,12 +2718,8 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     # NOTE: Model is shared via model_actor when model_actor is not None
 
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    use_ascii_summary = pick_fmt == "ascii"
-    if use_ascii_summary:
-        out_path = None
-    else:
-        out_path = prediction_results_path(save_dir, pick_fmt)
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
 
     if out_path and os.path.isfile(out_path):
         if args['overwrite']:
@@ -2726,15 +2727,13 @@ def parallel_predict(predict_args, model_actor, gpu=False):
         else:
             return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0, None)
 
-    if not use_ascii_summary:
-        os.makedirs(save_dir)
-    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
     try:
-        if sink is not None:
-            sink.write_header()
-            sink.flush()
+        sink.write_header()
+        sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -2826,8 +2825,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
             return (f"{pos} {station}: FAILED the prediction. {exp}", load_time, None)
     finally:
         try:
-            if sink is not None:
-                sink.close()
+            sink.close()
         except Exception:
             pass
 
@@ -2973,12 +2971,8 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     model_load_time = monotonic_s() - model_load_start
 
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    use_ascii_summary = pick_fmt == "ascii"
-    if use_ascii_summary:
-        out_path = None
-    else:
-        out_path = prediction_results_path(save_dir, pick_fmt)
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
 
     if out_path and os.path.isfile(out_path):
         if args['overwrite']:
@@ -2991,15 +2985,13 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                 None,
             )
 
-    if not use_ascii_summary:
-        os.makedirs(save_dir)
-    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
     try:
-        if sink is not None:
-            sink.write_header()
-            sink.flush()
+        sink.write_header()
+        sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -3084,8 +3076,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
             return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time, None)
     finally:
         try:
-            if sink is not None:
-                sink.close()
+            sink.close()
         except Exception:
             pass
 
@@ -3146,12 +3137,8 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     model_load_time = monotonic_s() - model_load_start
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    use_ascii_summary = pick_fmt == "ascii"
-    if use_ascii_summary:
-        out_path = None
-    else:
-        out_path = prediction_results_path(save_dir, pick_fmt)
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
 
     if out_path and os.path.isfile(out_path):
         if args['overwrite']:
@@ -3164,15 +3151,13 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                 None,
             )
 
-    if not use_ascii_summary:
-        os.makedirs(save_dir, exist_ok=True)
-    sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
     try:
-        if sink is not None:
-            sink.write_header()
-            sink.flush()
+        sink.write_header()
+        sink.flush()
 
         start_Predicting = monotonic_s()
 
@@ -3232,20 +3217,31 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                         ascii_p_phases.append(t_str)
                     elif pick_phase == 'S':
                         ascii_s_phases.append(t_str)
-                else:
-                    sink.write_pick_row([
-                        args['input_dir'].split('/')[-1],
-                        '',
-                        station,
-                        '',
-                        '',
-                        '',
-                        '',
-                        str(pick_time) if pick_phase == 'P' else '',
-                        f"{pick_prob:.6f}" if pick_phase == 'P' else '',
-                        str(pick_time) if pick_phase == 'S' else '',
-                        f"{pick_prob:.6f}" if pick_phase == 'S' else ''
-                    ])
+                sink.write_pick_row([
+                    args['input_dir'].split('/')[-1],
+                    '',
+                    station,
+                    '',
+                    '',
+                    '',
+                    '',
+                    str(pick_time) if pick_phase == 'P' else '',
+                    f"{pick_prob:.6f}" if pick_phase == 'P' else '',
+                    str(pick_time) if pick_phase == 'S' else '',
+                    f"{pick_prob:.6f}" if pick_phase == 'S' else ''
+                ])
+
+            if not picks:
+                sink.write_pick_row([
+                    args['input_dir'].split('/')[-1],
+                    '',
+                    station,
+                    '',
+                    '',
+                    '',
+                    '',
+                    '', '', '', ''
+                ])
 
             if use_ascii_summary:
                 ascii_row = build_ascii_summary_row_tuple(
@@ -3257,8 +3253,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
             else:
                 ascii_row = None
 
-            if sink is not None:
-                sink.flush()
+            sink.flush()
 
             end_Predicting = monotonic_s()
             delta = (end_Predicting - start_Predicting)
@@ -3280,7 +3275,6 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
             return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time, None)
     finally:
         try:
-            if sink is not None:
-                sink.close()
+            sink.close()
         except Exception:
             pass
