@@ -35,6 +35,7 @@ from eqcctpro.pick_output import (
     prediction_results_path,
     resolve_picker_model_label,
     write_ascii_run_summary,
+    write_station_pick_log,
 )
 from os import listdir
 from obspy import UTCDateTime
@@ -651,12 +652,14 @@ def _output_writter_prediction(
     cqq,
     ascii_p_list=None,
     ascii_s_list=None,
+    ascii_chrono_list=None,
 ):
 
     """ 
     
     Writes one detection / picking row via ``sink`` (CSV or XML), and/or appends to
-    *ascii_p_list* / *ascii_s_list* for the per-station ASCII summary.
+    *ascii_p_list* / *ascii_s_list* for the per-station ASCII summary, and/or
+    *ascii_chrono_list* as ``(time_str, 'P'|'S')`` for ``<station>_outputs/<station>.log``.
 
     Parameters
     ----------
@@ -745,14 +748,17 @@ def _output_writter_prediction(
     p_prob = np.array(p_prob)
     PdateTime = np.array(PdateTime)
 
-    if ascii_p_list is not None:
-        p_cell = format_pick_time_cell(PdateTime[0])
+    p_cell = format_pick_time_cell(PdateTime[0])
+    s_cell = format_pick_time_cell(SdateTime[0])
+    if ascii_p_list is not None and p_cell:
+        ascii_p_list.append(p_cell)
+    if ascii_s_list is not None and s_cell:
+        ascii_s_list.append(s_cell)
+    if ascii_chrono_list is not None:
         if p_cell:
-            ascii_p_list.append(p_cell)
-    if ascii_s_list is not None:
-        s_cell = format_pick_time_cell(SdateTime[0])
+            ascii_chrono_list.append((p_cell, "P"))
         if s_cell:
-            ascii_s_list.append(s_cell)
+            ascii_chrono_list.append((s_cell, "S"))
 
     if sink is not None:
         sink.write_pick_row([
@@ -2512,6 +2518,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
         sink.write_header()
         sink.flush()
@@ -2569,7 +2576,9 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     continue
 
                 if use_ascii_summary:
-                    ascii_p_phases.append(p_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
+                    pt_str = p_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    ascii_p_phases.append(pt_str)
+                    ascii_chrono_events.append((pt_str, "P"))
 
                 match_s = None
                 for s in s_picks:
@@ -2585,7 +2594,9 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
                     s_prob_str = f"{ms_prob:.6f}"
                     if use_ascii_summary and ms_time:
-                        ascii_s_phases.append(ms_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
+                        st_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        ascii_s_phases.append(st_str)
+                        ascii_chrono_events.append((st_str, "S"))
                 else:
                     s_time_str = ''
                     s_prob_str = ''
@@ -2610,7 +2621,9 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
                     if s_time:
                         if use_ascii_summary:
-                            ascii_s_phases.append(s_time.strftime('%Y-%m-%d %H:%M:%S.%f'))
+                            ost = s_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                            ascii_s_phases.append(ost)
+                            ascii_chrono_events.append((ost, "S"))
                         sink.write_pick_row([
                             station_code,
                             network_code,
@@ -2644,6 +2657,7 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
                 )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
             else:
                 ascii_row = None
 
@@ -2731,6 +2745,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
         sink.write_header()
         sink.flush()
@@ -2794,10 +2809,11 @@ def parallel_predict(predict_args, model_actor, gpu=False):
 
                 ap = ascii_p_phases if use_ascii_summary else None
                 asp = ascii_s_phases if use_ascii_summary else None
+                ach = ascii_chrono_events if use_ascii_summary else None
                 detection_memory, prob_memory = _output_writter_prediction(
                     meta, sink, Ppicks, Pprob, Spicks, Sprob,
                     detection_memory, prob_memory, ix, len(predP), len(predS),
-                    ascii_p_list=ap, ascii_s_list=asp,
+                    ascii_p_list=ap, ascii_s_list=asp, ascii_chrono_list=ach,
                 )
 
             if use_ascii_summary:
@@ -2807,6 +2823,7 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
                 )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
             else:
                 ascii_row = None
 
@@ -2989,6 +3006,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
         sink.write_header()
         sink.flush()
@@ -3038,10 +3056,11 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
 
                 ap = ascii_p_phases if use_ascii_summary else None
                 asp = ascii_s_phases if use_ascii_summary else None
+                ach = ascii_chrono_events if use_ascii_summary else None
                 detection_memory, prob_memory = _output_writter_prediction(
                     meta, sink, Ppicks, Pprob, Spicks, Sprob,
                     detection_memory, prob_memory, ix, len(predP), len(predS),
-                    ascii_p_list=ap, ascii_s_list=asp,
+                    ascii_p_list=ap, ascii_s_list=asp, ascii_chrono_list=ach,
                 )
 
             if use_ascii_summary:
@@ -3051,6 +3070,7 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
                 )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
             else:
                 ascii_row = None
 
@@ -3155,6 +3175,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     sink = PickOutputSink(out_path, sink_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
         sink.write_header()
         sink.flush()
@@ -3215,8 +3236,10 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                     t_str = pick_time.strftime('%Y-%m-%d %H:%M:%S.%f') if hasattr(pick_time, 'strftime') else str(pick_time)
                     if pick_phase == 'P':
                         ascii_p_phases.append(t_str)
+                        ascii_chrono_events.append((t_str, "P"))
                     elif pick_phase == 'S':
                         ascii_s_phases.append(t_str)
+                        ascii_chrono_events.append((t_str, "S"))
                 sink.write_pick_row([
                     args['input_dir'].split('/')[-1],
                     '',
@@ -3250,6 +3273,7 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
                 )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
             else:
                 ascii_row = None
 

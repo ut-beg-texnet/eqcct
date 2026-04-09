@@ -37,7 +37,7 @@ If **`_spawn_eqcctpro_model_actors`** fails, **`model_actors`** is set to **`[]`
 
 ## Limits
 
-- This README’s “Limits” section is historical: the integrated **`scmlpick`** and **`predictor`** also support **SeisBench** pools when bindings set **`pickerModel`** (see **`INTEGRATION_GUIDE.md`**). **Batch** pick files (**`summary_results.ascii`**, **`X_prediction_results.xml`** / **`.csv`**, **`pick_output_format`**, **`ascii_station_pick_format`**, **`overwrite`**) are **`RunEQCCTPro`** / **`EvaluateSystem`** only; live scmlpick uses **`scPhase`**.
+- This README’s “Limits” section is historical: the integrated **`scmlpick`** and **`predictor`** also support **SeisBench** pools when bindings set **`pickerModel`** (see **`INTEGRATION_GUIDE.md`**). **Batch** pick files (**`summary_results.ascii`**, per-station **`X_prediction_results.xml`** / **`.csv`**, **`<station>.log`** under **`<station>_outputs/`**, **`pick_output_format`**, **`ascii_station_pick_format`**, **`overwrite`**) are **`RunEQCCTPro`** / **`EvaluateSystem`** only; live scmlpick uses **`scPhase`**.
 - GPU **fractional** scheduling is simplified (`≤4` actors, `0.95/n` GPU fraction each); tune against your VRAM.
 - **`eqcct.gpuLimit`** is passed through as **`gpu_memory_limit_mb`** to **`ModelActor`** when `> 0`; confirm units match your site config.
 

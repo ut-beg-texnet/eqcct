@@ -36,8 +36,6 @@ ASCII_RUN_SUMMARY_COLUMNS = (
     "N_S_picks",
     "Model_name",
     "Detection_Confidence_Threshold",
-    "P_Phase_times",
-    "S_Phase_times",
 )
 
 SUMMARY_RESULTS_ASCII = "summary_results.ascii"
@@ -77,10 +75,66 @@ def format_pick_time_cell(dt: datetime | None) -> str | None:
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
-def _unique_sorted_join(values: list[str]) -> str:
-    if not values:
-        return ""
-    return ";".join(sorted(set(values)))
+def _parse_pick_time_sort_key(time_str: str):
+    """Parse pick time string for chronological sorting; returns datetime or None."""
+    s = str(time_str).strip()
+    if not s:
+        return None
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+    ):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def write_station_pick_log(
+    out_dir: str,
+    station_name: str,
+    events: list[tuple[str, str]],
+) -> None:
+    """
+    Write ``<station>_outputs/<station>.log`` under *out_dir* (same directory as
+    ``X_prediction_results.xml`` / ``.csv`` for that station): first line is the
+    station id, then one line per pick as ``YYYY-MM-DDTHH:MM:SS.ffffffP`` or ``...S``
+    (ISO-like ``T``, microsecond width, phase suffix), sorted by time then P before
+    S at equal times.
+    """
+    sta = str(station_name).strip()
+    save_dir = os.path.join(str(out_dir), f"{sta}_outputs")
+    path = os.path.join(save_dir, f"{sta}.log")
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    phase_rank = {"P": 0, "S": 1}
+
+    def sort_key(item: tuple[str, str]):
+        t_str, ph = item
+        ph_up = str(ph).strip().upper()[:1]
+        dt = _parse_pick_time_sort_key(t_str)
+        if dt is None:
+            return datetime.min, phase_rank.get(ph_up, 9)
+        return dt, phase_rank.get(ph_up, 9)
+
+    ordered = sorted(events, key=sort_key)
+    lines = [sta]
+    for t_str, ph in ordered:
+        ph_up = str(ph).strip().upper()[:1]
+        if ph_up not in ("P", "S"):
+            continue
+        dt = _parse_pick_time_sort_key(t_str)
+        if dt is None:
+            continue
+        lines.append(dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + ph_up)
+
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def ascii_summary_results_path(
@@ -122,8 +176,6 @@ def build_ascii_summary_row_tuple(
         str(len(s_phases)),
         str(args.get("picker_model_label") or ""),
         str(args.get("detection_confidence_threshold") or ""),
-        _unique_sorted_join(p_phases),
-        _unique_sorted_join(s_phases),
     )
 
 
@@ -139,8 +191,8 @@ def read_ascii_run_summary_data_rows(path: str) -> list[tuple[str, ...]]:
     rows: list[tuple[str, ...]] = []
     for ln in lines[1:]:
         parts = [p.strip() for p in ln.split(" | ")]
-        if len(parts) == n:
-            rows.append(tuple(parts))
+        if len(parts) >= n:
+            rows.append(tuple(parts[:n]))
     return rows
 
 
@@ -227,8 +279,10 @@ class PickOutputSink:
     Writes a single station result file for XML or legacy CSV row-per-window layout.
     When ``pick_output_format='ascii'`` at the driver, workers use this sink with
     ``fmt`` from ``ascii_station_pick_format`` (``xml`` or ``csv``) so each station gets
-    ``X_prediction_results.xml`` or ``X_prediction_results.csv`` while the driver writes
-    run-level ``summary_results.ascii`` (see :func:`write_ascii_run_summary`).
+    ``X_prediction_results.xml`` or ``X_prediction_results.csv`` in that station's
+    ``_outputs`` directory, while the driver writes run-level ``summary_results.ascii``
+    and :func:`write_station_pick_log` writes ``<station>.log`` beside those files
+    (see :func:`write_ascii_run_summary`).
     """
 
     def __init__(self, path: str, fmt: str):
