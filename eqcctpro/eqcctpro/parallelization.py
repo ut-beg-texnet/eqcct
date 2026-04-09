@@ -25,12 +25,14 @@ from eqcctpro.timing_util import cuda_synchronize_best_effort, monotonic_s
 from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
 from eqcctpro.pick_output import (
     PickOutputSink,
+    ascii_summary_results_path,
+    build_ascii_summary_row_tuple,
     format_detection_confidence_threshold_summary,
     format_pick_time_cell,
     normalize_pick_output_format,
     prediction_results_path,
     resolve_picker_model_label,
-    write_ascii_station_summary,
+    write_ascii_run_summary,
 )
 from os import listdir
 from obspy import UTCDateTime
@@ -364,7 +366,55 @@ def parse_time_range(time_string):
 
     except ValueError as e:
         return None, None, None #Error handling.
-    
+
+
+def _format_analysis_time_window(
+    analysis_window_start_str,
+    analysis_window_end_str,
+    timechunk_id,
+    analysis_period_minutes,
+):
+    """
+    Human-readable analysis period for ASCII summary: user start/end if provided,
+    else timechunk directory bounds, else minutes span only.
+    """
+    s = (analysis_window_start_str or "").strip()
+    e = (analysis_window_end_str or "").strip()
+    if s and e:
+        return f"{s} – {e}"
+    if timechunk_id:
+        try:
+            st, en, _ = parse_time_range(timechunk_id)
+            if st is not None and en is not None:
+                return (
+                    f"{st.strftime('%Y-%m-%d %H:%M:%S')} – "
+                    f"{en.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+        except Exception:
+            pass
+    if analysis_period_minutes is not None:
+        try:
+            return f"(analysis span {float(analysis_period_minutes):.6g} minutes)"
+        except Exception:
+            pass
+    return ""
+
+
+def _unpack_modelactor_predict_result(result):
+    """``(log, wf_time)`` or ``(log, wf_time, ascii_row)`` from ModelActor station tasks."""
+    if len(result) == 3:
+        return result[0], result[1], result[2]
+    return result[0], result[1], None
+
+
+def _unpack_ripper_predict_result(result):
+    """``(log, model_load, wf_time)`` or ``(..., ascii_row)`` from Ripper station tasks."""
+    if len(result) == 4:
+        return result[0], result[1], result[2], result[3]
+    log_e, ml, wf = result
+    return log_e, ml, wf, None
+
+
 def _eqcct_stream_to_nparray(args, st, station, files_list=None):
     """
     EQCCT preprocessing from an in-memory ObsPy Stream for a single station
@@ -469,7 +519,7 @@ def _mseed2nparray(args, files_list, station):
 
     st = obspy.Stream()
     for file in files_list:
-        temp_st = obspy.read(file)
+        temp_st = read_station_waveform_file(file)
         try:
             temp_st.merge(fill_value=0)
         except Exception:
@@ -483,6 +533,41 @@ def _mseed2nparray(args, files_list, station):
     return _eqcct_stream_to_nparray(args, st, station, files_list=files_list)
 
 
+def _list_station_mseed_files(input_dir: str, station: str) -> list[str]:
+    """
+    Per-station miniSEED paths for a timechunk directory.
+    Supports classic ``input_dir/<station>/*`` and post-split ``abstracted_waveforms/<station>/*``.
+
+    If *input_dir* is a timechunk folder (``YYYYMMDDTHHMMSSZ_...``) and the parent
+    directory has ``<station>/*.mseed``, use **only** those paths. On-the-fly
+    materialized copies under the chunk are often a second encode pass through
+    ObsPy; reading the originals next to the chunk preserves Steim fidelity.
+    """
+    input_dir = os.path.abspath(input_dir)
+    chunk_base = os.path.basename(input_dir)
+    parent = os.path.dirname(input_dir)
+    parent_station = os.path.join(parent, str(station))
+
+    if looks_like_timechunk_id(chunk_base) and os.path.isdir(parent_station):
+        from_parent = sorted(glob.glob(os.path.join(parent_station, "*mseed")))
+        if from_parent:
+            return from_parent
+
+    paths: list[str] = []
+    for base in (
+        os.path.join(input_dir, str(station)),
+        os.path.join(input_dir, "abstracted_waveforms", str(station)),
+    ):
+        paths.extend(sorted(glob.glob(os.path.join(base, "*mseed"))))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
 def _load_ripper_mseed_stream(input_dir: str, station_list: list) -> obspy.Stream:
     """
     Read all station miniSEED once on the driver (scmlpick-style) for ray.put.
@@ -490,9 +575,9 @@ def _load_ripper_mseed_stream(input_dir: str, station_list: list) -> obspy.Strea
     """
     full = obspy.Stream()
     for station in station_list:
-        files_list = sorted(glob.glob(os.path.join(input_dir, str(station), "*mseed")))
+        files_list = _list_station_mseed_files(input_dir, station)
         for file in files_list:
-            temp_st = obspy.read(file)
+            temp_st = read_station_waveform_file(file)
             try:
                 temp_st.merge(fill_value=0)
             except Exception:
@@ -981,7 +1066,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
               waveform_filter_freqmax=45.0,
               waveform_filter_corners=2,
               waveform_filter_zerophase=True,
-              pick_output_format='xml'):
+              pick_output_format='xml',
+              analysis_window_start_str=None,
+              analysis_window_end_str=None):
     
     """ 
     
@@ -1095,6 +1182,13 @@ def mseed_predictor(input_dir='downloads_mseeds',
     "waveform_filter_zerophase": waveform_filter_zerophase,
     "pick_output_format": pick_output_format,
     "analysis_period_minutes": analysis_period_minutes,
+    "timechunk_id": timechunk_id,
+    "analysis_time_window_str": _format_analysis_time_window(
+        analysis_window_start_str,
+        analysis_window_end_str,
+        timechunk_id,
+        analysis_period_minutes,
+    ),
     "picker_model_label": resolve_picker_model_label(
         model_type, seisbench_parent_model, seisbench_child_model
     ),
@@ -1115,7 +1209,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
     out_dir = os.path.join(os.getcwd(), str(args['output_dir']))    
     try:
         from eqcctpro.tools import build_station_list_from_dir
-        station_list = build_station_list_from_dir(args['input_dir'])
+        station_list = build_station_list_from_dir(args["input_dir"], logger=logger)
     except Exception as e:
         logger.info(f"{e}") 
         return # To-Do: Fix so that it has a valid return? 
@@ -1135,9 +1229,36 @@ def mseed_predictor(input_dir='downloads_mseeds',
         station_list = station_list  # someone put None thinking that they would be able to run the whole directory in one go
     logger.info(f"Using {len(station_list)} selected station(s): {station_list}.") 
 
+    _tcid_for_summary = timechunk_id
+    if _tcid_for_summary is None:
+        _cand_tc = os.path.basename(args["input_dir"])
+        if "_" in _cand_tc and len(_cand_tc) >= 10:
+            _tcid_for_summary = _cand_tc
+    _ascii_summary_path = ascii_summary_results_path(
+        out_dir,
+        timechunk_id=_tcid_for_summary,
+        total_timechunks=total_timechunks,
+    )
+    _pick_fmt0 = normalize_pick_output_format(pick_output_format)
+    if _pick_fmt0 == "ascii":
+        if os.path.isfile(_ascii_summary_path) and not overwrite:
+            logger.info(
+                "Skipping EQCCTPro run: %s exists (overwrite=False).",
+                _ascii_summary_path,
+            )
+            return (
+                f"Skipped: ASCII summary already exists at {_ascii_summary_path} "
+                f"(overwrite=False)."
+            )
+        if overwrite and os.path.isfile(_ascii_summary_path):
+            try:
+                os.remove(_ascii_summary_path)
+            except OSError:
+                pass
+
     if not station_list or (fixed_station_list is None and any(looks_like_timechunk_id(x) for x in station_list)):
         # Rebuild from the actual contents of the timechunk dir
-        station_list = build_station_list_from_dir(args['input_dir'])
+        station_list = build_station_list_from_dir(args["input_dir"], logger=logger)
         logger.info(f"Station list rebuilt from directory because it contained a timechunk id or was empty.") 
 
     tasks_predictor = [[f"({i+1}/{len(station_list)})", station_list[i], out_dir, args] for i in range(len(station_list))]
@@ -1422,12 +1543,15 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     num_gpus=gpu_allocation_per_task, num_cpus=0
                 ).remote(tasks_predictor_ripper[i], True, gpu_memory_limit_mb)
 
-            model_load_times, waveform_load_times = _run_ripper_parallel_queue_scmlpick(
+            model_load_times, waveform_load_times, ripper_ascii_rows = _run_ripper_parallel_queue_scmlpick(
                 logger=logger,
                 tasks_predictor=tasks_predictor_ripper,
                 max_tasks_queue=max_pending_tasks,
                 submit_index=_ripper_submit_index,
             )
+            if normalize_pick_output_format(pick_output_format) == "ascii":
+                ripper_ascii_rows.sort(key=lambda r: str(r[0]).upper())
+                write_ascii_run_summary(_ascii_summary_path, ripper_ascii_rows)
             logger.info("")
             
             # Calculate average model load time
@@ -2048,6 +2172,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
     # ===== TIMING: Collect waveform load times for averaging =====
     waveform_load_times = []
+    ascii_summary_rows: list = []
 
     # Concurrent Prediction(s) Parallel Processing
     try: 
@@ -2081,20 +2206,28 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
                     for finished_task in tasks_finished:
                         result = ray.get(finished_task)
-                        log_entry, load_time = result  # Unpack tuple: (log_message, waveform_load_time)
+                        log_entry, load_time, ascii_row = _unpack_modelactor_predict_result(
+                            result
+                        )
                         logger.info(f'{log_entry}')
                         if load_time is not None:
                             waveform_load_times.append(load_time)
+                        if ascii_row is not None:
+                            ascii_summary_rows.append(ascii_row)
 
         # After adding all the tasks to queue, process what's left
         while tasks_queue:
             tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
             for finished_task in tasks_finished:
                 result = ray.get(finished_task)
-                log_entry, load_time = result  # Unpack tuple: (log_message, waveform_load_time)
+                log_entry, load_time, ascii_row = _unpack_modelactor_predict_result(
+                    result
+                )
                 logger.info(f'{log_entry}')
                 if load_time is not None:
                     waveform_load_times.append(load_time)
+                if ascii_row is not None:
+                    ascii_summary_rows.append(ascii_row)
         logger.info("")
         
         # Calculate average waveform load time
@@ -2103,6 +2236,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
             logger.info(f"Average waveform load time (per task): {avg_waveform_load_time:.3f}s (across {len(waveform_load_times)} tasks)")
         else:
             avg_waveform_load_time = 0.0
+
+        if normalize_pick_output_format(pick_output_format) == "ascii":
+            ascii_summary_rows.sort(key=lambda r: str(r[0]).upper())
+            write_ascii_run_summary(_ascii_summary_path, ascii_summary_rows)
 
     except Exception as e:
         avg_waveform_load_time = 0.0  # Default if error occurs before collecting any times
@@ -2347,16 +2484,20 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    out_path = prediction_results_path(save_dir, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    if use_ascii_summary:
+        out_path = None
+    else:
+        out_path = prediction_results_path(save_dir, pick_fmt)
 
-    if os.path.isfile(out_path):
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
+            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0, None)
 
-    os.makedirs(save_dir, exist_ok=True)
-    use_ascii_summary = pick_fmt == "ascii"
+    if not use_ascii_summary:
+        os.makedirs(save_dir, exist_ok=True)
     sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
@@ -2374,16 +2515,16 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                 full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
                 st_sel = _stream_select_for_station_task(full_st, station)
                 if len(st_sel) == 0:
-                    return (f"{pos} {station}: FAILED - No traces for station in shared Stream.", None)
+                    return (f"{pos} {station}: FAILED - No traces for station in shared Stream.", None, None)
                 stream3c, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
             else:
-                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                files_list = _list_station_mseed_files(args["input_dir"], station)
                 if not files_list:
-                    return (f"{pos} {station}: FAILED - No mSEED files found.", None)
+                    return (f"{pos} {station}: FAILED - No mSEED files found.", None, None)
                 stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
         except Exception as e:
             err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
-            return (f"{pos} {station}: {err_msg}", None)
+            return (f"{pos} {station}: {err_msg}", None, None)
         waveform_load_time = monotonic_s() - waveform_load_start
 
         try:
@@ -2490,26 +2631,29 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
                     ])
 
             if use_ascii_summary:
-                write_ascii_station_summary(
-                    out_path,
-                    station_name=str(station_code).strip(),
-                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station_code).strip(),
+                    args,
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
-                    model_name=args.get("picker_model_label", "SeisBench"),
-                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
                 )
+            else:
+                ascii_row = None
 
             if sink is not None:
                 sink.flush()
 
             end_Predicting = monotonic_s()
             delta = (end_Predicting - start_Predicting)
-            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", waveform_load_time)
+            return (
+                f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})",
+                waveform_load_time,
+                ascii_row,
+            )
 
         except Exception as exp:
             load_time = waveform_load_time if 'waveform_load_time' in locals() else None
-            return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+            return (f"{pos} {station}: FAILED the prediction. {exp}", load_time, None)
     finally:
         try:
             if sink is not None:
@@ -2570,16 +2714,20 @@ def parallel_predict(predict_args, model_actor, gpu=False):
 
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    out_path = prediction_results_path(save_dir, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    if use_ascii_summary:
+        out_path = None
+    else:
+        out_path = prediction_results_path(save_dir, pick_fmt)
 
-    if os.path.isfile(out_path):
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
+            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0, None)
 
-    os.makedirs(save_dir)
-    use_ascii_summary = pick_fmt == "ascii"
+    if not use_ascii_summary:
+        os.makedirs(save_dir)
     sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
@@ -2597,19 +2745,19 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                 full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
                 st_sel = _stream_select_for_station_task(full_st, station)
                 if len(st_sel) == 0:
-                    return (f"{pos} {station}: FAILED no traces for station in shared Stream.", None)
+                    return (f"{pos} {station}: FAILED no traces for station in shared Stream.", None, None)
                 packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
                 if packed is None:
-                    return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
+                    return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None, None)
                 meta, data_set, hp, lp = packed
             else:
-                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                files_list = _list_station_mseed_files(args["input_dir"], station)
                 meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
                 if meta is None:
-                    return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
+                    return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None, None)
         except Exception as e:
             err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-            return (f"{pos} {station}: {err_msg}", None)
+            return (f"{pos} {station}: {err_msg}", None, None)
         waveform_load_time = monotonic_s() - waveform_load_start
 
         try:
@@ -2654,25 +2802,28 @@ def parallel_predict(predict_args, model_actor, gpu=False):
                 )
 
             if use_ascii_summary:
-                write_ascii_station_summary(
-                    out_path,
-                    station_name=str(station),
-                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
-                    model_name=args.get("picker_model_label", "EQCCT"),
-                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
                 )
+            else:
+                ascii_row = None
 
             end_Predicting = monotonic_s()
             delta = (end_Predicting - start_Predicting)
-            # Return tuple: (log_message, waveform_load_time) for timing analysis
-            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", waveform_load_time)
+            # Return tuple: (log_message, waveform_load_time, ascii_row or None)
+            return (
+                f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})",
+                waveform_load_time,
+                ascii_row,
+            )
 
         except Exception as exp:
             # Return tuple with waveform_load_time if available
             load_time = waveform_load_time if 'waveform_load_time' in locals() else None
-            return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+            return (f"{pos} {station}: FAILED the prediction. {exp}", load_time, None)
     finally:
         try:
             if sink is not None:
@@ -2708,9 +2859,10 @@ def _run_ripper_parallel_queue_scmlpick(
     total_tasks = len(tasks_predictor)
     model_load_times: list = []
     waveform_load_times: list = []
+    ascii_rows: list = []
 
     if total_tasks == 0:
-        return model_load_times, waveform_load_times
+        return model_load_times, waveform_load_times, ascii_rows
 
     tasks_queue: list = []
     idx_iter = iter(range(total_tasks))
@@ -2733,12 +2885,14 @@ def _run_ripper_parallel_queue_scmlpick(
             except ray.exceptions.RayError as e:
                 logger.warning("RIPPER Ray error: %s", e)
                 continue
-            log_entry, ml_time, wf_time = result
-            logger.info("%s", log_entry)
+            log_e, ml_time, wf_time, ascii_row = _unpack_ripper_predict_result(result)
+            logger.info("%s", log_e)
             if ml_time is not None:
                 model_load_times.append(ml_time)
             if wf_time is not None:
                 waveform_load_times.append(wf_time)
+            if ascii_row is not None:
+                ascii_rows.append(ascii_row)
         try:
             while len(tasks_queue) < max_tasks_queue:
                 i = next(idx_iter)
@@ -2746,7 +2900,7 @@ def _run_ripper_parallel_queue_scmlpick(
         except StopIteration:
             pass
 
-    return model_load_times, waveform_load_times
+    return model_load_times, waveform_load_times, ascii_rows
 
 
 @ray.remote(max_calls=1, max_retries=1)
@@ -2820,16 +2974,25 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
 
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    out_path = prediction_results_path(save_dir, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    if use_ascii_summary:
+        out_path = None
+    else:
+        out_path = prediction_results_path(save_dir, pick_fmt)
 
-    if os.path.isfile(out_path):
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
+            return (
+                f"{pos} {station}: Skipped (already exists - overwrite=False).",
+                model_load_time,
+                0.0,
+                None,
+            )
 
-    os.makedirs(save_dir)
-    use_ascii_summary = pick_fmt == "ascii"
+    if not use_ascii_summary:
+        os.makedirs(save_dir)
     sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
@@ -2850,21 +3013,23 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                         f"{pos} {station}: FAILED no traces for station in shared Stream.",
                         model_load_time,
                         None,
+                        None,
                     )
                 packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
             else:
-                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                files_list = _list_station_mseed_files(args["input_dir"], station)
                 packed = _mseed2nparray(args, files_list, station)
             if packed is None:
                 return (
                     f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).",
                     model_load_time,
                     None,
+                    None,
                 )
             meta, data_set, hp, lp = packed
         except Exception as e:
             err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else 'FAILED reading mSEED (corrupted or empty files).'
-            return (f"{pos} {station}: {err_msg}", model_load_time, None)
+            return (f"{pos} {station}: {err_msg}", model_load_time, None, None)
         waveform_load_time = monotonic_s() - waveform_load_start
 
         try:
@@ -2888,15 +3053,14 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
                 )
 
             if use_ascii_summary:
-                write_ascii_station_summary(
-                    out_path,
-                    station_name=str(station),
-                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
-                    model_name=args.get("picker_model_label", "EQCCT"),
-                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
                 )
+            else:
+                ascii_row = None
 
             end_Predicting = monotonic_s()
             delta = (end_Predicting - start_Predicting)
@@ -2908,11 +3072,16 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
             except Exception:
                 pass
 
-            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", model_load_time, waveform_load_time)
+            return (
+                f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})",
+                model_load_time,
+                waveform_load_time,
+                ascii_row,
+            )
 
         except Exception as exp:
             wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
-            return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
+            return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time, None)
     finally:
         try:
             if sink is not None:
@@ -2978,16 +3147,25 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
     pick_fmt = normalize_pick_output_format(args.get('pick_output_format', 'xml'))
-    out_path = prediction_results_path(save_dir, pick_fmt)
+    use_ascii_summary = pick_fmt == "ascii"
+    if use_ascii_summary:
+        out_path = None
+    else:
+        out_path = prediction_results_path(save_dir, pick_fmt)
 
-    if os.path.isfile(out_path):
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
+            return (
+                f"{pos} {station}: Skipped (already exists - overwrite=False).",
+                model_load_time,
+                0.0,
+                None,
+            )
 
-    os.makedirs(save_dir, exist_ok=True)
-    use_ascii_summary = pick_fmt == "ascii"
+    if not use_ascii_summary:
+        os.makedirs(save_dir, exist_ok=True)
     sink = None if use_ascii_summary else PickOutputSink(out_path, pick_fmt)
     ascii_p_phases = []
     ascii_s_phases = []
@@ -3008,17 +3186,23 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                         f"{pos} {station}: FAILED no traces for station in shared Stream.",
                         model_load_time,
                         None,
+                        None,
                     )
                 stream, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
             else:
-                files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
+                files_list = _list_station_mseed_files(args["input_dir"], station)
                 result = mseed2stream_3c(args, files_list, station)
                 if result is None:
-                    return (f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).", model_load_time, None)
+                    return (
+                        f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).",
+                        model_load_time,
+                        None,
+                        None,
+                    )
                 stream, freqmin, freqmax = result
         except Exception as e:
             err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-            return (f"{pos} {station}: {err_msg}", model_load_time, None)
+            return (f"{pos} {station}: {err_msg}", model_load_time, None, None)
         waveform_load_time = monotonic_s() - waveform_load_start
 
         try:
@@ -3064,15 +3248,14 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
                     ])
 
             if use_ascii_summary:
-                write_ascii_station_summary(
-                    out_path,
-                    station_name=str(station).strip(),
-                    time_of_the_picks_minutes=args.get("analysis_period_minutes"),
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
                     p_phases=ascii_p_phases,
                     s_phases=ascii_s_phases,
-                    model_name=args.get("picker_model_label", "SeisBench"),
-                    detection_confidence_threshold=str(args.get("detection_confidence_threshold", "")),
                 )
+            else:
+                ascii_row = None
 
             if sink is not None:
                 sink.flush()
@@ -3084,12 +3267,17 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
             if gpu and torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", model_load_time, waveform_load_time)
+            return (
+                f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})",
+                model_load_time,
+                waveform_load_time,
+                ascii_row,
+            )
 
         except Exception as exp:
             ml_time = model_load_time if 'model_load_time' in locals() else None
             wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
-            return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time)
+            return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time, None)
     finally:
         try:
             if sink is not None:

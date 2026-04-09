@@ -1,10 +1,13 @@
+import os
 import obspy
 import numpy as np
 import seisbench.models as sbm
 import time
 import random
+import logging
 from pathlib import Path
 
+from eqcctpro.tools import read_station_waveform_file
 from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
 
 class SeisBenchModels:
@@ -209,17 +212,71 @@ def process_raw_station_stream_3c(args, st, station):
     t1 = min(tr.stats.endtime for tr in st)
     st.trim(t0, t1, pad=False)
 
-    by_last = {}
+    by_last: dict[str, list] = {}
     for tr in st:
-        by_last.setdefault(tr.stats.channel[-1], []).append(tr)
+        ch = (tr.stats.channel or "").strip()
+        if len(ch) < 1:
+            continue
+        by_last.setdefault(ch[-1], []).append(tr)
 
-    def _best_trace(letter):
+    def _best_trace(letter: str):
         lst = by_last.get(letter, [])
         return lst[0] if lst else None
 
     trE = _best_trace("E") or _best_trace("1")
     trN = _best_trace("N") or _best_trace("2")
     trZ = _best_trace("Z")
+
+    # Map observed traces by upper-case SEED channel name (first unused wins).
+    by_code: dict[str, list] = {}
+    for tr in st:
+        key = (tr.stats.channel or "").strip().upper()
+        if key:
+            by_code.setdefault(key, []).append(tr)
+
+    def _used_ids():
+        return {id(x) for x in (trE, trN, trZ) if x is not None}
+
+    def _first_unused_for_codes(codes: tuple[str, ...]):
+        used = _used_ids()
+        for code in codes:
+            for tr in by_code.get(code, []):
+                if id(tr) not in used:
+                    return tr
+        return None
+
+    # Common broadband / weak-motion channel names (FDSN-style 3-letter codes).
+    if trZ is None:
+        trZ = _first_unused_for_codes(("CHZ", "HHZ", "BHZ", "SHZ", "CNZ", "EHZ"))
+    if trE is None:
+        trE = _first_unused_for_codes(("CHE", "HHE", "BHE", "SHE", "CNE", "HH1", "BH1", "EH1"))
+    if trN is None:
+        trN = _first_unused_for_codes(("CHN", "HHN", "BHN", "SHN", "CNN", "HH2", "BH2", "EH2"))
+
+    def _unassigned_traces():
+        sel = _used_ids()
+        return [tr for tr in st if id(tr) not in sel]
+
+    # Salvage: e.g. CHE + CHN + CNN where CNN is vertical or mis-tagged (no *Z code).
+    _max_salvage = 4
+    for _ in range(_max_salvage):
+        u = _unassigned_traces()
+        if trZ is None and trE is not None and trN is not None and len(u) == 1:
+            trZ = u[0]
+            continue
+        u = _unassigned_traces()
+        if trE is None and trN is not None and trZ is not None and len(u) == 1:
+            c = (u[0].stats.channel or "")[-1:]
+            if c in ("E", "1"):
+                trE = u[0]
+                continue
+        u = _unassigned_traces()
+        if trN is None and trE is not None and trZ is not None and len(u) == 1:
+            c = (u[0].stats.channel or "")[-1:]
+            if c in ("N", "2"):
+                trN = u[0]
+                continue
+        break
 
     missing_components = []
     if trZ is None:
@@ -228,6 +285,54 @@ def process_raw_station_stream_3c(args, st, station):
         missing_components.append("E (or 1)")
     if trN is None:
         missing_components.append("N (or 2)")
+
+    _strict_3c = os.environ.get("EQCCTPRO_STRICT_3C", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    # Steim / partial decodes often leave only vertical (or N+Z). PhaseNet still
+    # needs three inputs; duplicate an available trace with an explicit warning.
+    if missing_components and not _strict_3c:
+        logw = logging.getLogger("eqcctpro").warning
+        if trE is None and trN is not None and trZ is not None:
+            logw(
+                "Station %s: east component missing; using north trace as synthetic E for PhaseNet (degraded picks).",
+                station,
+            )
+            trE = trN.copy()
+        elif trN is None and trE is not None and trZ is not None:
+            logw(
+                "Station %s: north component missing; using east trace as synthetic N for PhaseNet (degraded picks).",
+                station,
+            )
+            trN = trE.copy()
+        elif trE is None and trN is None and trZ is not None:
+            logw(
+                "Station %s: only vertical decoded; using Z as synthetic E and N for PhaseNet (degraded picks).",
+                station,
+            )
+            trE = trZ.copy()
+            trN = trZ.copy()
+        missing_components = []
+        if trZ is None:
+            missing_components.append("Z")
+        if trE is None:
+            missing_components.append("E (or 1)")
+        if trN is None:
+            missing_components.append("N (or 2)")
+
+    if missing_components and len(st) == 3 and not _strict_3c:
+        chans = [tr.stats.channel for tr in st]
+        logging.getLogger("eqcctpro").warning(
+            "Station %s: could not map ENZ from channel names %s; "
+            "using lexicographic order as E, N, Z for PhaseNet (set EQCCTPRO_STRICT_3C=1 to forbid).",
+            station,
+            chans,
+        )
+        ordered = sorted(list(st), key=lambda t: (t.stats.channel or "").upper())
+        trE, trN, trZ = ordered[0], ordered[1], ordered[2]
+        missing_components = []
 
     if missing_components:
         available_channels = [tr.stats.channel for tr in st]
@@ -295,14 +400,16 @@ def mseed2stream_3c(args, files_list, station):
     # --- 1) Read all input files into one stream ---
     for file in files_list:
         try:
-            temp_st = obspy.read(str(file))  # Convert Path to string if needed
+            temp_st = read_station_waveform_file(
+                str(file),
+                logger=args.get("logger") if isinstance(args, dict) else None,
+            )
             temp_st.merge(method=1, fill_value=0)   # merge fragments, fill gaps with zeros
             temp_st.detrend("demean")
             if len(temp_st) > 0:
                 st += temp_st
                 files_read += 1
-        except Exception as e:
-            # Continue to next file if one fails
+        except Exception:
             continue
 
     if len(st) == 0:

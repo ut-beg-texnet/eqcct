@@ -122,6 +122,12 @@ using multiple poses enhances P and S wave directionality.
 Where each subdirectory is named after station code. If you wish to use create your own input directory with custom waveform mSEED files, **please follow the above naming conventions.** Otherwise, EQCCTPro will **not** work. 
 Create subdirectories for each timechunk (sub-parent directories) and for each station (child directories). The station directories should be named as shown above. Each timechunk directory spans from the **start of the analysis period minus the waveform overlap** to the **end of the analysis period**, based on the defined timechunk duration.
 
+**Single miniSEED file with multiple stations:** You must set an explicit **`timechunk_dt`** (minutes); there is no default (see error text in the logger if omitted).
+
+- **Under a named timechunk folder** (`input_dir/YYYYMMDDTHHMMSSZ_.../file.mseed`): EQCCTPro splits by station into that folder’s **`abstracted_waveforms/<Network_Station>/`**. Delete `abstracted_waveforms/` if the source archive changes. Use **`number_of_concurrent_timechunk_predictions=1`** the first time on very large files.
+
+- **Directly under `input_dir/`** (only top-level `*.mseed` / `*.sac`, no timechunk-named subdirs yet): EQCCTPro uses **`start_time`**, **`end_time`**, **`timechunk_dt`**, and **`waveform_overlap`** to build the same schedule as `chunk_time()`, then writes **`input_dir/<chunk_id>/abstracted_waveforms/...`** for each window (one read pass per archive slice per chunk; originals stay in place).
+
 For example: 
 ```sh
 [skevofilaxc 230_stations_2hr_1_hr_dt]$ ls
@@ -214,10 +220,35 @@ runner.run_eqcctpro()
 - **`model_type (str)`**: Choice of `'eqcct'` (for the original EQCCT model) or `'seisbench'` (for SeisBench-based models).
 - **`seisbench_parent_model (str)`**: (SeisBench only) The model architecture (e.g., `PhaseNet`, `EQTransformer`).
 - **`seisbench_child_model (str)`**: (SeisBench only) The pretrained weights (e.g., `original`, `stead`, `ethz`).
-- **`Detection_threshold (float)`**: (SeisBench only) The probability threshold for detection traces. Default: `0.3`.
-- **`P_threshold (float)`**: (EQCCT only) Arrival probability threshold for P-waves. Default: `0.001`.
-- **`S_threshold (float)`**: (EQCCT only) Arrival probability threshold for S-waves. Default: `0.02`.
+- **`P_threshold (float)`**: Minimum score on the **P** probability trace for a P pick. Defaults differ by backend (EQCCT often uses small values such as `0.001`; SeisBench examples often use `0.3`). See **Threshold semantics** below.
+- **`S_threshold (float)`**: Same for the **S** phase. Defaults differ by backend (e.g. `0.02` vs `0.3`).
+- **`Detection_threshold (float)`**: Meaning depends on the backend and SeisBench model; often unused for picking. Default: `0.3`. See **Threshold semantics** below.
 - **`p_model_filepath / s_model_filepath (str)`**: (EQCCT only) Paths to the `.h5` model files.
+
+#### **Threshold semantics (EQCCT vs SeisBench)**
+
+The three parameters are **not interchangeable** between backends, and they are **not** all used in the same way.
+
+**EQCCT (`model_type='eqcct'`)**
+
+- **`P_threshold`** and **`S_threshold`** are the only thresholds that affect picking. They are passed into internal peak picking on the **P** and **S** model outputs (minimum probability / peak height to keep a candidate).
+- **`Detection_threshold`** is stored in the worker configuration and may appear in exported metadata strings, but **the EQCCT picking path does not use it**—adjust P/S only to change picks.
+- Typical EQCCT defaults are **much lower** than SeisBench (e.g. `0.001` / `0.02`) because the score scale is different.
+
+**SeisBench (`model_type='seisbench'`)**
+
+EQCCTPro forwards **`P_threshold`**, **`S_threshold`**, and **`Detection_threshold`** into SeisBench’s `model.classify(...)`. What actually matters is defined per **model class** in SeisBench:
+
+- **PhaseNet** builds discrete picks from **per-phase** thresholds only: SeisBench reads keys such as **`P_threshold`** and **`S_threshold`** for the P and S probability traces. PhaseNet’s aggregation step does **not** apply a separate “detection channel” threshold the way EQTransformer does, so **`Detection_threshold` does not change PhaseNet P/S picks** (it may still be recorded in summaries).
+- **EQTransformer** uses per-phase thresholds for **phase** picks (again keyed like **`P_threshold`** / **`S_threshold`**) and a separate threshold for the **Detection** output. In SeisBench’s API that value is the keyword **`detection_threshold`** (lowercase). EQCCTPro passes **`Detection_threshold`**; if your SeisBench version does not alias the two names, the detection stream may fall back to the library default instead of your `Detection_threshold`. Prefer checking SeisBench docs or a quick experiment if you rely on EQTransformer **detections** (not just P/S picks).
+
+**Summary**
+
+| Parameter | EQCCT picking | PhaseNet (SeisBench) | EQTransformer-style (SeisBench) |
+|-----------|---------------|----------------------|----------------------------------|
+| **P_threshold** | Yes (P trace) | Yes (P trace) | Yes (P trace) |
+| **S_threshold** | Yes (S trace) | Yes (S trace) | Yes (S trace) |
+| **Detection_threshold** | Not used for picks | Not used for PhaseNet pick list | Intended for Detection trace; SeisBench expects `detection_threshold` |
 
 #### **Hardware & Parallelism**
 - **`use_gpu (bool)`**: Enables GPU acceleration. 
@@ -234,9 +265,10 @@ runner.run_eqcctpro()
 #### **Workflow & Data**
 - **`input_dir / output_dir (str)`**: Paths for input mSEED files and output pick results.
 - **`start_time / end_time (str)`**: Analysis window (Format: `YYYY-MM-DD HH:MM:SS`).
-- **`timechunk_dt (int)`**: Duration of each processing chunk in minutes.
+- **`timechunk_dt (int)`**: **Required.** Duration of each processing chunk in minutes (no default). Together with `start_time`, `end_time`, and `waveform_overlap`, it defines how many timechunk directories are expected and—when you place continuous multi-station miniSEED only under `input_dir/`—how EQCCTPro slices that archive into `input_dir/<chunk_id>/abstracted_waveforms/...`. Example: `1440` for one 24 h segment per chunk when your window is one day.
 - **`waveform_overlap (int)`**: Overlap between chunks in minutes to ensure no events are missed at boundaries.
 - **`best_usecase_config (bool)`**: If `True`, overrides parallelism settings with the optimal values found by `EvaluateSystem`.
+- **`overwrite (bool)`**: If `True`, existing per-station XML/CSV under `<station>_outputs/` may be removed when a worker re-runs, and **`summary_results.ascii`** (ASCII mode) is deleted at the start of a timechunk job so picks are regenerated. Default: **`False`**. With **`overwrite=False`**, an existing **`summary_results.ascii`** causes the run to **skip** that job (same as prior per-station “already exists” guard).
 
 #### **Waveform band-limiting (EQCCT + SeisBench paths)**
 
@@ -252,12 +284,9 @@ If the worker **`args`** dictionary includes **`stations_filters`** (pandas `Dat
 
 #### **Pick output format**
 
-Each station directory gets `<station>_outputs/` with a single result file:
-
 - **`pick_output_format (str)`**: **`xml`** (default), **`ascii`**, or **`csv`**.
-  - **XML**: UTF-8 document `X_prediction_results.xml` with one `<pick>` element per row; child tags match the historical CSV columns (`file_name`, `network`, `station`, …).
-  - **ASCII**: file `X_prediction_results.ascii` — a tab-separated **per-station summary** (header + one data row). **`Time_of_the_picks`** is the full analysis window length in **minutes** (from the driver’s `start_time` / `end_time`, forwarded as `analysis_period_minutes` in worker `args`). **`P_Phase`** and **`S_Phase`** list all pick times for that station in this task, semicolon-separated and sorted (ISO-like `YYYY-MM-DD HH:MM:SS.ffffff`). **`Model_name`** is **`EQCCT`** or SeisBench **`Parent/Child`**. **`Detection_Confidence_Threshold`** encodes the thresholds used (see `format_detection_confidence_threshold_summary` in `eqcctpro/pick_output.py`).
-  - **CSV**: legacy `X_prediction_results.csv`.
+  - **XML** / **CSV**: Each station directory gets `<station>_outputs/` with `X_prediction_results.xml` or `X_prediction_results.csv` (row-per-pick layout for XML/CSV).
+  - **ASCII**: One run-level table **`summary_results.ascii`** under **`output_dir`** (fixed-width columns, ` | ` separators). Each row is one station. Columns include **`Analysis_time_window`** (full run window from `start_time` / `end_time`, or chunk bounds fallback), **`N_P_picks`** / **`N_S_picks`**, **`Model_name`**, **`Detection_Confidence_Threshold`** (string from `format_detection_confidence_threshold_summary` in `eqcctpro/pick_output.py`), and semicolon-sorted **`P_Phase_times`** / **`S_Phase_times`** as the last columns. If `total_timechunks > 1`, per-chunk files are named `summary_results_<timechunk_id>.ascii` so chunks do not overwrite each other.
 
 The same option applies in **Ripper** mode and for **EvaluateSystem** trials that call `mseed_predictor`.
 
@@ -489,7 +518,10 @@ eval_gpu = EvaluateSystem(
     stations2use=100,                 # Max stations to test
     cpu_id_list=range(0, 8),          # CPUs available for Ray management
     input_dir='/path/to/mseed',
-    csv_dir='/path/to/results'
+    csv_dir='/path/to/results',
+    start_time='2024-12-15 12:00:00',
+    end_time='2024-12-15 12:01:00',
+    timechunk_dt=1,                   # required: minutes per processing chunk
 )
 eval_gpu.evaluate()
 ```

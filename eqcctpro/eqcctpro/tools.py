@@ -2,6 +2,7 @@
 tools.py contains the sub-tool functions that EQCCTPro uses, such as getting the current system's VRAM, creating subdirs, etc. 
 """
 from __future__ import annotations
+import contextlib
 import os 
 import re
 import sys
@@ -505,9 +506,8 @@ def build_memory_trial_data(
 
 
 """
-build_station_list_from_dir, looks_like_timechunk_id, and _TIMECHUNK_RE work together to discover the stations that are in a timechunk directory. \
-build_station_list_from_dir builds the list of stations in a timechunk dir, using looks_like_timechunk_id to make sure that the subdirectory of the 
-given input_dir is not a timechunk_id, if it is, it is filtered out. 
+build_station_list_from_dir, looks_like_timechunk_id, _TIMECHUNK_RE, and ensure_abstracted_waveforms_for_directory
+discover stations in a timechunk directory (classic per-station subdirs, top-level archives split into abstracted_waveforms/, etc.).
 """
 # Pattern for understanding the structure of a timechunk directory naming pattern 
 _TIMECHUNK_RE = re.compile(r"^\d{8}T\d{6}Z_\d{8}T\d{6}Z$")
@@ -515,31 +515,926 @@ _TIMECHUNK_RE = re.compile(r"^\d{8}T\d{6}Z_\d{8}T\d{6}Z$")
 def looks_like_timechunk_id(name: str) -> bool:
     return bool(_TIMECHUNK_RE.match(name or ""))
 
-def build_station_list_from_dir(input_dir: str) -> list[str]:
+
+def _has_timechunk_subdirs(parent_dir: str) -> bool:
+    try:
+        names = os.listdir(parent_dir)
+    except OSError:
+        return False
+    for name in names:
+        if looks_like_timechunk_id(name) and os.path.isdir(
+            os.path.join(parent_dir, name)
+        ):
+            return True
+    return False
+
+
+TIMECHUNK_DT_REQUIRED_EXPLANATION = """
+timechunk_dt is required (no default).
+
+EQCCTPro uses timechunk_dt (minutes) together with start_time, end_time, and waveform_overlap
+to build the processing schedule: each interval becomes a directory name
+YYYYMMDDTHHMMSSZ_YYYYMMDDTHHMMSSZ and drives how waveform data is segmented for picking.
+
+If you use a single continuous miniSEED/SAC archive (or a few top-level files) under input_dir,
+EQCCTPro needs an explicit timechunk_dt so it knows how many temporal segments to create when
+materializing per-chunk directories and abstracted_waveforms/.
+
+Choose timechunk_dt to match your science window, e.g. 1440 for one day per chunk when analyzing
+a 24 h file with one chunk, or 60 for hour-long chunks. It must align with start_time/end_time.
+
+Ideal layout (no on-the-fly materialization needed):
+
+  input_dir/
+    20010101T000000Z_20010101T010000Z/
+      TX_EF09/
+        *.mseed
+      TX_EF10/
+        *.mseed
+
+You may also keep one folder per station **directly under** input_dir (each with
+``*.mseed`` / ``*.sac``, including multi-component miniSEED). If there are no
+``YYYYMMDDTHHMMSSZ_...`` chunk directories yet, EQCCTPro will create them from
+``timechunk_dt`` / ``start_time`` / ``end_time``.
+
+Or with auto-split multi-station archives under each chunk:
+
+  input_dir/
+    20010101T000000Z_20010101T010000Z/
+      abstracted_waveforms/
+        TX_EF09/
+          *.mseed
+
+Set timechunk_dt when constructing RunEQCCTPro or EvaluateSystem, for example:
+  timechunk_dt=1440
+"""
+
+
+def exit_if_timechunk_dt_missing(
+    timechunk_dt: int | None,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Exit the process if *timechunk_dt* was omitted; return a positive int minutes otherwise."""
+    if timechunk_dt is None:
+        if logger:
+            logger.error(TIMECHUNK_DT_REQUIRED_EXPLANATION.strip())
+        else:
+            print(TIMECHUNK_DT_REQUIRED_EXPLANATION.strip(), file=sys.stderr)
+        sys.exit(1)
+    if isinstance(timechunk_dt, bool):
+        raise ValueError("timechunk_dt must be an integer number of minutes, not a boolean.")
+    if isinstance(timechunk_dt, float):
+        if not timechunk_dt.is_integer():
+            raise ValueError(f"timechunk_dt must be a whole number of minutes, got {timechunk_dt!r}.")
+        td = int(timechunk_dt)
+    else:
+        try:
+            td = int(timechunk_dt)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"timechunk_dt must be an integer (minutes), got {timechunk_dt!r}.") from e
+        if float(td) != float(timechunk_dt):
+            raise ValueError(f"timechunk_dt must be a whole number of minutes, got {timechunk_dt!r}.")
+    if td <= 0:
+        raise ValueError(f"timechunk_dt must be positive (minutes), got {td}.")
+    return td
+
+
+def station_dir_name_from_trace(tr) -> str:
+    """
+    Build a directory name for a trace, aligned with ``_trace_matches_station_task``
+    (e.g. ``4P_BB01`` when network + station are set).
+    """
+    net = (getattr(tr.stats, "network", None) or "").strip()
+    sta = (getattr(tr.stats, "station", None) or "").strip() or "UNK"
+    if net:
+        return f"{net}_{sta}"
+    return sta
+
+
+def _abstracted_waveforms_root(chunk_dir: str) -> str:
+    return os.path.join(chunk_dir, "abstracted_waveforms")
+
+
+def _classic_station_subdirs_present(chunk_dir: str) -> bool:
+    """
+    True if ``chunk_dir`` already uses one-subdirectory-per-station layout
+    (excluding ``abstracted_waveforms``).
+    """
+    for name in os.listdir(chunk_dir):
+        if name == "abstracted_waveforms":
+            continue
+        p = os.path.join(chunk_dir, name)
+        if not os.path.isdir(p):
+            continue
+        if glob.glob(os.path.join(p, "*.mseed")) or glob.glob(os.path.join(p, "*.sac")):
+            return True
+    return False
+
+
+def _abstracted_layout_ready(chunk_dir: str) -> bool:
+    root = _abstracted_waveforms_root(chunk_dir)
+    if not os.path.isdir(root):
+        return False
+    for name in os.listdir(root):
+        p = os.path.join(root, name)
+        if os.path.isdir(p) and (
+            glob.glob(os.path.join(p, "*.mseed")) or glob.glob(os.path.join(p, "*.sac"))
+        ):
+            return True
+    return False
+
+
+def _flat_materialization_complete(parent_dir: str, times_list: list) -> bool:
+    """True if every window in *times_list* already has ``abstracted_waveforms`` populated."""
+    if not times_list:
+        return True
+    for win in times_list:
+        if len(win) < 2:
+            continue
+        t0, t1 = win[0], win[1]
+        chunk_dir = os.path.join(
+            parent_dir,
+            f"{t0.strftime('%Y%m%dT%H%M%SZ')}_{t1.strftime('%Y%m%dT%H%M%SZ')}",
+        )
+        if not _abstracted_layout_ready(chunk_dir):
+            return False
+    return True
+
+
+def _trace_seed_identity(tr) -> str:
+    """Stable SEED id string (same shape as ObsPy ``sourcename`` selector)."""
+    return (
+        f"{tr.stats.network}.{tr.stats.station}.{tr.stats.location}."
+        f"{tr.stats.channel}"
+    )
+
+
+def _mseed_msr_seed_id(msr) -> str:
+    """Build SEED id from a libmseed MSRecord (ObsPy ctypes wrapper)."""
+
+    def _dec(field) -> str:
+        if field is None:
+            return ""
+        raw = bytes(field) if not isinstance(field, bytes) else field
+        return raw.decode("ascii", errors="ignore").split("\x00", 1)[0].strip()
+
+    return (
+        f"{_dec(msr.contents.network)}.{_dec(msr.contents.station)}."
+        f"{_dec(msr.contents.location)}.{_dec(msr.contents.channel)}"
+    )
+
+
+def _mseed_partition_physical_records(path: str) -> dict[str, bytearray]:
+    """
+    Walk a miniSEED file record-by-record (via libmseed ``msr_parse``), copy each
+    physical record into a per–SEED-id byte buffer. Multiplexed files then decode
+    as separate miniSEED streams so Steim errors on one channel do not abort
+    decoding of the rest (a common cause of “only one component after merge”).
+    """
+    import ctypes as C
+
+    import numpy as np
+
+    from obspy.io.mseed.headers import MS_NOERROR, MSRecord, clibmseed
+
+    bfr_np = np.fromfile(path, dtype=np.int8)
+    if bfr_np.size < 48:
+        return {}
+
+    blobs: dict[str, bytearray] = {}
+    msr = clibmseed.msr_init(C.POINTER(MSRecord)())
+    try:
+        offset = 0
+        n = int(bfr_np.size)
+        consec_bad = 0
+        # Small leading scan: volume / padding before the first data record.
+        lead_cap = min(65536, max(0, n - 48))
+        lead_ok = False
+        scan = 0
+        while scan < lead_cap:
+            chunk = bfr_np[scan : scan + 8192]
+            if chunk.size < 48:
+                return blobs
+            ret = clibmseed.msr_parse(
+                chunk, int(chunk.size), C.pointer(msr), -1, 0, 0
+            )
+            if ret == MS_NOERROR:
+                offset = scan
+                lead_ok = True
+                break
+            scan += 1
+        if not lead_ok:
+            offset = 0
+        while offset + 48 <= n:
+            chunk = bfr_np[offset : offset + 8192]
+            if chunk.size < 48:
+                break
+            ret = clibmseed.msr_parse(
+                chunk, int(chunk.size), C.pointer(msr), -1, 0, 0
+            )
+            if ret != MS_NOERROR:
+                consec_bad += 1
+                if consec_bad <= 256:
+                    offset += 1
+                else:
+                    window = min(131072, n - offset)
+                    if window >= 256:
+                        det = int(
+                            clibmseed.ms_detect(
+                                bfr_np[offset : offset + window], window
+                            )
+                        )
+                        offset += det if det > 0 else 512
+                    else:
+                        offset += 1
+                    consec_bad = 0
+                continue
+
+            consec_bad = 0
+            rl = int(msr.contents.reclen)
+            if rl <= 0 or offset + rl > n:
+                offset += 1
+                continue
+
+            sid = _mseed_msr_seed_id(msr)
+            buf = blobs.get(sid)
+            if buf is None:
+                buf = bytearray()
+                blobs[sid] = buf
+            buf.extend(bfr_np[offset : offset + rl].tobytes())
+            offset += rl
+    finally:
+        clibmseed.msr_free(C.pointer(msr))
+
+    return blobs
+
+
+def _read_mseed_from_partition_blobs(
+    blobs: dict[str, bytearray],
+) -> "obspy.Stream":
+    """Decode per-channel miniSEED byte blobs with ObsPy (reclen retries)."""
+    import obspy
+    from io import BytesIO
+
+    st = obspy.Stream()
+    rkw_list = (
+        {},
+        {"reclen": 4096},
+        {"reclen": 512},
+        {"reclen": 8192},
+        {"reclen": 1024},
+        {"reclen": 2048},
+    )
+    for _sid, blob in blobs.items():
+        if len(blob) < 48:
+            continue
+        bio = BytesIO(bytes(blob))
+        got = None
+        for rkw in rkw_list:
+            bio.seek(0)
+            try:
+                got = obspy.read(bio, format="MSEED", **rkw)
+            except Exception:
+                got = None
+            if got is not None and len(got) > 0:
+                st += got
+                break
+    return st
+
+
+def _merge_mseed_streams_demux_prefers_demux(
+    st_direct: "obspy.Stream", st_demux: "obspy.Stream"
+) -> "obspy.Stream":
+    """
+    Prefer physically demultiplexed decoding for every channel it recovered:
+    append *all* demux traces, then append direct traces only for SEED ids with
+    no demux data. Using one trace per id would collapse gap-separated segments.
+    """
+    import obspy
+
+    demux_ids = {_trace_seed_identity(tr) for tr in st_demux}
+    out = obspy.Stream()
+    for tr in st_demux:
+        out += tr
+    for tr in st_direct:
+        if _trace_seed_identity(tr) not in demux_ids:
+            out += tr
+    return out
+
+
+def _read_mseed_demultiplex(path: str, logger: logging.Logger | None = None):
+    """Split multiplexed miniSEED into per-channel blobs and decode."""
+    import obspy
+
+    try:
+        blobs = _mseed_partition_physical_records(path)
+    except Exception as e:
+        if logger:
+            logger.warning(
+                "Demultiplex scan failed for %s: %s",
+                os.path.basename(path),
+                e,
+            )
+        return obspy.Stream()
+    if not blobs:
+        return obspy.Stream()
+    return _read_mseed_from_partition_blobs(blobs)
+
+
+def _read_mseed_best_effort(path: str, logger: logging.Logger | None = None):
+    """
+    Load an entire miniSEED file (no ``starttime`` / ``endtime`` at read).
+    Used when splitting per-station archives into time windows; windowed reads
+    often worsen Steim1 edge cases. Tries ``reclen`` hints, merges with a
+    physical-record demultiplex pass (so all components survive marginal Steim),
+    then per-SEED-id reads for any channels still missing vs. head-only scan.
+    """
+    import obspy
+
+    logw = logger.warning if logger else None
+    last_err: Exception | None = None
+    st_direct = obspy.Stream()
+    for kw in (
+        {},
+        {"reclen": 4096},
+        {"reclen": 512},
+        {"reclen": 1024},
+        {"reclen": 2048},
+        {"reclen": 8192},
+    ):
+        try:
+            st_direct = obspy.read(path, format="MSEED", **kw)
+            break
+        except Exception as e:
+            last_err = e
+            st_direct = obspy.Stream()
+
+    st_demux = _read_mseed_demultiplex(path, logger=logger)
+    out = _merge_mseed_streams_demux_prefers_demux(st_direct, st_demux)
+
+    try:
+        heads = obspy.read(path, format="MSEED", headonly=True)
+    except Exception:
+        try:
+            heads = obspy.read(path, headonly=True)
+        except Exception:
+            heads = obspy.Stream()
+
+    head_ids: list[str] = []
+    seen_hd: set[str] = set()
+    for tr in heads:
+        hid = _trace_seed_identity(tr)
+        if hid not in seen_hd:
+            seen_hd.add(hid)
+            head_ids.append(hid)
+
+    have = {_trace_seed_identity(tr) for tr in out}
+    missing = [hid for hid in head_ids if hid not in have]
+
+    if missing and logw:
+        logw(
+            "Per-channel miniSEED read for %s (%d missing channel(s) after demux).",
+            os.path.basename(path),
+            len(missing),
+        )
+
+    reclens = ({}, {"reclen": 4096}, {"reclen": 512}, {"reclen": 8192})
+    for sid in missing:
+        got = None
+        last_chan_err: Exception | None = None
+        for rkw in reclens:
+            try:
+                got = obspy.read(path, format="MSEED", sourcename=sid, **rkw)
+                break
+            except Exception as e:
+                last_chan_err = e
+        if got is not None:
+            out += got
+        elif logw:
+            logw(
+                "Skipping SEED id %s in %s: %s",
+                sid,
+                os.path.basename(path),
+                last_chan_err,
+            )
+
+    if len(out) == 0:
+        if logw:
+            logw(
+                "Could not decode miniSEED %s; skipping this file "
+                "(Steim/libmseed). Last whole-file error: %s",
+                path,
+                last_err,
+            )
+    return out
+
+
+def read_station_waveform_file(
+    path: str, logger: logging.Logger | None = None
+):
+    """
+    Read one per-station waveform for picking. miniSEED uses Steim-tolerant
+    decoding (:func:`_read_mseed_best_effort`); other extensions use ``obspy.read``.
+    """
+    import obspy
+
+    low = (path or "").lower()
+    if low.endswith(".mseed") or low.endswith(".ms") or low.endswith(".seed"):
+        return _read_mseed_best_effort(path, logger=logger)
+    return obspy.read(path)
+
+
+def _raise_single_combined_mseed_not_supported(path: str) -> None:
+    """
+    One multi-station miniSEED at directory top level is not supported for
+    time-chunked, per-station processing (ObsPy/libmseed often fails Steim
+    decoding on real-world combined archives).
+    """
+    size = os.path.getsize(path)
+    raise RuntimeError(
+        f"EQCCTPro does not read one combined miniSEED ({path!r}, ~{size / 1e9:.2f} GiB) "
+        f"to drive a multi-station, time-chunked run. Use one folder per station with its own "
+        f"waveforms (or per-station miniSEED files) instead of a single archive. "
+        f"Such volumes also commonly trigger ObsPy/libmseed Steim decode errors "
+        f"(marginal logger packets); re-pack or repair the data (e.g. IRIS `msi` / `dataselect`) "
+        f"before processing."
+    )
+
+
+def flat_archive_span_minutes(paths: list[str]) -> float | None:
+    """Approximate total span in minutes from miniSEED/SAC headers (head-only read)."""
+    if not paths:
+        return None
+    import obspy
+
+    tmin, tmax = None, None
+    for p in paths:
+        try:
+            st = obspy.read(p, headonly=True)
+        except Exception:
+            continue
+        for tr in st:
+            try:
+                t0, t1 = tr.stats.starttime, tr.stats.endtime
+            except Exception:
+                continue
+            tmin = t0 if tmin is None else min(tmin, t0)
+            tmax = t1 if tmax is None else max(tmax, t1)
+    if tmin is None or tmax is None:
+        return None
+    try:
+        return float(tmax - tmin) / 60.0
+    except Exception:
+        return None
+
+
+def materialize_flat_archive_into_timechunk_dirs(
+    parent_input_dir: str,
+    times_list: list,
+    logger: logging.Logger | None = None,
+) -> None:
+    """
+    When *parent_input_dir* holds only top-level waveform file(s) and no timechunk subdirectories,
+    read each processing window in *times_list* (``[start, end]`` ObSpy :class:`~obspy.core.utcdatetime.UTCDateTime` pairs),
+    and write::
+
+        parent_input_dir/<chunk_id>/abstracted_waveforms/<NET_STA>/<stem>_<i>.mseed
+
+    A single combined top-level ``*.mseed`` is rejected; use per-station layout or multiple files.
+
+    Chunk ids match :meth:`RunEQCCTPro.dt_task_generator` / :meth:`EvaluateSystem.dt_task_generator`.
+    """
+    log = logger.info if logger else None
+    sources = sorted(
+        glob.glob(os.path.join(parent_input_dir, "*.mseed"))
+        + glob.glob(os.path.join(parent_input_dir, "*.sac"))
+    )
+    if not sources or not times_list:
+        return
+    if _flat_materialization_complete(parent_input_dir, times_list):
+        return
+
+    import obspy
+
+    lock_path = os.path.join(parent_input_dir, ".eqcctpro_materialize_flat.lock")
+    with _abstracted_dir_lock(lock_path):
+        if _flat_materialization_complete(parent_input_dir, times_list):
+            return
+
+        if len(sources) == 1 and sources[0].lower().endswith(".mseed"):
+            _raise_single_combined_mseed_not_supported(sources[0])
+
+        span = flat_archive_span_minutes(sources)
+        if log:
+            if span is not None:
+                log(
+                    "Top-level archive(s) span about %.2f minutes; materializing %d timechunk folder(s) from timechunk_dt / start_time / end_time.",
+                    span,
+                    len(times_list),
+                )
+            else:
+                log(
+                    "Materializing %d timechunk folder(s) from top-level archive(s) in %s.",
+                    len(times_list),
+                    parent_input_dir,
+                )
+
+        for idx, win in enumerate(times_list):
+            if len(win) < 2:
+                continue
+            t0, t1 = win[0], win[1]
+            chunk_name = (
+                f"{t0.strftime('%Y%m%dT%H%M%SZ')}_{t1.strftime('%Y%m%dT%H%M%SZ')}"
+            )
+            out_chunk = os.path.join(parent_input_dir, chunk_name)
+            if _abstracted_layout_ready(out_chunk):
+                continue
+
+            os.makedirs(out_chunk, exist_ok=True)
+            abs_root = _abstracted_waveforms_root(out_chunk)
+            by_key: dict[str, list] = {}
+            for src in sources:
+                try:
+                    st = obspy.read(src, starttime=t0, endtime=t1)
+                except Exception:
+                    st = obspy.read(src)
+                    st.trim(t0, t1, pad=False)
+                try:
+                    st.detrend("demean")
+                except Exception:
+                    pass
+                for tr in st:
+                    if getattr(tr.stats, "npts", 0) == 0:
+                        continue
+                    key = station_dir_name_from_trace(tr)
+                    by_key.setdefault(key, []).append(tr)
+
+            stem = os.path.splitext(os.path.basename(sources[0]))[0]
+            for key, traces in by_key.items():
+                sub_st = obspy.Stream(traces=traces)
+                sub_st.sort(keys=["network", "station", "location", "channel"])
+                try:
+                    sub_st.merge(method=1, fill_value=0)
+                except Exception:
+                    try:
+                        sub_st.merge(fill_value=0)
+                    except Exception:
+                        pass
+                out_sub = os.path.join(abs_root, key)
+                os.makedirs(out_sub, exist_ok=True)
+                out_name = f"{stem}_{idx:04d}.mseed"
+                out_path = os.path.join(out_sub, out_name)
+                if os.path.exists(out_path):
+                    n = 1
+                    while os.path.exists(out_path):
+                        out_name = f"{stem}_{idx:04d}_{n}.mseed"
+                        out_path = os.path.join(out_sub, out_name)
+                        n += 1
+                sub_st.write(out_path, format="MSEED")
+
+            if not by_key and log:
+                log(
+                    "No samples fell in window %s for chunk %s (check start_time/end_time vs archive coverage).",
+                    chunk_name,
+                    out_chunk,
+                )
+
+
+def _classic_station_dir_names_at_root(parent_dir: str) -> list[str]:
+    keys: list[str] = []
+    try:
+        names = sorted(os.listdir(parent_dir))
+    except OSError:
+        return keys
+    for name in names:
+        if name == "abstracted_waveforms":
+            continue
+        if looks_like_timechunk_id(name):
+            continue
+        p = os.path.join(parent_dir, name)
+        if not os.path.isdir(p):
+            continue
+        if glob.glob(os.path.join(p, "*.mseed")) or glob.glob(
+            os.path.join(p, "*.sac")
+        ):
+            keys.append(name)
+    return keys
+
+
+_CLASSIC_CHUNK_DONE = ".eqcctpro_classic_chunk_done"
+
+
+def _classic_chunk_materialization_done(chunk_dir: str) -> bool:
+    return os.path.isfile(os.path.join(chunk_dir, _CLASSIC_CHUNK_DONE))
+
+
+def _classic_root_materialization_complete(
+    parent_dir: str, times_list: list
+) -> bool:
+    station_dirs = _classic_station_dir_names_at_root(parent_dir)
+    if not station_dirs:
+        return False
+    for win in times_list:
+        if len(win) < 2:
+            continue
+        t0, t1 = win[0], win[1]
+        chunk_dir = os.path.join(
+            parent_dir,
+            f"{t0.strftime('%Y%m%dT%H%M%SZ')}_{t1.strftime('%Y%m%dT%H%M%SZ')}",
+        )
+        if not _classic_chunk_materialization_done(chunk_dir):
+            return False
+    return True
+
+
+def materialize_classic_station_tree_into_timechunk_dirs(
+    parent_input_dir: str,
+    times_list: list,
+    logger: logging.Logger | None = None,
+) -> None:
+    """
+    When *parent_input_dir* holds ``<Station>/*.mseed`` (or ``*.sac``) but no
+    ``YYYYMMDDTHHMMSSZ_...`` directories yet, populate::
+
+        parent_input_dir/<chunk_id>/<Station>/...
+
+    for each window in *times_list* (trimmed waveforms). Multi-trace miniSEED
+    (e.g. three components in one file) is supported.
+
+    No-op if timechunk directories already exist, if top-level ``*.mseed`` /
+    ``*.sac`` are present (handled by :func:`materialize_flat_archive_into_timechunk_dirs`),
+    or if there is no classic per-station tree at the root.
+    """
+    log = logger.info if logger else None
+    if not times_list or not os.path.isdir(parent_input_dir):
+        return
+
+    top_waveforms = (
+        glob.glob(os.path.join(parent_input_dir, "*.mseed"))
+        + glob.glob(os.path.join(parent_input_dir, "*.sac"))
+    )
+    if top_waveforms:
+        return
+    if _has_timechunk_subdirs(parent_input_dir):
+        return
+    if not _classic_station_subdirs_present(parent_input_dir):
+        return
+    if _classic_root_materialization_complete(parent_input_dir, times_list):
+        return
+
+    import obspy
+
+    station_dirs = _classic_station_dir_names_at_root(parent_input_dir)
+    if not station_dirs:
+        return
+
+    lock_path = os.path.join(
+        parent_input_dir, ".eqcctpro_materialize_classic.lock"
+    )
+    with _abstracted_dir_lock(lock_path):
+        if _classic_root_materialization_complete(parent_input_dir, times_list):
+            return
+
+        if log:
+            log(
+                "Per-station waveform folders under %s; materializing %d timechunk directory(ies).",
+                parent_input_dir,
+                len(times_list),
+            )
+
+        for win in times_list:
+            if len(win) < 2:
+                continue
+            t0, t1 = win[0], win[1]
+            chunk_name = (
+                f"{t0.strftime('%Y%m%dT%H%M%SZ')}_{t1.strftime('%Y%m%dT%H%M%SZ')}"
+            )
+            out_chunk = os.path.join(parent_input_dir, chunk_name)
+            if _classic_chunk_materialization_done(out_chunk):
+                continue
+
+            os.makedirs(out_chunk, exist_ok=True)
+            wrote_any = False
+            for sta in station_dirs:
+                src_dir = os.path.join(parent_input_dir, sta)
+                for src in sorted(
+                    glob.glob(os.path.join(src_dir, "*.mseed"))
+                    + glob.glob(os.path.join(src_dir, "*.sac"))
+                ):
+                    low = src.lower()
+                    if low.endswith(".mseed") or low.endswith(".ms") or low.endswith(
+                        ".seed"
+                    ):
+                        st_full = _read_mseed_best_effort(src, logger=logger)
+                        st = st_full.copy()
+                        st.trim(t0, t1, pad=False)
+                    else:
+                        try:
+                            st = obspy.read(src, starttime=t0, endtime=t1)
+                        except Exception:
+                            st = obspy.read(src)
+                            st.trim(t0, t1, pad=False)
+                    try:
+                        st.detrend("demean")
+                    except Exception:
+                        pass
+                    if len(st) == 0:
+                        continue
+                    try:
+                        st.sort(keys=["network", "station", "location", "channel"])
+                        st.merge(method=1, fill_value=0)
+                    except Exception:
+                        try:
+                            st.merge(fill_value=0)
+                        except Exception:
+                            pass
+                    dest_sub = os.path.join(out_chunk, sta)
+                    os.makedirs(dest_sub, exist_ok=True)
+                    base = os.path.basename(src)
+                    dest_path = os.path.join(dest_sub, base)
+                    n = 0
+                    while os.path.exists(dest_path):
+                        n += 1
+                        stem, ext = os.path.splitext(base)
+                        dest_path = os.path.join(dest_sub, f"{stem}_{n}{ext}")
+                    fmt = "SAC" if base.lower().endswith(".sac") else "MSEED"
+                    st.write(dest_path, format=fmt)
+                    wrote_any = True
+            if not wrote_any and log:
+                log(
+                    "No samples in window %s under %s (check start_time/end_time).",
+                    chunk_name,
+                    parent_input_dir,
+                )
+            with open(
+                os.path.join(out_chunk, _CLASSIC_CHUNK_DONE), "w", encoding="ascii"
+            ) as f:
+                f.write("ok\n")
+
+
+def materialize_input_into_timechunk_layout(
+    parent_input_dir: str,
+    times_list: list,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Expand top-level archives and/or per-station folders into timechunk directories."""
+    materialize_flat_archive_into_timechunk_dirs(
+        parent_input_dir, times_list, logger=logger
+    )
+    materialize_classic_station_tree_into_timechunk_dirs(
+        parent_input_dir, times_list, logger=logger
+    )
+
+
+@contextlib.contextmanager
+def _abstracted_dir_lock(lock_path: str):
+    """Best-effort exclusive lock for abstracting waveforms (Linux/macOS)."""
+    fd = None
+    try:
+        import fcntl  # noqa: WPS433 — platform-specific
+
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    except ImportError:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+
+def ensure_abstracted_waveforms_for_directory(
+    chunk_dir: str,
+    logger: logging.Logger | None = None,
+) -> None:
+    """
+    If a timechunk directory holds miniSEED (or SAC) **only** at its top level,
+    split traces into ``abstracted_waveforms/<StationKey>/*.mseed`` so per-station
+    workers apply. A **single** top-level combined ``*.mseed`` is not supported
+    (see :func:`_raise_single_combined_mseed_not_supported`).
+
+    If per-station subdirectories already exist at the top of ``chunk_dir``, this is a no-op.
+    If ``abstracted_waveforms`` is already populated, this is a no-op.
+    """
+    log = (logger.info if logger else None)
+    if not os.path.isdir(chunk_dir):
+        return
+    if _abstracted_layout_ready(chunk_dir):
+        return
+    if _classic_station_subdirs_present(chunk_dir):
+        return
+
+    top_mseed = sorted(glob.glob(os.path.join(chunk_dir, "*.mseed")))
+    top_sac = sorted(glob.glob(os.path.join(chunk_dir, "*.sac")))
+    if not top_mseed and not top_sac:
+        return
+    if len(top_mseed) == 1 and not top_sac:
+        _raise_single_combined_mseed_not_supported(top_mseed[0])
+
+    import obspy
+
+    lock_path = os.path.join(chunk_dir, ".eqcctpro_abstracted.lock")
+    with _abstracted_dir_lock(lock_path):
+        if _abstracted_layout_ready(chunk_dir):
+            return
+        if _classic_station_subdirs_present(chunk_dir):
+            return
+
+        root = _abstracted_waveforms_root(chunk_dir)
+        os.makedirs(root, exist_ok=True)
+        if log:
+            log(
+                "Splitting top-level waveform file(s) in %s into %s/ (per station).",
+                chunk_dir,
+                root,
+            )
+
+        def _split_and_write(src_path: str, format_hint: str) -> None:
+            st = obspy.read(src_path)
+            stem = os.path.splitext(os.path.basename(src_path))[0]
+            by_key: dict[str, list] = {}
+            for tr in st:
+                key = station_dir_name_from_trace(tr)
+                by_key.setdefault(key, []).append(tr)
+
+            for key, trs in by_key.items():
+                out_sub = os.path.join(root, key)
+                os.makedirs(out_sub, exist_ok=True)
+                sub_st = obspy.Stream(traces=trs)
+                sub_st.sort(keys=["network", "station", "location", "channel"])
+                try:
+                    sub_st.merge(method=1, fill_value=0)
+                except Exception:
+                    try:
+                        sub_st.merge(fill_value=0)
+                    except Exception:
+                        pass
+                out_name = f"{stem}.mseed" if format_hint == "MSEED" else f"{stem}.sac"
+                out_path = os.path.join(out_sub, out_name)
+                if os.path.exists(out_path):
+                    n = 1
+                    while True:
+                        alt = f"{stem}_{n}.mseed" if format_hint == "MSEED" else f"{stem}_{n}.sac"
+                        out_path = os.path.join(out_sub, alt)
+                        if not os.path.exists(out_path):
+                            break
+                        n += 1
+                sub_st.write(out_path, format=format_hint)
+
+        for path in top_mseed:
+            _split_and_write(path, "MSEED")
+        for path in top_sac:
+            _split_and_write(path, "SAC")
+
+
+def build_station_list_from_dir(
+    input_dir: str,
+    logger: logging.Logger | None = None,
+) -> list[str]:
     """
     Robustly discover stations under a timechunk directory.
     Accepts files like *.mseed/*.sac or one-dir-per-station structures.
-    Only includes stations that actually have waveform files.
+    If ``abstracted_waveforms/`` exists (see :func:`ensure_abstracted_waveforms_for_directory`),
+    only those stations are returned so bogus file-stem names are not treated as stations.
     """
+    ensure_abstracted_waveforms_for_directory(input_dir, logger=logger)
+
+    abs_root = _abstracted_waveforms_root(input_dir)
+    if os.path.isdir(abs_root):
+        stations_abs = set()
+        for p in glob.glob(os.path.join(abs_root, "*")):
+            if os.path.isdir(p) and (
+                glob.glob(os.path.join(p, "*.mseed")) or glob.glob(os.path.join(p, "*.sac"))
+            ):
+                stations_abs.add(os.path.basename(p))
+        stations_abs = {s for s in stations_abs if not looks_like_timechunk_id(s)}
+        if stations_abs:
+            return sorted(stations_abs)
+
     stations = set()
 
     # 1) Files directly inside input_dir
     for p in glob.glob(os.path.join(input_dir, "*")):
         base = os.path.basename(p)
         if os.path.isfile(p) and (base.endswith(".mseed") or base.endswith(".sac")):
-            # file path — take stem without extension
             stations.add(os.path.splitext(base)[0])
 
     # 2) One subdir per station (e.g., input_dir/AT01/*.mseed)
     for p in glob.glob(os.path.join(input_dir, "*")):
-        if os.path.isdir(p):
-            # Check if this directory contains any mseed or sac files
+        if os.path.isdir(p) and os.path.basename(p) != "abstracted_waveforms":
             if glob.glob(os.path.join(p, "*.mseed")) or glob.glob(os.path.join(p, "*.sac")):
                 stations.add(os.path.basename(p))
 
-    # Filter out anything that looks like a timechunk id (safety)
-    stations = [s for s in stations if not looks_like_timechunk_id(s)]
-
+    stations = {s for s in stations if not looks_like_timechunk_id(s)}
     return sorted(stations)
 
 """
@@ -998,30 +1893,59 @@ def remove_output_subdirs(output_dir: str, logger: logging.Logger | None = None)
         (logger.error if logger else print)(msg)
 
 """
-We need to check to make sure that the input dir's contents (IE. the station subdirs in each timechunk dir) 
-are the same length. We need to ensure that they are
+Ensure each timechunk directory resolves to the same station inventory (after any
+``abstracted_waveforms/`` expansion from flat miniSEED archives).
 """
-def check_station_dirs(input_dir):
-    subdir_lens, station_list_f = [], []
-    sorted_input_dir = sorted(os.listdir(input_dir))
-    subdirs = [item for item in sorted_input_dir if os.path.isdir(os.path.join(input_dir, item))] # Inherits the sorted
-    for timechunk_dir in subdirs: 
-        subdir_path = os.path.join(input_dir, timechunk_dir)
-        try: 
-            station_list = os.listdir(subdir_path)
-            subdir_lens.append(len(station_list))
-            station_list_f = station_list
-        except OSError as e:
-            print(f"Warning: Could not read directory {subdir_path}. Error: {e}")
 
-    check_if_lens_are_same = len(set(subdir_lens))   
-    if check_if_lens_are_same != 1:
-        # Bad case
-        statement = f"The contents across your timechunk directories are not the same. They must match for EQCCTPro. Fix station subdirs so each timechunk has the same stations. Exiting..."
-        return statement, station_list_f, True
-    else: 
-        statement = f"Stations subdirs in timechunk directories are consistent. Continuing EQCCTPro..."     
-        return statement, station_list_f, False 
+
+def check_station_dirs(
+    input_dir: str,
+    logger: logging.Logger | None = None,
+):
+    log_warn = logger.warning if logger else print
+
+    sorted_input_dir = sorted(os.listdir(input_dir))
+    subdirs = [
+        item
+        for item in sorted_input_dir
+        if os.path.isdir(os.path.join(input_dir, item)) and looks_like_timechunk_id(item)
+    ]
+    if not subdirs:
+        statement = (
+            "No timechunk subdirectories (names like YYYYMMDDTHHMMSSZ_YYYYMMDDTHHMMSSZ) found under input_dir after "
+            "materialization. Use per-station folders (e.g. input_dir/BB01/*.mseed), top-level *.mseed/*.sac, or "
+            "pre-built input_dir/<timechunk_id>/ trees; set timechunk_dt with start_time/end_time so chunk folders "
+            "can be created. See TIMECHUNK_DT_REQUIRED_EXPLANATION in eqcctpro/tools.py or the README."
+        )
+        return statement, [], True
+
+    signatures: list[tuple[str, ...]] = []
+    last_list: list[str] = []
+    had_error = False
+    for timechunk_dir in subdirs:
+        subdir_path = os.path.join(input_dir, timechunk_dir)
+        try:
+            station_list = build_station_list_from_dir(subdir_path, logger=logger)
+            sig = tuple(station_list)
+            signatures.append(sig)
+            last_list = station_list
+        except OSError as e:
+            log_warn("Could not read timechunk directory %s: %s", subdir_path, e)
+            had_error = True
+
+    if had_error or not signatures:
+        statement = "Could not build a station list for every timechunk directory."
+        return statement, last_list, True
+
+    if len(set(signatures)) != 1:
+        statement = (
+            "Timechunk directories do not contain the same station inventory. "
+            "Each timechunk must list the same stations (after abstracted_waveforms/ expansion). Exiting..."
+        )
+        return statement, last_list, True
+
+    statement = "Station inventories across timechunk directories are consistent. Continuing EQCCTPro..."
+    return statement, last_list, False
 
 
 def _setup_cuda_library_path():

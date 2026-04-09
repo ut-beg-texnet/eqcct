@@ -1,5 +1,5 @@
 """
-Station pick output serialization (XML, per-station ASCII summary, or legacy CSV).
+Station pick output serialization (XML, run-level ASCII summary table, or legacy CSV).
 """
 
 from __future__ import annotations
@@ -25,15 +25,19 @@ PICK_RESULT_COLUMNS = (
 
 SUPPORTED_PICK_OUTPUT_FORMATS = frozenset({"xml", "ascii", "csv"})
 
-# One header row + one TSV data row; times in P_Phase / S_Phase are semicolon-separated.
-ASCII_SUMMARY_COLUMNS = (
+# One run-level file: header + one row per station; monospace column alignment.
+ASCII_RUN_SUMMARY_COLUMNS = (
     "Station_name",
-    "Time_of_the_picks",
-    "P_Phase",
-    "S_Phase",
+    "Analysis_time_window",
+    "N_P_picks",
+    "N_S_picks",
     "Model_name",
     "Detection_Confidence_Threshold",
+    "P_Phase_times",
+    "S_Phase_times",
 )
+
+SUMMARY_RESULTS_ASCII = "summary_results.ascii"
 
 
 def resolve_picker_model_label(
@@ -76,33 +80,72 @@ def _unique_sorted_join(values: list[str]) -> str:
     return ";".join(sorted(set(values)))
 
 
-def write_ascii_station_summary(
-    path: str,
+def ascii_summary_results_path(
+    output_dir: str,
     *,
+    timechunk_id: str | None = None,
+    total_timechunks=None,
+) -> str:
+    """
+    Per-run ASCII summary path. Multiple configured timechunks use one file per chunk
+    id so runs do not overwrite each other; a single-chunk (or unknown) layout uses
+    ``summary_results.ascii`` only.
+    """
+    try:
+        ntc = int(total_timechunks) if total_timechunks is not None else None
+    except (TypeError, ValueError):
+        ntc = None
+    if timechunk_id and ntc is not None and ntc > 1:
+        safe = "".join(
+            c if (c.isalnum() or c in "._-") else "_" for c in str(timechunk_id)
+        )
+        return os.path.join(output_dir, f"summary_results_{safe}.ascii")
+    return os.path.join(output_dir, SUMMARY_RESULTS_ASCII)
+
+
+def build_ascii_summary_row_tuple(
     station_name: str,
-    time_of_the_picks_minutes: float | None,
+    args: dict,
+    *,
     p_phases: list[str],
     s_phases: list[str],
-    model_name: str,
-    detection_confidence_threshold: str,
-) -> None:
-    """Write one TSV station summary (header + one row). *time_of_the_picks_minutes* is the full analysis span in minutes."""
+) -> tuple[str, ...]:
+    """One aligned row for :func:`write_ascii_run_summary` (station task builds this)."""
+    window = str(args.get("analysis_time_window_str") or "").strip()
+    return (
+        str(station_name).strip(),
+        window,
+        str(len(p_phases)),
+        str(len(s_phases)),
+        str(args.get("picker_model_label") or ""),
+        str(args.get("detection_confidence_threshold") or ""),
+        _unique_sorted_join(p_phases),
+        _unique_sorted_join(s_phases),
+    )
+
+
+def write_ascii_run_summary(path: str, rows: list[tuple[str, ...]]) -> None:
+    """
+    Write one UTF-8 summary table: header + one row per station.
+    Columns are space-padded to the same width so values line up under headers.
+    """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    t_cell = "" if time_of_the_picks_minutes is None else f"{float(time_of_the_picks_minutes):.12g}"
-    row = [
-        str(station_name).strip(),
-        t_cell,
-        _unique_sorted_join(p_phases),
-        _unique_sorted_join(s_phases),
-        model_name,
-        detection_confidence_threshold,
+    headers = list(ASCII_RUN_SUMMARY_COLUMNS)
+    str_matrix = [headers] + [[str(c) for c in r] for r in rows]
+    ncols = len(headers)
+    widths = [
+        max(len(str_matrix[i][j]) for i in range(len(str_matrix)))
+        for j in range(ncols)
     ]
+    lines = [
+        " | ".join(str_matrix[i][j].ljust(widths[j]) for j in range(ncols))
+        for i in range(len(str_matrix))
+    ]
+    text = "\n".join(lines) + "\n"
     with open(path, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f, delimiter="\t", quoting=csv.QUOTE_MINIMAL)
-        w.writerow(list(ASCII_SUMMARY_COLUMNS))
-        w.writerow(row)
+        f.write(text)
 
 
 def normalize_pick_output_format(fmt) -> str:
@@ -129,7 +172,8 @@ def prediction_results_path(save_dir: str, fmt: str) -> str:
 class PickOutputSink:
     """
     Writes a single station result file for XML or legacy CSV row-per-window layout.
-    ``pick_output_format='ascii'`` uses :func:`write_ascii_station_summary` instead.
+    ``pick_output_format='ascii'`` is handled by the driver as ``summary_results.ascii``
+    (see :func:`write_ascii_run_summary`).
     """
 
     def __init__(self, path: str, fmt: str):
@@ -137,8 +181,8 @@ class PickOutputSink:
         self.fmt = normalize_pick_output_format(fmt)
         if self.fmt == "ascii":
             raise ValueError(
-                "ASCII output is a one-row-per-station summary; use write_ascii_station_summary() "
-                "from the prediction workers, not PickOutputSink."
+                "ASCII output is aggregated into summary_results.ascii by the driver; "
+                "prediction workers must not use PickOutputSink for ascii."
             )
         self._f = open(path, "w", encoding="utf-8")
         self._csv_writer = None
