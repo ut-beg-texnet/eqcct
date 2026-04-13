@@ -1,0 +1,235 @@
+% Supplemental figures and tables (from EQCCTPro_Draft.md Material section)
+\section*{Material}
+
+The following pages contain \textbf{Tables 1--5} plus workflow diagrams (\textbf{Figures 1--3}) and enlarged rotated results figures (\textbf{Figures 4--8}).
+
+\clearpage
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/fig1.JPG}
+\caption*{Figure 1. Serial baseline workflow. Waveforms are processed sequentially by a single DL model instance. Each waveform must wait for the previous one to complete, creating a linear bottleneck that scales poorly with network size.}
+\end{figure}
+
+\clearpage
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/fig2.JPG}
+\caption*{Figure 2. Ripper workflow. Each task independently loads the model, performs inference, and unloads. Multiple tasks run in parallel but incur repeated framework initialization overhead per station.}
+\end{figure}
+
+\clearpage
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/fig3.PNG}
+\caption*{Figure 3. Model-Actor workflow. Persistent inference actors maintain loaded models in memory (or GPU VRAM). Waveforms are dispatched to actors as a stream, eliminating load/unload overhead and maximizing throughput.}
+\end{figure}
+
+\clearpage
+\begin{figure}[H]
+\centering
+\rotatebox{90}{%
+  \begin{minipage}{0.85\textheight}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig4_runtime_3d.png}
+    \caption*{Figure 4. Comparison of total trial runtime across all models and parallelization methods. Data points are plotted every 10 stations from 10 to 228. Fig.~5 and Table~3 summarize best 228-station totals.}
+  \end{minipage}%
+}
+\end{figure}
+
+\clearpage
+\begin{figure}[H]
+\centering
+\rotatebox{90}{%
+  \begin{minipage}{0.85\textheight}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig5.png}
+    \caption*{Figure 5. Minimum total runtime at 228 stations for Ripper versus Model-Actor (left: CPU, right: GPU). Bars are best successful end-to-end times at 228 stations per strategy. Dashed red line: 30~s target.}
+  \end{minipage}%
+}
+\end{figure}
+
+\clearpage
+\begin{figure}[H]
+\centering
+\rotatebox{90}{%
+  \begin{minipage}{0.85\textheight}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig6.png}
+    \caption*{Figure 6. Peak process-tree RAM (CPU) and VRAM (GPU) from the load-only benchmark: all $N$ workers held resident while sampling; bars show the maximum over 25~s samples (1.25~s interval). $N$ from best 228-station trial rows; R = Ripper tasks, MA = actors.}
+  \end{minipage}%
+}
+\end{figure}
+
+\clearpage
+\begin{figure}[H]
+\centering
+\rotatebox{90}{%
+  \begin{minipage}{0.85\textheight}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig7_serial_vs_ripper.png}
+    \caption*{Figure 7. Serial baseline versus fastest Ripper configurations, with the batch-based Amdahl reference shown for each CPU allocation. For each Ripper hardware class, a single model is selected from the tested pool based on the lowest \emph{mean} total runtime across successful trials; this model defines the Ripper curve in each panel. Serial curves represent per-station \texttt{classify()} scaling from Table~1. The figure emphasizes scaling with network size rather than the individual minima reported in Table~3.}
+  \end{minipage}%
+}
+\end{figure}
+
+\clearpage
+\begin{figure}[H]
+\centering
+\rotatebox{90}{%
+  \begin{minipage}{0.85\textheight}
+    \centering
+    \includegraphics[width=\linewidth]{figures/fig8_serial_vs_modelactor.png}
+    \caption*{Figure 8. Serial baselines versus fastest Model-Actor configurations, with the Amdahl ideal limit shown for each CPU allocation. As in Figure 7, a single model is selected based on the lowest \emph{mean} total runtime across successful trials; this model defines the Model-Actor curve in each panel. Serial curves represent per-station \texttt{classify()} scaling from Table~1 for models with available SeisBench baselines. The red dotted line denotes the Amdahl ideal, representing the theoretical minimum runtime under perfectly scalable batch processing.}
+  \end{minipage}%
+}
+\end{figure}
+
+\clearpage
+\begin{landscape}
+
+\begin{center}
+\textbf{Table 1.} Single-process inference baselines for 228 stations across SeisBench-compatible models.
+
+\vspace{1em}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model} & \textbf{Device} & \textbf{CPUs} & \textbf{GPUs} & \textbf{Load Time (s)} & \textbf{Annotate-All (s)} & \textbf{Classify-Per-Stn (s)} \\
+\midrule
+PhaseNet      & CPU & 1 & 0 & 1.264 & 0.343 & 33.70 \\
+PhaseNet      & GPU & 1 & 1 & 1.309 & 0.224 & 27.11 \\
+PhaseNetLight & CPU & 1 & 0 & 1.184 & 0.315 & 1.43  \\
+PhaseNetLight & GPU & 1 & 1 & 1.180 & 0.216 & 1.43  \\
+EQTransformer & CPU & 1 & 0 & 1.197 & 1.216 & 12.20 \\
+EQTransformer & GPU & 1 & 1 & 1.215 & 0.513 & 12.22 \\
+EQT-NC        & CPU & 1 & 0 & 1.190 & 1.182 & 8.19  \\
+EQT-NC        & GPU & 1 & 1 & 1.171 & 0.458 & 8.18  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{landscape}
+
+\clearpage
+\begin{landscape}
+
+\begin{center}
+\textbf{Table 2.} Per-instance memory budgets (MB) used by RAPID to cap concurrency and avoid out-of-memory errors.
+
+\vspace{1em}
+\small
+\begin{tabular}{llccccccc}
+\toprule
+\textbf{Model} & \textbf{Framework} & \multicolumn{2}{c}{\textbf{Host RAM -- CPU (MB)}} & \multicolumn{2}{c}{\textbf{Host RAM -- GPU (MB)}} & \multicolumn{3}{c}{\textbf{GPU VRAM (MB)}} \\
+\cmidrule(lr){3-4} \cmidrule(lr){5-6} \cmidrule(lr){7-9}
+ & & Base & Per Ripper/Actor & Base & Per Ripper/Actor & Base & Per Ripper & Per Actor \\
+\midrule
+PhaseNet      & PyTorch    & 502  & 2,038 & 870  & 2,406 & 500  & 850  & 1,524 \\
+PhaseNetLight & PyTorch    & 502  & 2,038 & 861  & 2,397 & 500  & 850  & 1,524 \\
+EQTransformer & PyTorch    & 521  & 2,057 & 1,001 & 2,537 & 528  & 1,056 & 1,552 \\
+EQT-NC        & PyTorch    & 524  & 2,060 & 1,017 & 2,553 & 530  & 1,060 & 1,554 \\
+EQCCT         & TensorFlow & 728  & 2,264 & 2,311 & 3,847 & 1,732 & 3,464 & 2,756 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{landscape}
+
+\clearpage
+\begin{landscape}
+
+\begin{center}
+\textbf{Table 3.} Best successful Ripper total time at 228 stations, sorted by fastest time. CPU rows are minima over Ray CPUs tested; GPU rows report the best one-GPU and two-GPU Ripper totals separately.
+
+\vspace{0.8em}
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model} & \textbf{Device} & \textbf{CPUs} & \textbf{GPUs} & \textbf{Conc. Tasks} & \textbf{Ripper Picking/Total (s)} \\
+\midrule
+PhaseNet         & CPU & 20 & 0 & 91  & 34.25 \\
+PhaseNetLight    & CPU & 20 & 0 & 91  & 35.38 \\
+EQTransformer-NC & CPU & 20 & 0 & 228 & 35.45 \\
+EQTransformer    & CPU & 20 & 0 & 137 & 38.42 \\
+EQTransformer    & GPU & 20 & 1 & 22  & 52.48 \\
+EQTransformer-NC & GPU & 20 & 1 & 22  & 53.31 \\
+EQTransformer-NC & GPU & 20 & 2 & 44  & 54.17 \\
+EQTransformer    & GPU & 20 & 2 & 44  & 55.88 \\
+PhaseNetLight    & GPU & 20 & 1 & 22  & 55.95 \\
+PhaseNet         & GPU & 20 & 2 & 44  & 56.27 \\
+PhaseNet         & GPU & 20 & 1 & 22  & 59.32 \\
+PhaseNetLight    & GPU & 20 & 2 & 44  & 67.61 \\
+EQCCT            & CPU & 20 & 0 & 137 & 76.07 \\
+EQCCT            & GPU & 20 & 2 & 24  & 96.10 \\
+EQCCT            & GPU & 20 & 1 & 12  & 127.35 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{landscape}
+
+\clearpage
+\begin{landscape}
+
+\begin{center}
+\textbf{Table 4.} Best successful Model-Actor total time at 228 stations, sorted by fastest time. CPU rows are minima over Ray CPUs tested; GPU rows report the best one-GPU and two-GPU Model-Actor totals separately. Setup OH is the computed setup overhead difference between a given Model-Actor hardware configuration's runtime and its corresponding Ripper runtime.
+
+\vspace{1em}
+\small
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Model} & \textbf{Device} & \textbf{CPUs} & \textbf{GPUs} & \textbf{Actors} & \textbf{Setup (s)} & \textbf{Pick (s)} & \textbf{Total (s)} & \textbf{Setup OH} \\
+\midrule
+PhaseNet      & GPU & 20 & 1 & 22 & 6.70  & 4.27 & 10.97 & 61.0\% \\
+PhaseNetLight & CPU & 20 & 0 & 46 & 7.04  & 4.28 & 11.47 & 61.4\% \\
+PhaseNet      & CPU & 20 & 0 & 46 & 7.21  & 4.16 & 11.48 & 62.8\% \\
+PhaseNetLight & GPU & 20 & 1 & 22 & 6.96  & 4.56 & 11.53 & 60.4\% \\
+EQTransformer & CPU & 20 & 0 & 46 & 6.92  & 4.70 & 11.63 & 59.5\% \\
+EQT-NC        & GPU & 20 & 1 & 22 & 6.91  & 5.19 & 12.11 & 57.1\% \\
+EQCCT         & GPU & 14 & 1 & 12 & 4.64  & 7.82 & 12.47 & 37.2\% \\
+EQTransformer & GPU & 20 & 1 & 22 & 7.12  & 6.92 & 14.05 & 50.7\% \\
+EQCCT         & GPU & 17 & 2 & 24 & 7.95  & 9.33 & 17.29 & 46.0\% \\
+PhaseNet      & GPU & 20 & 2 & 44 & 10.88 & 6.60 & 17.49 & 62.2\% \\
+EQT-NC        & CPU & 20 & 0 & 46 & 12.88 & 4.70 & 17.74 & 72.6\% \\
+PhaseNetLight & GPU & 20 & 2 & 44 & 10.83 & 7.02 & 17.86 & 60.6\% \\
+EQT-NC        & GPU & 20 & 2 & 44 & 10.75 & 7.30 & 18.06 & 59.5\% \\
+EQTransformer & GPU & 20 & 2 & 44 & 10.76 & 8.16 & 18.93 & 56.9\% \\
+EQCCT         & CPU & 14 & 0 & 46 & 12.73 & 12.23 & 25.01 & 50.9\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{landscape}
+
+\clearpage
+\begin{landscape}
+
+\begin{center}
+\textbf{Table 5.} Memory utilization for each Model-Actor row in Table~4. All memory values are in MB.
+
+\vspace{1em}
+\small
+\begin{tabular}{lccccccccc}
+\toprule
+\textbf{Model} & \textbf{Device} & \textbf{CPUs} & \textbf{GPUs} & \textbf{Actors} & \textbf{Req. RAM} & \textbf{Tree RAM} & \textbf{Req. VRAM} & \textbf{Tree VRAM} & \textbf{Peak RAM} \\
+\midrule
+PhaseNet      & GPU & 20 & 1 & 22 & 58,564  & 32,813 & 36,344 & 11,580 & 782 \\
+PhaseNetLight & CPU & 20 & 0 & 46 & 105,524 & 49,017 & 0      & 0      & 273 \\
+PhaseNet      & CPU & 20 & 0 & 46 & 105,524 & 51,694 & 0      & 0      & 274 \\
+PhaseNetLight & GPU & 20 & 1 & 22 & 58,366  & 39,068 & 36,344 & 11,580 & 280 \\
+EQTransformer & CPU & 20 & 0 & 46 & 106,398 & 51,012 & 0      & 0      & 258 \\
+EQT-NC        & GPU & 20 & 1 & 22 & 61,798  & 43,578 & 37,004 & 12,273 & 244 \\
+EQCCT         & GPU & 14 & 1 & 12 & 49,236  & 15,363 & 34,608 & 40,316 & 456 \\
+EQTransformer & GPU & 20 & 1 & 22 & 61,446  & 42,982 & 36,960 & 12,226 & 275 \\
+EQCCT         & GPU & 17 & 2 & 24 & 98,472  & 18,506 & 69,216 & 43,675 & 958 \\
+PhaseNet      & GPU & 20 & 2 & 44 & 117,128 & 59,490 & 72,688 & 526    & 1,084 \\
+EQT-NC        & CPU & 20 & 0 & 46 & 106,536 & 56,537 & 0      & 0      & 200 \\
+PhaseNetLight & GPU & 20 & 2 & 44 & 116,732 & 72,936 & 72,688 & 23,161 & 383 \\
+EQT-NC        & GPU & 20 & 2 & 44 & 123,596 & 82,457 & 74,008 & 24,545 & 378 \\
+EQTransformer & GPU & 20 & 2 & 44 & 122,892 & 80,613 & 73,920 & 24,453 & 398 \\
+EQCCT         & CPU & 14 & 0 & 46 & 115,920 & 48,701 & 0      & 0      & 202 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{landscape}

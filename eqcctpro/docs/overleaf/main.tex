@@ -1,0 +1,41 @@
+% EQCCTPro draft — Overleaf-ready main file
+% Upload: main.tex, body.tex, supplement.tex, and a folder "figures/" with assets from docs/figures/
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+\usepackage{pdflscape}
+\usepackage{rotating}
+\usepackage[hidelinks,unicode]{hyperref}
+\usepackage{url}
+\usepackage{microtype}
+\usepackage{float}
+
+\graphicspath{{figures/}}
+
+\title{RAPID: A Generalized High-Performance Parallelization Framework for Real-Time Deep Learning Seismic Phase Picking}
+\author{Author One \\ University of Texas at Austin \and Author Two \\ University of Texas at Austin}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Deep learning has transformed seismic phase picking, yet deploying these models at network scale in real time remains an unresolved engineering challenge. While unified libraries such as SeisBench excel at high-throughput offline batch inference, these methods are ill-suited for continuous monitoring, where waveforms arrive asynchronously from individual stations and cannot be held in memory until a full batch is assembled. The naive alternative, dispatching each station as an independent parallel task, forces repeated framework initialization for every waveform, inflating wall times and consuming much of the available compute time budget unless concurrency and hardware are tuned carefully. To resolve this, we introduce \textbf{RAPID (Resource-Aware Parallel Inference Dispatcher)}, a generalized orchestration framework that implements two task parallelization strategies: \textbf{Ripper}, an ephemeral task-based approach, and \textbf{Model-Actor}, which keeps persistent inference instances loaded in memory across an entire processing window. We benchmarked RAPID across five deep learning phase pickers (PhaseNet, PhaseNetLight, EQTransformer, EQTransformer-NonConservative, and EQCCT) using 228 three-component 60-second waveforms from the Texas Seismological Network under various hardware constraints that reflect real operational deployment scenarios. Across all configurations, the Model-Actor strategy achieved real-time processing, reducing processing time by roughly \textbf{50--87\%} relative to the best Ripper totals at 228 stations for the same model--hardware pairings. These results show that the dominant bottleneck in network-scale DL picking is not raw inference complexity but orchestration overhead, and that persistent-actor lifecycle management delivers substantially faster totals and larger headroom under the 30-second target than even the best tuned ephemeral-task baseline.
+\end{abstract}
+
+\input{body}
+
+\appendix
+\input{supplement}
+
+\end{document}
