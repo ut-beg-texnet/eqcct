@@ -100,15 +100,44 @@ MARKER_STYLE = {
 LINE_WIDTH = 3.0
 
 SERIAL_SPOTCHECK_JSON = BASE / "docs" / "tables" / "serial_classify_spotcheck_cpu.json"
+SERIAL_SPOTCHECK_V2 = BASE / "docs" / "tables" / "serial_classify_spotcheck.json"
 
 
 def _load_serial_spotcheck() -> dict | None:
-    if not SERIAL_SPOTCHECK_JSON.is_file():
+    """Legacy CPU-only JSON, or format_version 2/3 (CPU + 230 slice) from the full spotcheck file."""
+    for path in (SERIAL_SPOTCHECK_JSON, SERIAL_SPOTCHECK_V2):
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if raw.get("format_version") in (2, 3):
+            try:
+                r230 = raw["results"]["CPU"]["230_stations_1_min_dt"]
+                return {
+                    "device": "CPU",
+                    "timechunk": raw["timechunk"],
+                    "dataset": "230_stations_1_min_dt",
+                    "n_runs": raw["n_runs"],
+                    "station_counts_requested": r230["station_counts_requested"],
+                    "models": r230["models"],
+                }
+            except (KeyError, TypeError):
+                continue
+        return raw
+    return None
+
+
+def _classify_series_from_spotcheck_model(entry) -> dict | None:
+    """Spotcheck model entry is either flat {station_str: sec} or nested with classify_total_s."""
+    if entry is None or not isinstance(entry, dict):
         return None
-    try:
-        return json.loads(SERIAL_SPOTCHECK_JSON.read_text())
-    except (json.JSONDecodeError, OSError):
+    if "classify_total_s" in entry:
+        return entry["classify_total_s"]
+    if "load_s" in entry or "annotate_all_s" in entry:
         return None
+    return entry
 
 
 def _serial_streaming_times(model: str, station_grid: np.ndarray, empirical: dict | None) -> np.ndarray:
@@ -127,9 +156,13 @@ def _serial_streaming_times(model: str, station_grid: np.ndarray, empirical: dic
     if not empirical:
         return analytic
     raw = empirical.get("models", {}).get(model)
-    if not raw:
+    series = _classify_series_from_spotcheck_model(raw)
+    if not series:
         return analytic
-    d = {int(k): float(v) for k, v in raw.items()}
+    try:
+        d = {int(k): float(v) for k, v in series.items()}
+    except (ValueError, TypeError):
+        return analytic
     if not d:
         return analytic
     xp = sorted(d.keys())
