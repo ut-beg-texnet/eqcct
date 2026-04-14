@@ -1894,7 +1894,10 @@ def remove_output_subdirs(output_dir: str, logger: logging.Logger | None = None)
 
 """
 Ensure each timechunk directory resolves to the same station inventory (after any
-``abstracted_waveforms/`` expansion from flat miniSEED archives).
+``abstracted_waveforms/`` expansion from flat miniSEED archives). For archives where
+station availability varies by day, set ``relax_timechunk_station_inventory=True``
+on :class:`eqcctpro.functionality.RunEQCCTPro` to skip this check so each chunk
+uses only the stations present in that chunk.
 """
 
 

@@ -269,6 +269,7 @@ EQCCTPro forwards **`P_threshold`**, **`S_threshold`**, and **`Detection_thresho
 - **`waveform_overlap (int)`**: Overlap between chunks in minutes to ensure no events are missed at boundaries.
 - **`best_usecase_config (bool)`**: If `True`, overrides parallelism settings with the optimal values found by `EvaluateSystem`.
 - **`overwrite (bool)`**: If `True`, workers may remove a station’s existing **`X_prediction_results.xml`** / **`.csv`** directory tree when that station is re-run, and **`summary_results.ascii`** (ASCII mode) is deleted at the start of the timechunk job so the summary is rebuilt. Default: **`False`**. With **`overwrite=False`**, a station task is **skipped** if its per-station result file already exists; the run-level ASCII table is **merged** so rows for stations that did run replace older entries for those stations only, while skipped stations keep their previous summary rows.
+- **`relax_timechunk_station_inventory (bool)`**: Default **`False`**. When **`False`**, the driver requires every timechunk subdirectory under **`input_dir`** to list the **same** station IDs (after **`abstracted_waveforms/`** expansion). Set **`True`** if inventories differ by chunk (e.g. stations drop in or out over months); each **`mseed_predictor`** task then uses only the stations found in that chunk’s directory. Ignored if **`specific_stations`** is set (that list is used instead).
 
 #### **Waveform band-limiting (EQCCT + SeisBench paths)**
 

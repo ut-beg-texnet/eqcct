@@ -72,7 +72,8 @@ class RunEQCCTPro():
                 waveform_filter_zerophase: bool = True,
                 pick_output_format: str = 'xml',
                 ascii_station_pick_format: str = 'xml',
-                overwrite: bool = False):
+                overwrite: bool = False,
+                relax_timechunk_station_inventory: bool = False):
          
         self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
         self.input_dir = input_dir
@@ -101,6 +102,7 @@ class RunEQCCTPro():
         self.pick_output_format = pick_output_format
         self.ascii_station_pick_format = ascii_station_pick_format
         self.overwrite = overwrite
+        self.relax_timechunk_station_inventory = relax_timechunk_station_inventory
 
         if cudnn_headroom > 0.80:
             raise ValueError(f"cudnn_headroom cannot exceed 0.80 (80%), got {cudnn_headroom}. This is required for system stability.")
@@ -288,15 +290,23 @@ class RunEQCCTPro():
             tf_environ(gpu_id=1, vram_limit_mb=self.vram_mb, gpus_to_use=self.selected_gpus, intra_threads=self.intra_threads, inter_threads=self.inter_threads, logger=self.logger, skip_tf=skip_tf)
     
     def eqcctpro_parallelization(self):
-        if self.specific_stations is None: # We check if the station dirs are consistent, if not, exit
-            statement, specific_stations_list, do_i_exit = check_station_dirs(
-                input_dir=self.input_dir, logger=self.logger
-            )
-            self.logger.info(f"{statement}")
-            if do_i_exit: exit()
-
-        # We want to use a specified amount of stations
-        else: specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
+        if self.specific_stations is None:
+            if self.relax_timechunk_station_inventory:
+                self.logger.info(
+                    "relax_timechunk_station_inventory=True: skipping the uniform timechunk station check. "
+                    "Each timechunk task will process only stations present in that chunk's directory."
+                )
+                self.logger.info("")
+                specific_stations_list = None
+            else:
+                statement, specific_stations_list, do_i_exit = check_station_dirs(
+                    input_dir=self.input_dir, logger=self.logger
+                )
+                self.logger.info(f"{statement}")
+                if do_i_exit:
+                    exit()
+        else:
+            specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
         statement = f"Using {len(specific_stations_list)} selected station(s)."
         self.logger.info(f"{statement}")
         self.logger.info("")           
