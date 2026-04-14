@@ -8,7 +8,7 @@ Upload these into a **new blank Overleaf project** (same folder level):
 |------|------|
 | `main.tex` | Entry point: title, abstract, `\input{body}`, appendix `\input{supplement}` |
 | `body.tex` | Main text (Introduction through References) |
-| `supplement.tex` | Figures 1--8 and Tables 1--5 |
+| `supplement.tex` | Figures 1--8 and Tables 1--6 |
 
 ## Figures
 
