@@ -307,7 +307,12 @@ class RunEQCCTPro():
                     exit()
         else:
             specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
-        statement = f"Using {len(specific_stations_list)} selected station(s)."
+        if specific_stations_list is None:
+            statement = (
+                "No global station filter; each timechunk task discovers stations from that chunk's directory."
+            )
+        else:
+            statement = f"Using {len(specific_stations_list)} selected station(s)."
         self.logger.info(f"{statement}")
         self.logger.info("")           
 
