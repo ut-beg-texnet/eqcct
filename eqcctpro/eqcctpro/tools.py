@@ -516,6 +516,49 @@ def looks_like_timechunk_id(name: str) -> bool:
     return bool(_TIMECHUNK_RE.match(name or ""))
 
 
+def glob_waveform_files_in_directory(station_dir: str) -> list[str]:
+    """
+    List miniSEED-like files under *station_dir*.
+
+    Linux globs are case-sensitive; ``*mseed`` alone misses ``*.MSEED``.
+    """
+    if not os.path.isdir(station_dir):
+        return []
+    patterns = (
+        "*mseed",
+        "*MSEED",
+        "*.ms",
+        "*.MS",
+        "*.seed",
+        "*.SEED",
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for pat in patterns:
+        for p in glob.glob(os.path.join(station_dir, pat)):
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+    return sorted(out)
+
+
+def parent_timechunk_station_waveform_files(input_dir: str, station: str) -> list[str]:
+    """
+    When *input_dir* is a timechunk folder (``YYYYMMDDThhmmssZ_...``), return waveform
+    paths under ``dirname(input_dir)/<station>/`` — a **sibling** of the chunk directory.
+
+    Used as a decode fallback when chunk-local ``<chunk>/<station>/*.mseed`` paths exist
+    (so :func:`_list_station_mseed_files` in parallelization does not use the parent)
+    but every chunk-local file decodes to an empty stream (placeholders, corrupt copies, etc.).
+    """
+    input_dir = os.path.abspath(input_dir)
+    chunk_base = os.path.basename(input_dir)
+    parent_station = os.path.join(os.path.dirname(input_dir), str(station))
+    if not looks_like_timechunk_id(chunk_base) or not os.path.isdir(parent_station):
+        return []
+    return glob_waveform_files_in_directory(parent_station)
+
+
 def _has_timechunk_subdirs(parent_dir: str) -> bool:
     try:
         names = os.listdir(parent_dir)
@@ -684,12 +727,11 @@ def _mseed_msr_seed_id(msr) -> str:
     )
 
 
-def _mseed_partition_physical_records(path: str) -> dict[str, bytearray]:
+def _mseed_scan_physical_records_numpy(bfr_np):
     """
-    Walk a miniSEED file record-by-record (via libmseed ``msr_parse``), copy each
-    physical record into a per–SEED-id byte buffer. Multiplexed files then decode
-    as separate miniSEED streams so Steim errors on one channel do not abort
-    decoding of the rest (a common cause of “only one component after merge”).
+    Yield ``(seed_id, record_bytes)`` for each physical miniSEED record in file order.
+
+    Used to build per-channel blobs and, for Steim recovery, an ordered record list.
     """
     import ctypes as C
 
@@ -697,24 +739,20 @@ def _mseed_partition_physical_records(path: str) -> dict[str, bytearray]:
 
     from obspy.io.mseed.headers import MS_NOERROR, MSRecord, clibmseed
 
-    bfr_np = np.fromfile(path, dtype=np.int8)
     if bfr_np.size < 48:
-        return {}
-
-    blobs: dict[str, bytearray] = {}
+        return
+    n = int(bfr_np.size)
     msr = clibmseed.msr_init(C.POINTER(MSRecord)())
     try:
         offset = 0
-        n = int(bfr_np.size)
         consec_bad = 0
-        # Small leading scan: volume / padding before the first data record.
         lead_cap = min(65536, max(0, n - 48))
         lead_ok = False
         scan = 0
         while scan < lead_cap:
             chunk = bfr_np[scan : scan + 8192]
             if chunk.size < 48:
-                return blobs
+                break
             ret = clibmseed.msr_parse(
                 chunk, int(chunk.size), C.pointer(msr), -1, 0, 0
             )
@@ -757,24 +795,125 @@ def _mseed_partition_physical_records(path: str) -> dict[str, bytearray]:
                 continue
 
             sid = _mseed_msr_seed_id(msr)
-            buf = blobs.get(sid)
-            if buf is None:
-                buf = bytearray()
-                blobs[sid] = buf
-            buf.extend(bfr_np[offset : offset + rl].tobytes())
+            yield sid, bytes(bfr_np[offset : offset + rl].tobytes())
             offset += rl
     finally:
         clibmseed.msr_free(C.pointer(msr))
 
+
+def _mseed_partition_physical_records(path: str) -> dict[str, bytearray]:
+    """
+    Walk a miniSEED file record-by-record (via libmseed ``msr_parse``), copy each
+    physical record into a per–SEED-id byte buffer. Multiplexed files then decode
+    as separate miniSEED streams so Steim errors on one channel do not abort
+    decoding of the rest (a common cause of “only one component after merge”).
+    """
+    import numpy as np
+
+    bfr_np = np.fromfile(path, dtype=np.int8)
+    if bfr_np.size < 48:
+        return {}
+
+    blobs: dict[str, bytearray] = {}
+    for sid, rec in _mseed_scan_physical_records_numpy(bfr_np):
+        buf = blobs.get(sid)
+        if buf is None:
+            buf = bytearray()
+            blobs[sid] = buf
+        buf.extend(rec)
     return blobs
+
+
+def _mseed_list_physical_record_bytes_in_order(path: str) -> list[bytes]:
+    """Physical miniSEED records in file order (for longest-prefix Steim recovery)."""
+    import numpy as np
+
+    bfr_np = np.fromfile(path, dtype=np.int8)
+    if bfr_np.size < 48:
+        return []
+    return [rec for _, rec in _mseed_scan_physical_records_numpy(bfr_np)]
+
+
+def _mseed_decode_longest_prefix_records(records: list[bytes]) -> "obspy.Stream":
+    """
+    Binary-search the largest prefix of *records* that ObsPy decodes with samples.
+
+    When libmseed raises ``InternalMSEEDError`` (e.g. only decoded N of M samples),
+    the full concatenation fails; a shorter prefix often still decodes usable data.
+    SeisComp and other tools may show the full trace while ObsPy rejects the tail.
+    """
+    import obspy
+    from io import BytesIO
+
+    def _has_data(st) -> bool:
+        if not st or len(st) == 0:
+            return False
+        return any(int(getattr(tr.stats, "npts", 0) or 0) > 0 for tr in st)
+
+    if not records:
+        return obspy.Stream()
+
+    lo, hi = 0, len(records)
+    best = obspy.Stream()
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        try:
+            buf = b"".join(records[:mid])
+            st = obspy.read(BytesIO(buf), format="MSEED")
+            if _has_data(st):
+                lo = mid
+                best = st
+            else:
+                hi = mid - 1
+        except Exception:
+            hi = mid - 1
+    return best
+
+
+def _read_mseed_longest_prefix_recovery(path: str) -> "obspy.Stream":
+    """Whole-file Steim recovery using ordered physical records (see :func:`_mseed_decode_longest_prefix_records`)."""
+    import numpy as np
+    import obspy
+
+    records = _mseed_list_physical_record_bytes_in_order(path)
+    return _mseed_decode_longest_prefix_records(records)
+
+
+def _read_mseed_longest_prefix_recovery_from_bytes(blob: bytes) -> "obspy.Stream":
+    """Per-channel blob Steim recovery (same logic as :func:`_read_mseed_longest_prefix_recovery`)."""
+    import numpy as np
+    import obspy
+
+    if len(blob) < 48:
+        return obspy.Stream()
+    bfr_np = np.frombuffer(blob, dtype=np.int8)
+    records = [rec for _, rec in _mseed_scan_physical_records_numpy(bfr_np)]
+    return _mseed_decode_longest_prefix_records(records)
+
+
+def _sum_stream_npts(stream) -> int:
+    """Total sample count across traces (for decoded vs header-only comparison)."""
+    n = 0
+    for tr in stream or []:
+        n += int(getattr(tr.stats, "npts", 0) or 0)
+    return n
 
 
 def _read_mseed_from_partition_blobs(
     blobs: dict[str, bytearray],
+    logger: logging.Logger | None = None,
+    recovery_events: list | None = None,
 ) -> "obspy.Stream":
     """Decode per-channel miniSEED byte blobs with ObsPy (reclen retries)."""
     import obspy
     from io import BytesIO
+
+    logw = logger.warning if logger else None
+
+    def _has_npts(g) -> bool:
+        if g is None or len(g) == 0:
+            return False
+        return any(int(getattr(tr.stats, "npts", 0) or 0) > 0 for tr in g)
 
     st = obspy.Stream()
     rkw_list = (
@@ -796,9 +935,21 @@ def _read_mseed_from_partition_blobs(
                 got = obspy.read(bio, format="MSEED", **rkw)
             except Exception:
                 got = None
-            if got is not None and len(got) > 0:
+            if got is not None and _has_npts(got):
                 st += got
                 break
+        if not _has_npts(got):
+            rec = _read_mseed_longest_prefix_recovery_from_bytes(bytes(blob))
+            if _has_npts(rec):
+                st += rec
+                if recovery_events is not None:
+                    recovery_events.append("per_channel_longest_prefix")
+                if logw:
+                    logw(
+                        "miniSEED per-channel longest-prefix recovery used (SEED id %s, %d bytes).",
+                        _sid,
+                        len(blob),
+                    )
     return st
 
 
@@ -822,7 +973,11 @@ def _merge_mseed_streams_demux_prefers_demux(
     return out
 
 
-def _read_mseed_demultiplex(path: str, logger: logging.Logger | None = None):
+def _read_mseed_demultiplex(
+    path: str,
+    logger: logging.Logger | None = None,
+    recovery_events: list | None = None,
+):
     """Split multiplexed miniSEED into per-channel blobs and decode."""
     import obspy
 
@@ -838,20 +993,31 @@ def _read_mseed_demultiplex(path: str, logger: logging.Logger | None = None):
         return obspy.Stream()
     if not blobs:
         return obspy.Stream()
-    return _read_mseed_from_partition_blobs(blobs)
+    return _read_mseed_from_partition_blobs(
+        blobs, logger=logger, recovery_events=recovery_events
+    )
 
 
-def _read_mseed_best_effort(path: str, logger: logging.Logger | None = None):
+def _read_mseed_best_effort(
+    path: str,
+    logger: logging.Logger | None = None,
+    report: dict | None = None,
+):
     """
     Load an entire miniSEED file (no ``starttime`` / ``endtime`` at read).
     Used when splitting per-station archives into time windows; windowed reads
     often worsen Steim1 edge cases. Tries ``reclen`` hints, merges with a
     physical-record demultiplex pass (so all components survive marginal Steim),
     then per-SEED-id reads for any channels still missing vs. head-only scan.
+
+    If *report* is a dict, it is filled with decoded vs header sample counts and a
+    quality label: ``CLEAN`` (strict path, full header length), ``RECOVERED``
+    (fallback / prefix recovery / shorter than header), or ``FAILED``.
     """
     import obspy
 
     logw = logger.warning if logger else None
+    recovery_events: list[str] = []
     last_err: Exception | None = None
     st_direct = obspy.Stream()
     for kw in (
@@ -869,7 +1035,9 @@ def _read_mseed_best_effort(path: str, logger: logging.Logger | None = None):
             last_err = e
             st_direct = obspy.Stream()
 
-    st_demux = _read_mseed_demultiplex(path, logger=logger)
+    st_demux = _read_mseed_demultiplex(
+        path, logger=logger, recovery_events=recovery_events
+    )
     out = _merge_mseed_streams_demux_prefers_demux(st_direct, st_demux)
 
     try:
@@ -919,6 +1087,53 @@ def _read_mseed_best_effort(path: str, logger: logging.Logger | None = None):
             )
 
     if len(out) == 0:
+        # Last resort: auto-detect / looser read (some volumes decode here when the
+        # reclen-tuned MSEED path and physical demux both return nothing).
+        def _nonempty_traces(st):
+            return obspy.Stream(
+                traces=[
+                    tr
+                    for tr in st
+                    if int(getattr(tr.stats, "npts", 0) or 0) > 0
+                ]
+            )
+
+        try:
+            cand = _nonempty_traces(obspy.read(path))
+            if len(cand) > 0:
+                out = cand
+                recovery_events.append("loose_obspy_read")
+        except Exception:
+            pass
+    if len(out) == 0:
+        try:
+            cand = obspy.read(path, format="MSEED", check_compression=False)
+            cand = obspy.Stream(
+                traces=[
+                    tr
+                    for tr in cand
+                    if int(getattr(tr.stats, "npts", 0) or 0) > 0
+                ]
+            )
+            if len(cand) > 0:
+                out = cand
+                recovery_events.append("loose_check_compression")
+        except TypeError:
+            pass
+        except Exception:
+            pass
+    if len(out) == 0:
+        rec = _read_mseed_longest_prefix_recovery(path)
+        if len(rec) > 0:
+            out = rec
+            recovery_events.append("whole_file_longest_prefix")
+            if logw:
+                logw(
+                    "miniSEED longest-prefix recovery used for %s (strict full-file decode failed; "
+                    "using largest decodable prefix - data may be shorter than headers imply).",
+                    os.path.basename(path),
+                )
+    if len(out) == 0:
         if logw:
             logw(
                 "Could not decode miniSEED %s; skipping this file "
@@ -926,11 +1141,38 @@ def _read_mseed_best_effort(path: str, logger: logging.Logger | None = None):
                 path,
                 last_err,
             )
+
+    decoded = _sum_stream_npts(out)
+    expected = _sum_stream_npts(heads) if len(heads) > 0 else None
+    tags = list(recovery_events)
+    if decoded > 0 and expected is not None and expected > 0 and decoded < expected:
+        tags.append("decoded_shorter_than_header")
+    if decoded == 0:
+        quality = "FAILED"
+        if "decode_failed" not in tags:
+            tags.append("decode_failed")
+    elif tags:
+        quality = "RECOVERED"
+    else:
+        quality = "CLEAN"
+    if report is not None:
+        report.update(
+            {
+                "path": os.path.abspath(path),
+                "basename": os.path.basename(path),
+                "expected_header_samples": expected,
+                "decoded_samples": decoded,
+                "quality": quality,
+                "recovery_tags": tags,
+            }
+        )
     return out
 
 
 def read_station_waveform_file(
-    path: str, logger: logging.Logger | None = None
+    path: str,
+    logger: logging.Logger | None = None,
+    report: dict | None = None,
 ):
     """
     Read one per-station waveform for picking. miniSEED uses Steim-tolerant
@@ -940,8 +1182,41 @@ def read_station_waveform_file(
 
     low = (path or "").lower()
     if low.endswith(".mseed") or low.endswith(".ms") or low.endswith(".seed"):
-        return _read_mseed_best_effort(path, logger=logger)
-    return obspy.read(path)
+        return _read_mseed_best_effort(path, logger=logger, report=report)
+    st = obspy.read(path)
+    if report is not None:
+        dec = _sum_stream_npts(st)
+        report.update(
+            {
+                "path": os.path.abspath(path),
+                "basename": os.path.basename(path),
+                "expected_header_samples": dec,
+                "decoded_samples": dec,
+                "quality": "CLEAN",
+                "recovery_tags": [],
+            }
+        )
+    return st
+
+
+def merge_mseed_stream_after_read(temp_st) -> None:
+    """
+    Merge gaps/overlaps after reading one miniSEED file into *temp_st* (in place).
+
+    Prefer ``merge(method=1, fill_value=0)``; on failure (common with marginal Steim
+    overlaps), fall back to ``merge(fill_value=0)``. Used by the driver preload,
+    EQCCT numpy path, and :func:`~eqcctpro.seisbench_models.mseed2stream_3c`.
+    """
+    try:
+        temp_st.merge(method=1, fill_value=0)
+    except Exception:
+        try:
+            temp_st.merge(fill_value=0)
+        except Exception:
+            try:
+                temp_st.merge(method=0, fill_value=0)
+            except Exception:
+                pass
 
 
 def _raise_single_combined_mseed_not_supported(path: str) -> None:
@@ -1878,16 +2153,22 @@ and parallel_predict.
 """
 def remove_output_subdirs(output_dir: str, logger: logging.Logger | None = None) -> None:
     """
-    Delete any *_outputs subdirectories in `output_dir`. 
-    Logs via `logger` if provided; otherwise falls back to print.
+    Delete any ``*_outputs`` directories under ``output_dir`` (including under
+    per-timechunk subfolders written by mseed_predictor).
+    Logs via ``logger`` if provided; otherwise falls back to print.
     """
     try:
-        for name in os.listdir(output_dir):
-            path = os.path.join(output_dir, name)
-            if os.path.isdir(path) and name.endswith("_outputs"):
-                shutil.rmtree(path, ignore_errors=True)
-                msg = f"Removed subdirectory: {path}"
-                (logger.info if logger else print)(msg)
+        if not os.path.isdir(output_dir):
+            return
+        to_remove: list[str] = []
+        for root, dirs, _ in os.walk(output_dir, topdown=False):
+            for name in dirs:
+                if name.endswith("_outputs"):
+                    to_remove.append(os.path.join(root, name))
+        for path in to_remove:
+            shutil.rmtree(path, ignore_errors=True)
+            msg = f"Removed subdirectory: {path}"
+            (logger.info if logger else print)(msg)
     except Exception as e:
         msg = f"Failed to remove output subdirs in {output_dir}: {e}"
         (logger.error if logger else print)(msg)

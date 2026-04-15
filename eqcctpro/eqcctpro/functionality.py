@@ -327,45 +327,137 @@ class RunEQCCTPro():
         self.logger.info(f"------- Starting EQCCTPro... -------")
         self.logger.info(f"Detailed subprocess information can be found in the log file.")
         self.logger.info("")
-        for i in range(len(self.tasks_picker)):
-            mseed_timechunk_dir_name = self.tasks_picker[i][1]
-            timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
-        
-            # Concurrent Timechunks 
-            while True: 
-                if len(tasks_queue) < max_pending_tasks: 
-                    tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_queue=self.log_queue, 
-                                        P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                        overwrite=self.overwrite,
-                                        number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=self.cpu_id_list, use_gpu=self.use_gpu, 
-                                        gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, specific_stations=specific_stations_list, 
-                                        stations2use=self.stations2use,
-                                        timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
-                                        number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time,
-                                        intra_threads=self.intra_threads, inter_threads=self.inter_threads,
-                                        model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
-                                        seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
-                                        ram_safety_cap=self.ram_safety_cap,
-                                        cudnn_headroom=self.cudnn_headroom,
-                                        ripper=self.ripper,
-                                        ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
-                                        ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
-                                        waveform_filter_type=self.waveform_filter_type,
-                                        waveform_filter_freqmin=self.waveform_filter_freqmin,
-                                        waveform_filter_freqmax=self.waveform_filter_freqmax,
-                                        waveform_filter_corners=self.waveform_filter_corners,
-                                        waveform_filter_zerophase=self.waveform_filter_zerophase,
-                                        pick_output_format=self.pick_output_format,
-                                        ascii_station_pick_format=self.ascii_station_pick_format,
-                                        analysis_window_start_str=self.start_time,
-                                        analysis_window_end_str=self.end_time))
-                    break
-                
-                else: # If there are more tasks than maximum, just process them
-                    tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-                    for finished_task in tasks_finished:
-                        log_entry = ray.get(finished_task)
-                        log_queue.put(log_entry)  # Add log entry to the queue
+
+        use_modelactor_sequential_chunks = not self.ripper and len(self.tasks_picker) > 1
+        if use_modelactor_sequential_chunks:
+            if max_pending_tasks > 1:
+                self.logger.info(
+                    "ModelActor mode with %s timechunks: using one Ray worker for all chunks so the "
+                    "ModelActor pool stays loaded (ignoring number_of_concurrent_timechunk_predictions=%s "
+                    "for chunk-level parallelism). Chunks run back-to-back inside that worker.",
+                    len(self.tasks_picker),
+                    max_pending_tasks,
+                )
+            else:
+                self.logger.info(
+                    "ModelActor mode: submitting one worker that reuses the same actor pool across "
+                    "all %s timechunk(s).",
+                    len(self.tasks_picker),
+                )
+            seq_specs = [
+                (
+                    os.path.join(self.input_dir, self.tasks_picker[i][1]),
+                    self.tasks_picker[i][1],
+                )
+                for i in range(len(self.tasks_picker))
+            ]
+            cdir0, cid0 = seq_specs[0]
+            tasks_queue.append(
+                mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                    input_dir=cdir0,
+                    output_dir=self.output_dir,
+                    log_queue=self.log_queue,
+                    P_threshold=self.P_threshold,
+                    S_threshold=self.S_threshold,
+                    p_model=self.p_model_filepath,
+                    s_model=self.s_model_filepath,
+                    overwrite=self.overwrite,
+                    number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions,
+                    ray_cpus=self.cpu_id_list,
+                    use_gpu=self.use_gpu,
+                    gpu_id=self.selected_gpus,
+                    gpu_memory_limit_mb=self.vram_mb,
+                    specific_stations=specific_stations_list,
+                    stations2use=self.stations2use,
+                    timechunk_id=cid0,
+                    waveform_overlap=self.waveform_overlap,
+                    total_timechunks=len(self.tasks_picker),
+                    number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions,
+                    total_analysis_time=total_analysis_time,
+                    intra_threads=self.intra_threads,
+                    inter_threads=self.inter_threads,
+                    model_type=self.model_type,
+                    seisbench_parent_model=self.seisbench_parent_model,
+                    seisbench_child_model=self.seisbench_child_model,
+                    Detection_threshold=self.Detection_threshold,
+                    ram_safety_cap=self.ram_safety_cap,
+                    cudnn_headroom=self.cudnn_headroom,
+                    ripper=self.ripper,
+                    ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
+                    ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                    waveform_filter_type=self.waveform_filter_type,
+                    waveform_filter_freqmin=self.waveform_filter_freqmin,
+                    waveform_filter_freqmax=self.waveform_filter_freqmax,
+                    waveform_filter_corners=self.waveform_filter_corners,
+                    waveform_filter_zerophase=self.waveform_filter_zerophase,
+                    pick_output_format=self.pick_output_format,
+                    ascii_station_pick_format=self.ascii_station_pick_format,
+                    analysis_window_start_str=self.start_time,
+                    analysis_window_end_str=self.end_time,
+                    sequential_timechunk_specs=seq_specs,
+                )
+            )
+        else:
+            for i in range(len(self.tasks_picker)):
+                mseed_timechunk_dir_name = self.tasks_picker[i][1]
+                timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+
+                # Concurrent Timechunks
+                while True:
+                    if len(tasks_queue) < max_pending_tasks:
+                        tasks_queue.append(
+                            mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                                input_dir=timechunk_dir_path,
+                                output_dir=self.output_dir,
+                                log_queue=self.log_queue,
+                                P_threshold=self.P_threshold,
+                                S_threshold=self.S_threshold,
+                                p_model=self.p_model_filepath,
+                                s_model=self.s_model_filepath,
+                                overwrite=self.overwrite,
+                                number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions,
+                                ray_cpus=self.cpu_id_list,
+                                use_gpu=self.use_gpu,
+                                gpu_id=self.selected_gpus,
+                                gpu_memory_limit_mb=self.vram_mb,
+                                specific_stations=specific_stations_list,
+                                stations2use=self.stations2use,
+                                timechunk_id=mseed_timechunk_dir_name,
+                                waveform_overlap=self.waveform_overlap,
+                                total_timechunks=len(self.tasks_picker),
+                                number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions,
+                                total_analysis_time=total_analysis_time,
+                                intra_threads=self.intra_threads,
+                                inter_threads=self.inter_threads,
+                                model_type=self.model_type,
+                                seisbench_parent_model=self.seisbench_parent_model,
+                                seisbench_child_model=self.seisbench_child_model,
+                                Detection_threshold=self.Detection_threshold,
+                                ram_safety_cap=self.ram_safety_cap,
+                                cudnn_headroom=self.cudnn_headroom,
+                                ripper=self.ripper,
+                                ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
+                                ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                                waveform_filter_type=self.waveform_filter_type,
+                                waveform_filter_freqmin=self.waveform_filter_freqmin,
+                                waveform_filter_freqmax=self.waveform_filter_freqmax,
+                                waveform_filter_corners=self.waveform_filter_corners,
+                                waveform_filter_zerophase=self.waveform_filter_zerophase,
+                                pick_output_format=self.pick_output_format,
+                                ascii_station_pick_format=self.ascii_station_pick_format,
+                                analysis_window_start_str=self.start_time,
+                                analysis_window_end_str=self.end_time,
+                            )
+                        )
+                        break
+
+                    else:  # If there are more tasks than maximum, just process them
+                        tasks_finished, tasks_queue = ray.wait(
+                            tasks_queue, num_returns=1, timeout=None
+                        )
+                        for finished_task in tasks_finished:
+                            log_entry = ray.get(finished_task)
+                            log_queue.put(log_entry)  # Add log entry to the queue
 
         # After adding all the tasks to queue, process what's left
         while tasks_queue:

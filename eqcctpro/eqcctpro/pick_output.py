@@ -36,9 +36,136 @@ ASCII_RUN_SUMMARY_COLUMNS = (
     "N_S_picks",
     "Model_name",
     "Detection_Confidence_Threshold",
+    "Expected_Header_Samples",
+    "Decoded_Samples",
+    "MSEED_errors",
 )
 
+# Tag keys from :func:`~eqcctpro.tools._read_mseed_best_effort` reports (and ``decode_failed``).
+# Shown in ``MSEED_errors`` column; full text in docs: ``docs/summary_results_mseed_columns.md``.
+MSEED_ERROR_TAG_GLOSSARY: dict[str, str] = {
+    "per_channel_longest_prefix": (
+        "Physical-record demux path used longest-prefix Steim decode for one channel blob "
+        "(marginal Steim / tail corruption)."
+    ),
+    "whole_file_longest_prefix": (
+        "Whole-file strict decode failed; largest decodable physical-record prefix was used "
+        "(data may be shorter than headers imply)."
+    ),
+    "loose_obspy_read": (
+        "Fallback generic obspy.read() succeeded after strict miniSEED paths returned empty."
+    ),
+    "loose_check_compression": (
+        "Fallback obspy.read(..., check_compression=False) was used."
+    ),
+    "decoded_shorter_than_header": (
+        "Sum of decoded samples is less than head-only header npts (partial decode vs. declared length)."
+    ),
+    "decode_failed": (
+        "No samples decoded from this miniSEED file (strict and recovery paths exhausted)."
+    ),
+}
+
+
+def aggregate_station_mseed_for_summary(file_reports: list[dict]) -> dict[str, str]:
+    """
+    Build three display strings for the ASCII summary row from per-file ``report`` dicts
+    (same structure as :func:`~eqcctpro.tools.read_station_waveform_file` miniSEED reports).
+    """
+    if not file_reports:
+        return {
+            "expected_header_samples": "",
+            "decoded_samples": "",
+            "mseed_errors": "no miniSEED files aggregated for this station",
+        }
+    dec_sum = 0
+    exp_sum = 0
+    exp_known = 0
+    tags_acc: set[str] = set()
+    any_failed = False
+    for rep in file_reports:
+        dec_sum += int(rep.get("decoded_samples") or 0)
+        ex = rep.get("expected_header_samples")
+        if ex is not None:
+            exp_sum += int(ex)
+            exp_known += 1
+        q = (rep.get("quality") or "").upper()
+        if q == "FAILED":
+            any_failed = True
+        for t in rep.get("recovery_tags") or []:
+            if t:
+                tags_acc.add(str(t))
+    n = len(file_reports)
+    if exp_known == n:
+        exp_str = str(exp_sum)
+    elif exp_known > 0:
+        exp_str = f"{exp_sum} (partial; {exp_known}/{n} files with header npts)"
+    else:
+        exp_str = "?"
+    dec_str = str(dec_sum)
+    if not tags_acc and not any_failed:
+        err_str = "OK"
+    else:
+        parts = []
+        for code in sorted(tags_acc):
+            gloss = MSEED_ERROR_TAG_GLOSSARY.get(code, code)
+            parts.append(f"{code}: {gloss}")
+        if any_failed and "decode_failed" not in tags_acc:
+            parts.append(
+                "decode_failed: "
+                + MSEED_ERROR_TAG_GLOSSARY["decode_failed"]
+            )
+        err_str = " | ".join(parts)
+    return {
+        "expected_header_samples": exp_str,
+        "decoded_samples": dec_str,
+        "mseed_errors": err_str,
+    }
+
+
+def lookup_station_mseed_summary(args: dict | None, station_name: str) -> dict[str, str] | None:
+    """Return precomputed per-station miniSEED stats from ``args['station_mseed_stats']`` if present."""
+    if not isinstance(args, dict):
+        return None
+    sms = args.get("station_mseed_stats")
+    if not isinstance(sms, dict):
+        return None
+    key = str(station_name).strip()
+    row = sms.get(key)
+    if row is None:
+        row = sms.get(key.upper())
+    return row if isinstance(row, dict) else None
+
 SUMMARY_RESULTS_ASCII = "summary_results.ascii"
+
+MSEED_ERROR_REFERENCE_BASENAME = "mseed_error_tags_reference.txt"
+
+
+def write_mseed_error_reference_beside_summary(summary_results_path: str) -> None:
+    """
+    Write a short tag glossary next to ``summary_results.ascii`` in the same directory
+    (once per directory; no-op if file already exists).
+    """
+    parent = os.path.dirname(os.path.abspath(summary_results_path))
+    if not parent:
+        return
+    ref_path = os.path.join(parent, MSEED_ERROR_REFERENCE_BASENAME)
+    if os.path.isfile(ref_path):
+        return
+    lines = [
+        "EQCCTPro — meanings for tags in the MSEED_errors column of summary_results.ascii",
+        "(same machine-readable keys as driver logs; full notes in docs/summary_results_mseed_columns.md).",
+        "",
+    ]
+    for code, text in sorted(MSEED_ERROR_TAG_GLOSSARY.items()):
+        lines.append(f"{code}")
+        lines.append(f"  {text}")
+        lines.append("")
+    try:
+        with open(ref_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines).rstrip() + "\n")
+    except OSError:
+        pass
 
 
 def resolve_picker_model_label(
@@ -166,9 +293,19 @@ def build_ascii_summary_row_tuple(
     *,
     p_phases: list[str],
     s_phases: list[str],
+    mseed_stats: dict[str, str] | None = None,
 ) -> tuple[str, ...]:
     """One aligned row for :func:`write_ascii_run_summary` (station task builds this)."""
     window = str(args.get("analysis_time_window_str") or "").strip()
+    ms = mseed_stats if mseed_stats is not None else lookup_station_mseed_summary(
+        args, station_name
+    )
+    if ms:
+        exp_s = str(ms.get("expected_header_samples") or "")
+        dec_s = str(ms.get("decoded_samples") or "")
+        err_s = str(ms.get("mseed_errors") or "")
+    else:
+        exp_s, dec_s, err_s = "", "", "not available (no driver preload stats)"
     return (
         str(station_name).strip(),
         window,
@@ -176,6 +313,9 @@ def build_ascii_summary_row_tuple(
         str(len(s_phases)),
         str(args.get("picker_model_label") or ""),
         str(args.get("detection_confidence_threshold") or ""),
+        exp_s,
+        dec_s,
+        err_s,
     )
 
 
@@ -191,8 +331,9 @@ def read_ascii_run_summary_data_rows(path: str) -> list[tuple[str, ...]]:
     rows: list[tuple[str, ...]] = []
     for ln in lines[1:]:
         parts = [p.strip() for p in ln.split(" | ")]
-        if len(parts) >= n:
-            rows.append(tuple(parts[:n]))
+        if len(parts) < n:
+            parts.extend([""] * (n - len(parts)))
+        rows.append(tuple(parts[:n]))
     return rows
 
 

@@ -7,7 +7,11 @@ import random
 import logging
 from pathlib import Path
 
-from eqcctpro.tools import read_station_waveform_file
+from eqcctpro.tools import (
+    merge_mseed_stream_after_read,
+    parent_timechunk_station_waveform_files,
+    read_station_waveform_file,
+)
 from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
 
 class SeisBenchModels:
@@ -176,11 +180,26 @@ def resampling(st, antialias_lowpass_hz=45.0):
     return st
 
 
+def _zero_trace_like(reference: obspy.Trace, channel_suffix: str) -> obspy.Trace:
+    """Same window and sampling rate as ``reference``, data all zeros (SeisBench-style gap fill)."""
+    stats = reference.stats.copy()
+    ch = (stats.channel or "HHX").strip()
+    if len(ch) >= 1:
+        stats.channel = ch[:-1] + channel_suffix
+    else:
+        stats.channel = "HH" + channel_suffix
+    data = np.zeros(reference.stats.npts, dtype=np.float64)
+    return obspy.Trace(data=data, header=stats)
+
+
 def process_raw_station_stream_3c(args, st, station):
     """
     SeisBench preprocessing (taper → bandpass → resample → trim → 3C) from an in-memory
     ObsPy Stream that is already read, merged per file, and demeaned (same state as after
     the file-read loop in mseed2stream_3c). Used with ray.put shared Streams (scmlpick-style).
+
+    Missing E/N/Z components are **zero-filled** by default (aligned with SeisBench
+    ``annotate(..., strict=False)``), unless ``EQCCTPRO_STRICT_3C`` is set.
     """
     if st is None or len(st) == 0:
         raise ValueError(f"No traces for station {station} in shared Stream.")
@@ -278,60 +297,95 @@ def process_raw_station_stream_3c(args, st, station):
                 continue
         break
 
-    missing_components = []
-    if trZ is None:
-        missing_components.append("Z")
-    if trE is None:
-        missing_components.append("E (or 1)")
-    if trN is None:
-        missing_components.append("N (or 2)")
+    def _recompute_missing():
+        m = []
+        if trZ is None:
+            m.append("Z")
+        if trE is None:
+            m.append("E (or 1)")
+        if trN is None:
+            m.append("N (or 2)")
+        return m
+
+    missing_components = _recompute_missing()
 
     _strict_3c = os.environ.get("EQCCTPRO_STRICT_3C", "").lower() in (
         "1",
         "true",
         "yes",
     )
-    # Steim / partial decodes often leave only vertical (or N+Z). PhaseNet still
-    # needs three inputs; duplicate an available trace with an explicit warning.
-    if missing_components and not _strict_3c:
-        logw = logging.getLogger("eqcctpro").warning
-        if trE is None and trN is not None and trZ is not None:
-            logw(
-                "Station %s: east component missing; using north trace as synthetic E for PhaseNet (degraded picks).",
-                station,
-            )
-            trE = trN.copy()
-        elif trN is None and trE is not None and trZ is not None:
-            logw(
-                "Station %s: north component missing; using east trace as synthetic N for PhaseNet (degraded picks).",
-                station,
-            )
-            trN = trE.copy()
-        elif trE is None and trN is None and trZ is not None:
-            logw(
-                "Station %s: only vertical decoded; using Z as synthetic E and N for PhaseNet (degraded picks).",
-                station,
-            )
-            trE = trZ.copy()
-            trN = trZ.copy()
-        missing_components = []
-        if trZ is None:
-            missing_components.append("Z")
-        if trE is None:
-            missing_components.append("E (or 1)")
-        if trN is None:
-            missing_components.append("N (or 2)")
 
-    if missing_components and len(st) == 3 and not _strict_3c:
+    if missing_components and _strict_3c:
+        available_channels = [tr.stats.channel for tr in st]
+        raise ValueError(
+            f"Missing required components for station {station}: {', '.join(missing_components)}. "
+            f"Available channels: {available_channels}. "
+            f"Unset EQCCTPRO_STRICT_3C to zero-fill missing components (SeisBench strict=False), "
+            f"or supply E/N/Z (or 1/2/Z) data."
+        )
+
+    if (
+        missing_components
+        and len(st) >= 3
+        and not _strict_3c
+        and trE is None
+        and trN is None
+        and trZ is None
+    ):
         chans = [tr.stats.channel for tr in st]
         logging.getLogger("eqcctpro").warning(
             "Station %s: could not map ENZ from channel names %s; "
-            "using lexicographic order as E, N, Z for PhaseNet (set EQCCTPRO_STRICT_3C=1 to forbid).",
+            "using first three traces in lexicographic channel order as E, N, Z "
+            "(set EQCCTPRO_STRICT_3C=1 to forbid).",
             station,
             chans,
         )
         ordered = sorted(list(st), key=lambda t: (t.stats.channel or "").upper())
         trE, trN, trZ = ordered[0], ordered[1], ordered[2]
+        missing_components = _recompute_missing()
+
+    # No component mapped by last letter / code list (e.g. odd channel names): assign 1–2 traces by sort order.
+    if (
+        missing_components
+        and not _strict_3c
+        and trE is None
+        and trN is None
+        and trZ is None
+        and 1 <= len(st) < 3
+    ):
+        ordered = sorted(list(st), key=lambda t: (t.stats.channel or "").upper())
+        if len(ordered) == 1:
+            trE = ordered[0].copy()
+        else:
+            trE, trN = ordered[0].copy(), ordered[1].copy()
+        missing_components = _recompute_missing()
+
+    if missing_components and not _strict_3c:
+        template = trE or trN or trZ or (st[0] if len(st) else None)
+        if template is None:
+            available_channels = [tr.stats.channel for tr in st]
+            raise ValueError(
+                f"No template trace to align zero-fill for station {station}. "
+                f"Available channels: {available_channels}."
+            )
+        log = logging.getLogger("eqcctpro")
+        filled_labels = []
+        if trE is None:
+            trE = _zero_trace_like(template, "E")
+            filled_labels.append("E")
+        if trN is None:
+            trN = _zero_trace_like(template, "N")
+            filled_labels.append("N")
+        if trZ is None:
+            trZ = _zero_trace_like(template, "Z")
+            filled_labels.append("Z")
+        if filled_labels:
+            log.warning(
+                "Station %s: zero-filled missing component(s) %s (same window as observed data; "
+                "matches SeisBench annotate(strict=False)).",
+                station,
+                ", ".join(filled_labels),
+            )
         missing_components = []
 
     if missing_components:
@@ -339,7 +393,7 @@ def process_raw_station_stream_3c(args, st, station):
         raise ValueError(
             f"Missing required components for station {station}: {', '.join(missing_components)}. "
             f"Available channels: {available_channels}. "
-            f"Please ensure the mSEED files contain 3-component data (E/N/Z or 1/2/Z)."
+            f"Please ensure the mSEED files contain usable component data (E/N/Z or 1/2/Z)."
         )
 
     out = obspy.Stream(traces=[trE.copy(), trN.copy(), trZ.copy()])
@@ -362,7 +416,8 @@ def mseed2stream_3c(args, files_list, station):
     4. Apply bandpass filter (1-45 Hz, or station-specific)
     5. Resample to 100 Hz
     6. Trim to intersection (common time window, no padding)
-    7. Select best 3 components (E/N/Z or 1/2/Z)
+    7. Select best 3 components (E/N/Z or 1/2/Z); missing components are zero-filled
+       unless ``EQCCTPRO_STRICT_3C`` is set (see ``process_raw_station_stream_3c``).
     
     Parameters:
     -----------
@@ -399,18 +454,32 @@ def mseed2stream_3c(args, files_list, station):
 
     # --- 1) Read all input files into one stream ---
     for file in files_list:
-        try:
-            temp_st = read_station_waveform_file(
-                str(file),
-                logger=args.get("logger") if isinstance(args, dict) else None,
-            )
-            temp_st.merge(method=1, fill_value=0)   # merge fragments, fill gaps with zeros
-            temp_st.detrend("demean")
-            if len(temp_st) > 0:
-                st += temp_st
-                files_read += 1
-        except Exception:
-            continue
+        temp_st = read_station_waveform_file(
+            str(file),
+            logger=args.get("logger") if isinstance(args, dict) else None,
+        )
+        merge_mseed_stream_after_read(temp_st)
+        temp_st.detrend("demean")
+        if len(temp_st) > 0:
+            st += temp_st
+            files_read += 1
+
+    if len(st) == 0 and isinstance(args, dict):
+        inp = args.get("input_dir")
+        if inp:
+            chunk_abs = {os.path.abspath(str(p)) for p in files_list}
+            for file in parent_timechunk_station_waveform_files(str(inp), station):
+                if os.path.abspath(str(file)) in chunk_abs:
+                    continue
+                temp_st = read_station_waveform_file(
+                    str(file),
+                    logger=args.get("logger") if isinstance(args, dict) else None,
+                )
+                merge_mseed_stream_after_read(temp_st)
+                temp_st.detrend("demean")
+                if len(temp_st) > 0:
+                    st += temp_st
+                    files_read += 1
 
     if len(st) == 0:
         raise ValueError(
