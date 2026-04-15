@@ -39,6 +39,8 @@ from eqcctpro.pick_output import (
     resolve_picker_model_label,
     write_ascii_run_summary,
     write_mseed_error_reference_beside_summary,
+    refresh_executive_picks_summary,
+    refresh_executive_picks_summary_from_chunk_output_dir,
     write_station_pick_log,
 )
 from eqcctpro.waveform_data_quality import log_known_waveform_quality_issues
@@ -1819,6 +1821,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 merged = merge_ascii_summary_rows(_ascii_summary_path, ripper_ascii_rows)
                 write_ascii_run_summary(_ascii_summary_path, merged)
                 write_mseed_error_reference_beside_summary(_ascii_summary_path)
+                _exec_p = refresh_executive_picks_summary_from_chunk_output_dir(out_dir)
+                if _exec_p:
+                    logger.info("Executive picks summary (all timechunks): %s", _exec_p)
             logger.info("")
             
             # Calculate average model load time
@@ -1846,6 +1851,17 @@ def mseed_predictor(input_dir='downloads_mseeds',
         logger.info(f"------- Parallel Station Waveform Processing Complete [RIPPER MODE] -------")
         end_time = monotonic_s()
         logger.info(f"Picks saved at {out_dir}. Process Runtime: {end_time - start_time:.2f} s")
+        total_trial_time_seconds = end_time - trial_start_time
+        if _pick_norm == "ascii":
+            _picks_root_rip = os.path.join(os.getcwd(), str(output_dir))
+            _exec_final = refresh_executive_picks_summary(
+                _picks_root_rip, total_trial_time_seconds=total_trial_time_seconds
+            )
+            if _exec_final:
+                logger.info(
+                    "Executive picks summary (final, includes total trial time): %s",
+                    _exec_final,
+                )
 
         if testing_gpu is not None: 
             num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else int(len(list(ray_cpus)))
@@ -1860,7 +1876,6 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 model_used = "eqcct"
             
             # Calculate timing metrics for ripper mode
-            total_trial_time_seconds = end_time - trial_start_time
             waveform_processing_time_seconds = end_time - start_time
             
             trial_data = {
@@ -2539,6 +2554,9 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 merged = merge_ascii_summary_rows(_ascii_summary_path, ascii_summary_rows)
                 write_ascii_run_summary(_ascii_summary_path, merged)
                 write_mseed_error_reference_beside_summary(_ascii_summary_path)
+                _exec_p = refresh_executive_picks_summary_from_chunk_output_dir(out_dir)
+                if _exec_p:
+                    logger.info("Executive picks summary (all timechunks): %s", _exec_p)
 
         except Exception as e:
             avg_waveform_load_time = 0.0  # Default if error occurs before collecting any times
@@ -2559,6 +2577,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         return
 
     end_time = monotonic_s()
+    total_trial_time_seconds = end_time - trial_start_time
     if all_waveform_load_times:
         avg_waveform_load_time = sum(all_waveform_load_times) / len(all_waveform_load_times)
     else:
@@ -2585,9 +2604,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # This may be less than number_of_concurrent_station_predictions due to optimal capping
         actual_actors = len(model_actors) if model_actors else 1
         
-        # Calculate timing metrics (end_time is final wall clock; waveform_processing_time_seconds sums all chunks)
-        total_trial_time_seconds = end_time - trial_start_time
-        
+        # total_trial_time_seconds: final wall clock from trial_start_time (set above)
         trial_data = {
             "Trial Number": None,  # Will be auto-filled by append_trial_row
             "Stations Used": str(station_list),
@@ -2617,7 +2634,18 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
         append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
         logger.info(f"Successfully saved trial data to CSV at {test_csv_filepath}")
-        
+
+    if _pick_norm == "ascii":
+        _picks_root_ma = os.path.join(os.getcwd(), str(output_dir))
+        _exec_ma = refresh_executive_picks_summary(
+            _picks_root_ma, total_trial_time_seconds=total_trial_time_seconds
+        )
+        if _exec_ma:
+            logger.info(
+                "Executive picks summary (final, includes total trial time): %s",
+                _exec_ma,
+            )
+
     return "Successfully ran EQCCTPro, exiting..."
 
 
