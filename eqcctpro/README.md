@@ -2,7 +2,7 @@
 
 EQCCTPro is a high-performance seismic event detection and processing framework designed to bridge the gap between deep learning models and large-scale seismic data processing. It natively supports **EQCCT** (TensorFlow) and the **SeisBench** ecosystem (PyTorch), including models like **PhaseNet**, **EQTransformer**, **GPD**, and **CRED**. 
 
-EQCCTPro is engineered for **real-time performance**, identifying the optimal parallelization configurations for your specific hardware (CPU and Multi-GPU) to minimize runtime and maximize station throughput. EQCCTPro has enabled seismic networks, like the Texas Seismological Research Group (TexNet), to enable their DL picking model EQCCT to run operationally, in real-time, over its network of over 250+ seismic stations. More information on the architecture and application of EQCCTPro can be found in our upcoming publication [here](https://github.com/ut-beg-texnet/eqcct/blob/main/eqcctpro/OptimizedEQCCT_Paper.pdf).
+EQCCTPro is engineered for **real-time performance**, identifying the optimal parallelization configurations for your specific hardware (CPU and Multi-GPU) to minimize runtime and maximize station throughput. EQCCTPro has enabled seismic networks, like the Texas Seismological Research Group (TexNet), to enable their DL picking model EQCCT to run operationally, in real-time, over its network of over 250+ seismic stations. More information on the architecture and application of EQCCTPro can be found in our upcoming publication [here](RAPID__A_Generalized_High_Performance_Parallelization_Framework_for_Real_Time_Deep_Learning_Seismic_Phase_Picking%20(1).pdf).
 
 ## **Project Structure**
 
