@@ -1,0 +1,2795 @@
+#!/usr/bin/env python3
+
+"""
+Copyright (C) by TexNet/CISR
+Created on Jul 31 2024
+Author of the Software: Camilo Munoz
+"""
+
+import logging as stdlogging
+from logging.handlers import RotatingFileHandler
+import os
+# os.environ["RAY_DEDUP_LOGS"] = "0"
+import sys, ray, time, traceback, glob, re, math
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+from seiscomp.client import StreamApplication, Inventory, Protocol
+from seiscomp.datamodel import Pick, TimeQuantity, WaveformStreamID, Phase, NotifierMessage, Notifier, OP_ADD, OP_UPDATE, PickReference, Comment, CreationInfo, Origin, EventParameters
+import seiscomp.datamodel as dm
+from seiscomp.core import Time, FloatArray
+from seiscomp import logging, geo
+from obspy import Stream, Trace, UTCDateTime, read
+from pathlib import Path
+from itertools import product, count
+import seiscomp.io
+from seiscomp.system import Environment
+import multiprocessing as mp
+from multiprocessing import Value
+from predictor import mseed_predictor, mseed_predictor_seisbench
+# EQCCT / SeisBench: eqcctpro ModelActor & SeisBenchModelActor pools (see _spawn_inference_actor_pools).
+import fnmatch
+import psutil
+import threading
+import queue
+from queue import PriorityQueue, Empty
+from collections import Counter
+from ray.runtime_context import get_runtime_context
+from collections import defaultdict
+# _print_counts = defaultdict(int)
+# import main_picks as picks2xml
+
+class scmlpick(StreamApplication):
+
+    # _REGISTRY_HANDLE = None
+    # _REGISTRY_LOCK = threading.Lock()
+
+    def __init__(self, argc, argv):
+        StreamApplication.__init__(self, argc, argv)
+        self.setDatabaseEnabled(True, True)
+        self.setPrimaryMessagingGroup(Protocol.LISTENER_GROUP)
+        self.setMessagingEnabled(True)
+        self.setLoadInventoryEnabled(True)
+        self.setLoadConfigModuleEnabled(True)
+
+        self.ei = Environment.Instance()
+        self.initStreams = []
+        self.streams = []
+        self.stream = Stream()
+        self.streamPick = Stream()
+        # self.delayStream = Stream()
+        self.stasDict = {}
+        self.stasPick = set()
+        self.delayStasPick = set()
+        self.staSend = []
+        # self.delayStaSend = []
+        self.wait = False
+        self.sendNow = False
+        # Shared list of task IDs
+        self.tasks_ids = []
+        self.profiles = []
+        self.bindings = []
+        # Control variable to stop monitoring when there are no more tasks
+        self.tasks_ids_end = threading.Event()
+        self.task_queue = queue.Queue()
+        self.last_queue_size = 0
+        # self.numWorkers = 4
+        self.all_station_codes = []
+        self.playback = False
+        self.mseed = False
+        #self.seen_stations = set()
+
+    def createCommandLineDescription(self):
+        self.commandline().addGroup("ray")
+        self.commandline().addIntOption("ray", "cpu-number", "Specify the number of CPUs available for Ray to use.")
+        self.commandline().addIntOption("ray", "max-tasks", "Maximum number of tasks that are sent to the predictor at the same time")
+        self.commandline().addStringOption(
+            "ray",
+            "inference-mode",
+            "EQCCT backend: modelActor (persistent ModelActors) or ripper (load weights per picker task). Overrides ray.inferenceMode.",
+        )
+        self.commandline().addStringOption(
+            "ray",
+            "gpu-devices",
+            "Comma-separated CUDA device IDs for Ray/TensorFlow (e.g. 0 or 0,1). Overrides ray.gpuDeviceIds / eqcct.gpuID.",
+        )
+        self.commandline().addIntOption(
+            "ray",
+            "num-model-actors",
+            "Number of eqcctpro ModelActors (0 = auto from maxTasksQueue and GPUs). Overrides ray.numModelActors.",
+        )
+        self.commandline().addGroup("mode")
+        self.commandline().addOption("mode", "playback", "run in playback mode to disable real time functionality. This mode requires profile, start, end and waveform-source parameters")
+        self.commandline().addGroup("waveform-source")
+        self.commandline().addOption("waveform-source", "recordstream", "Run playback using data from the recordstream.  This mode requires start and end parameters")
+        self.commandline().addStringOption("waveform-source", "mseed-files", "Run playback using data from mseed files. You can specify an individual mseed file or a directory containing multiple files. This mode requires both start and end parameters")
+        self.commandline().addGroup("playback")
+        self.commandline().addStringOption("playback", "profile", "Specify the name of the profile. This parameter is required to run in playback mode.")
+        self.commandline().addStringOption("playback", "start", "Start datetime for querying the waveform source. Format: %Y-%m-%d %H:%M:%S. This parameter is required to run in playback mode.")
+        self.commandline().addStringOption("playback", "end", "End datetime for querying the waveform source. Format: %Y-%m-%d %H:%M:%S. This parameter is required to run in playback mode.")
+        self.commandline().addGroup("output")
+        self.commandline().addOption("output", "database", "Send results to the seiscomp database.")
+        self.commandline().addStringOption("output", "output-file", "Dump results to a XML file. This parameter is only allowed when running in playback mode. Specify the output file path")
+        return True
+
+    def validateParameters(self):
+        if StreamApplication.validateParameters(self) == False:
+            return False
+        if self.commandline().hasOption("playback") and not (self.commandline().hasOption("mseed-files") or self.commandline().hasOption("recordstream")):
+            logging.error("Need to declare waveform-source parameter")
+            return False
+        if self.commandline().hasOption("playback") and not self.commandline().hasOption("profile"):
+            logging.error("Need to declare profile parameter")
+            return False
+        if self.commandline().hasOption("playback") and not self.commandline().hasOption("start"):
+            logging.error("Need to declare start parameter")
+            return False
+        if self.commandline().hasOption("playback") and not self.commandline().hasOption("end"):
+            logging.error("Need to declare end parameter")
+            return False
+        if self.commandline().hasOption("playback") and not self.commandline().hasOption("output-file"):
+            logging.error("Need to declare output-file parameter")
+            return False
+        return True
+
+    def initConfiguration(self):
+        """
+        Read configuration file.
+        """
+        if not StreamApplication.initConfiguration(self):
+            return False
+        # try:
+        #     self.stations = self.configGetStrings("stations")
+        # except Exception as e:
+        #     logging.info('List of stations could not be read: %s' % e)
+        try:
+            self.whiteChanns = self.configGetStrings("whiteChanns")
+        except Exception as e:
+            logging.info('whiteChanns could not be read: %s' % e)
+        try:
+            temp_eqcct_Pmodel = self.configGetString('eqcct.Pmodel')
+            self.eqcct_Pmodel = temp_eqcct_Pmodel.replace("@DATADIR@", self.ei.shareDir())
+        except Exception as e:
+            logging.info('P model could not be read : %s' % e)
+        try:
+            temp_eqcct_Smodel = self.configGetString('eqcct.Smodel')
+            self.eqcct_Smodel = temp_eqcct_Smodel.replace("@DATADIR@", self.ei.shareDir())
+        except Exception as e:
+            logging.info('S model could not be read : %s' % e)
+        try:
+            self.windowLength = self.configGetInt('eqcct.windowLength')
+        except Exception as e:
+            logging.info('windowLength could not be read : %s' % e)
+        try:
+            self.filterShift = self.configGetDouble('eqcct.filterShift')
+        except Exception as e:
+            logging.info('filterShift could not be read : %s' % e)
+        try:
+            self.probThreshold = self.configGetDouble('eqcct.probThreshold')
+        except Exception as e:
+            logging.info('probThreshold could not be read : %s' % e)
+        try:
+            self.timeShift = self.configGetInt('eqcct.timeShift')
+        except Exception as e:
+            logging.info('timeShift could not be read : %s' % e)
+        try:
+            self.minStasBulk = self.configGetInt('eqcct.minStasBulk')
+        except Exception as e:
+            logging.info('minStasBulk could not be read : %s' % e)
+        try:
+            self.minDelayStasBulk = self.configGetInt('eqcct.minDelayStasBulk')
+        except Exception as e:
+            logging.info('minDelayStasBulk could not be read : %s' % e)
+        try:
+            self.firstWait = self.configGetInt('eqcct.firstWait')
+        except Exception as e:
+            logging.info('firstWait could not be read : %s' % e)
+        try:
+            self.secondWait = self.configGetInt('eqcct.secondWait')
+        except Exception as e:
+            logging.info('secondWait could not be read : %s' % e)
+        try:
+            self.maxWait = self.configGetInt('eqcct.maxWait')
+        except Exception as e:
+            logging.info('maxWait could not be read : %s' % e)
+        try:
+            self.startLatency = self.configGetInt('eqcct.startLatency')
+        except Exception as e:
+            logging.info('startLatency could not be read : %s' % e)
+        try:
+            self.timeRemoveTrace = self.configGetInt('eqcct.timeRemoveTrace')
+        except Exception as e:
+            logging.info('timeRemoveTrace could not be read : %s' % e)
+        try:
+            self.traceDelay = self.configGetInt('eqcct.traceDelay')
+        except Exception as e:
+            logging.info('traceDelay could not be read : %s' % e)
+
+
+
+        #EQCCT
+        try:
+            self.eqcctPthr = self.configGetDouble('eqcct.eqcctPthr')
+        except Exception as e:
+            logging.info('eqcctPthr could not be read : %s' % e)
+        try:
+            self.eqcctSthr = self.configGetDouble('eqcct.eqcctSthr')
+        except Exception as e:
+            logging.info('eqcctSthr could not be read : %s' % e)
+        try:
+            self.eqcctOverlap = self.configGetInt('eqcct.eqcctOverlap')
+        except Exception as e:
+            logging.info('eqcctOverlap could not be read : %s' % e)
+        try:
+            self.eqcctBatchSize = self.configGetInt('eqcct.eqcctBatchSize')
+        except Exception as e:
+            logging.info('eqcctBatchSize could not be read : %s' % e)
+        try:
+            self.gpuID = self.configGetInt('eqcct.gpuID')
+        except Exception as e:
+            logging.info('gpuID could not be read : %s' % e)
+        try:
+            self.gpuLimit = self.configGetInt('eqcct.gpuLimit')
+        except Exception as e:
+            logging.info('gpuLimit could not be read : %s' % e)
+        try:
+            self.default_picker_model = self.configGetString("eqcct.defaultPickerModel").strip()
+        except Exception as e:
+            logging.info("eqcct.defaultPickerModel could not be read (default EQCCT): %s", e)
+            self.default_picker_model = "EQCCT"
+        try:
+            self.detection_threshold = float(self.configGetDouble("eqcct.detectionThreshold"))
+        except Exception as e:
+            logging.info("eqcct.detectionThreshold could not be read (default 0.3): %s", e)
+            self.detection_threshold = 0.3
+
+        # EQCCTPro-aligned ObsPy waveform filter (prepare_station_chunk); bindings still set hp/lp (or BW corners).
+        self.waveform_filter_type = "bandpass"
+        self.waveform_filter_corners = 2
+        self.waveform_filter_zerophase = True
+        try:
+            self.waveform_filter_type = self.configGetString("eqcct.waveformFilterType").strip()
+        except Exception as e:
+            logging.info("eqcct.waveformFilterType could not be read (default bandpass): %s", e)
+        try:
+            self.waveform_filter_corners = int(self.configGetInt("eqcct.waveformFilterCorners"))
+        except Exception as e:
+            logging.info("eqcct.waveformFilterCorners could not be read (default 2): %s", e)
+        try:
+            self.waveform_filter_zerophase = bool(self.configGetBool("eqcct.waveformFilterZerophase"))
+        except Exception as e:
+            logging.info("eqcct.waveformFilterZerophase could not be read (default true): %s", e)
+
+        self.profilesConfig()
+
+        #RAY
+        try:
+            self.numCPUs = self.configGetInt('ray.numCPUs')
+        except Exception as e:
+            logging.info('numCPUs could not be read : %s' % e)
+
+        try:
+            self.maxTimeTasksQueue = self.configGetInt('ray.maxTimeTasksQueue')
+        except Exception as e:
+            logging.info('maxTimeTasksQueue could not be read : %s' % e)
+
+        try:
+            self.maxTasksQueue = self.configGetInt('ray.maxTasksQueue')
+        except Exception as e:
+            logging.info('maxTasksQueue could not be read : %s' % e)
+
+        try:
+            self.numWorkers = self.configGetInt('ray.numWorkers')
+        except Exception as e:
+            logging.info('numWorkers could not be read : %s' % e)
+
+        # EQCCTPro: Ripper vs Model-Actor, GPU device list, actor count, memory (ray.* + eqcct.gpuID)
+        self.inference_mode = "model_actor"
+        self.num_model_actors_config = 0
+        self.ray_gpu_device_ids = []
+        self.actor_gpu_memory_limit_mb = 0
+        self.ripper_gpu_memory_limit_mb = 0
+        try:
+            _mode = self.configGetString("ray.inferenceMode").strip().lower()
+            if _mode in ("ripper", "task", "per-task", "legacy"):
+                self.inference_mode = "ripper"
+            else:
+                self.inference_mode = "model_actor"
+        except Exception as e:
+            logging.info("ray.inferenceMode could not be read (default modelActor): %s", e)
+        try:
+            self.num_model_actors_config = int(self.configGetInt("ray.numModelActors"))
+        except Exception as e:
+            logging.info("ray.numModelActors could not be read (default 0=auto): %s", e)
+        try:
+            _gstr = self.configGetString("ray.gpuDeviceIds").strip()
+        except Exception as e:
+            _gstr = ""
+            logging.info("ray.gpuDeviceIds could not be read: %s", e)
+        if _gstr:
+            try:
+                self.ray_gpu_device_ids = [int(x.strip()) for x in _gstr.split(",") if x.strip() != ""]
+            except ValueError as e:
+                logging.error("ray.gpuDeviceIds must be comma-separated integers (e.g. 0,1): %s", e)
+                self.ray_gpu_device_ids = []
+        elif self.gpuID >= 0:
+            self.ray_gpu_device_ids = [int(self.gpuID)]
+        try:
+            self.actor_gpu_memory_limit_mb = int(self.configGetInt("ray.actorGpuMemoryLimitMB"))
+        except Exception as e:
+            logging.info("ray.actorGpuMemoryLimitMB could not be read: %s", e)
+        try:
+            self.ripper_gpu_memory_limit_mb = int(self.configGetInt("ray.ripperGpuMemoryLimitMB"))
+        except Exception as e:
+            logging.info("ray.ripperGpuMemoryLimitMB could not be read: %s", e)
+
+        #qcheck
+        try:
+            self.latUncTHR = self.configGetInt('qcheck.latUncTHR')
+        except Exception as e:
+            logging.info('latUncTHR could not be read : %s' % e)
+
+        try:
+            self.lonUncTHR = self.configGetInt('qcheck.lonUncTHR')
+        except Exception as e:
+            logging.info('lonUncTHR could not be read : %s' % e)
+
+        try:
+            self.depthUncTHR = self.configGetInt('qcheck.depthUncTHR')
+        except Exception as e:
+            logging.info('depthUncTHR could not be read : %s' % e)
+
+        try:
+            self.depthTHR = self.configGetInt('qcheck.depthTHR')
+        except Exception as e:
+            logging.info('depthTHR could not be read : %s' % e)
+
+        try:
+            self.azGapTHR = self.configGetInt('qcheck.azGapTHR')
+        except Exception as e:
+            logging.info('azGapTHR could not be read : %s' % e)
+
+        # try:
+        #     self.region = self.configGetString('qcheck.region')
+        # except Exception as e:
+        #     logging.info('region could not be read : %s' % e)
+
+        try:
+            self.TrueOrgEvalStat = self.configGetInt('qcheck.TrueOrgEvalStat')
+        except Exception as e:
+            logging.info('TrueOrgEvalStat could not be read : %s' % e)
+
+        try:
+            self.FalseOrgEvalStat = self.configGetInt('qcheck.FalseOrgEvalStat')
+        except Exception as e:
+            logging.info('FalseOrgEvalStat could not be read : %s' % e)
+
+        return True
+
+    def init(self):
+        if not StreamApplication.init(self): return False
+        # self.enableTimer(self.latencyPeriod)
+        relevant_files = set()
+        relevant_stations = set()
+
+        if self.commandline().hasOption("playback"):
+            self.playback = True
+            if self.commandline().hasOption("profile"):
+                self.playProfile = self.commandline().optionString("profile")
+            else:
+                logging.error("Need to declare profile parameter")
+            if self.commandline().hasOption("mseed-files"):
+                self.mseed = True
+                self.waveformPath = self.commandline().optionString("mseed-files")
+            else:
+                logging.debug("Running playback mode with mseed files, mseed files path is missing")
+            if self.commandline().hasOption("output-file"):
+                self._outputFile = self.commandline().optionString("output-file")
+            else:
+                logging.debug("Output file is missing.")
+            if self.commandline().hasOption("start"):
+                start_time = self.commandline().optionString("start")
+                # start_time = UTCDateTime(start_time)
+                start_time = self.parse_time(start_time)
+            if self.commandline().hasOption("end"):
+                end_time = self.commandline().optionString("end")
+                # end_time = UTCDateTime(end_time)
+                end_time = self.parse_time(end_time)
+
+        if self.commandline().hasOption("cpu-number"):
+            self.numCPUs = self.commandline().optionInt("cpu-number")
+        if self.commandline().hasOption("max-tasks"):
+            self.maxTasksQueue = self.commandline().optionInt("max-tasks")
+        if self.commandline().hasOption("inference-mode"):
+            _im = self.commandline().optionString("inference-mode").strip().lower()
+            self.inference_mode = "ripper" if _im in ("ripper", "task", "per-task", "legacy") else "model_actor"
+        if self.commandline().hasOption("gpu-devices"):
+            _gd = self.commandline().optionString("gpu-devices").strip()
+            if _gd:
+                self.ray_gpu_device_ids = [int(x.strip()) for x in _gd.split(",") if x.strip()]
+        if self.commandline().hasOption("num-model-actors"):
+            self.num_model_actors_config = int(self.commandline().optionInt("num-model-actors"))
+
+
+        #Bindings
+        self._load_bindings_from_db()
+        # print(self.bindings)
+        # self.all_station_codes = self.stations
+        for b in self.bindings:
+            check_pick = any(
+                k.startswith("profiles.")
+                and k.endswith(".pickEnable")
+                and (not self.playback or k.split(".")[1] == self.playProfile)
+                and (
+                    (isinstance(v, bool) and v) or
+                    str(v).strip().lower() in ("true", "1", "yes")
+                )
+                for k, v in b.items()
+            )
+            if check_pick and b.get("net") and b.get("sta"):
+                self.all_station_codes.append(f"{b['net']}.{b['sta']}")
+        if not self.all_station_codes:
+             logging.error("Bindings missing")
+             sys.exit(1)
+        times_list = []
+        availability = {}
+        if not self.playback and not self.mseed:
+            self.updateStreams()
+            self.now = UTCDateTime(str(Time.GMT()))
+            self.startTime = UTCDateTime(pd.to_datetime(str(self.now)) + timedelta(seconds=self.startLatency))
+
+            # self.global_staSend_count = Value("i", 0)
+            # self.global_delayStaSend_count = Value("i", 0)
+            # self.global_staSet_count = Value("i", 0)
+
+            self.global_staSend_counts = mp.Array('i', [0]*self.numWorkers)
+            # self.global_delayStaSend_counts = mp.Array('i', [0]*self.numWorkers)
+            self.global_staSet_counts = mp.Array('i', [0]*self.numWorkers)
+            self.stream_lock = threading.Lock()
+
+            self.worker_station_groups = self.divide_stations(self.all_station_codes, self.numWorkers)
+            self.worker_queues = []
+            self.worker_processes = []
+            self.init_worker_processes()
+
+            logging.info("Starting time %s " % self.now)
+            logging.info("Starting time plus start latency %s " % self.startTime)
+        else:
+            relevant_files, relevant_stations, availability = self.get_relevant_stations(self.waveformPath,self.all_station_codes,start_time,end_time)
+            times_list = self.chunk_time(start_time, end_time, self.windowLength, self.timeShift)
+
+
+        # Start a thread to monitor the results without blocking the main process
+        #self.monitorThread = threading.Thread(target=self.monitorTasks, args=(self.tasks_ids,))
+        self.monitorThread = threading.Thread(target=self.monitorTasks)
+        self.monitorThread.start()
+
+        # Allocates X amount of CPUs for the function of creating tasks
+        # ray.init(ignore_reinit_error=True, num_cpus=self.numCPUs, logging_level=stdlogging.FATAL, log_to_driver=False, runtime_env={"working_dir": predictorPath})
+        # ray.init(ignore_reinit_error=True, num_cpus=self.numCPUs, logging_level=stdlogging.FATAL, log_to_driver=True, runtime_env={"env_vars": {"RAY_DEDUP_LOGS": "0"}})
+        _gpu_devs = getattr(self, "ray_gpu_device_ids", []) or []
+        if len(_gpu_devs) > 0:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in _gpu_devs)
+            logging.info(
+                "CUDA_VISIBLE_DEVICES=%s (%s physical GPU(s) for Ray/TensorFlow)",
+                os.environ["CUDA_VISIBLE_DEVICES"],
+                len(_gpu_devs),
+            )
+        _num_gpu = len(_gpu_devs)
+        ray.init(
+            ignore_reinit_error=True,
+            num_cpus=self.numCPUs,
+            num_gpus=_num_gpu,
+            logging_level=stdlogging.FATAL,
+            log_to_driver=False,
+        )
+        logging.info(
+            "Ray: num_cpus=%s num_gpus=%s inferenceMode=%s maxTasksQueue=%s numModelActors(config)=%s",
+            self.numCPUs,
+            _num_gpu,
+            getattr(self, "inference_mode", "?"),
+            self.maxTasksQueue,
+            getattr(self, "num_model_actors_config", 0),
+        )
+
+        self.df_filters = self.get_filters()
+
+        self.params = {
+            "filterShift" : self.filterShift,
+            "share_path" : self.ei.shareDir(),
+            "P_threshold": self.eqcctPthr,
+            "S_threshold": self.eqcctSthr,
+            "normalization_mode": "std",
+            "overlap": self.timeShift,
+            "batch_size": self.eqcctBatchSize,
+            "overwrite": True,
+            # "model": model,
+            "p_model": self.eqcct_Pmodel,
+            "s_model": self.eqcct_Smodel,
+            "numCPUs": self.numCPUs,
+            "gpu_id": self.ray_gpu_device_ids[0] if len(getattr(self, "ray_gpu_device_ids", []) or []) > 0 else self.gpuID,
+            "gpu_limit": self.gpuLimit,
+            "df_filters": self.df_filters,
+            "playback": self.playback,
+            "mseed": self.mseed,
+            "windowLength": self.windowLength,
+            "stations": relevant_stations,
+            "files": relevant_files,
+            "maxTasksQueue": self.maxTasksQueue,
+            "time_list": times_list,
+            "availability": availability,
+            "inference_mode": getattr(self, "inference_mode", "model_actor"),
+            "ripper_gpu_memory_limit_mb": (
+                int(self.ripper_gpu_memory_limit_mb)
+                if getattr(self, "ripper_gpu_memory_limit_mb", 0) and int(self.ripper_gpu_memory_limit_mb) > 0
+                else None
+            ),
+            "ray_gpu_device_ids": list(getattr(self, "ray_gpu_device_ids", []) or []),
+            "Detection_threshold": float(getattr(self, "detection_threshold", 0.3)),
+            "station_picker_model": self.get_station_picker_models(),
+            "default_picker_model_resolved": scmlpick._normalize_picker_model_label(
+                getattr(self, "default_picker_model", "EQCCT")
+            ),
+            "waveform_filter_type": getattr(self, "waveform_filter_type", "bandpass"),
+            "waveform_filter_corners": getattr(self, "waveform_filter_corners", 2),
+            "waveform_filter_zerophase": getattr(self, "waveform_filter_zerophase", True),
+            }
+        try:
+            self.params["model_actor_pools"] = self._spawn_inference_actor_pools()
+        except Exception as exc:
+            logging.error("Inference actor pools failed (%s); falling back to Ripper (per-task load).", exc)
+            logging.error(traceback.format_exc())
+            self.params["model_actor_pools"] = {}
+        # Backward compat: EQCCT-only list
+        self.params["model_actors"] = (self.params.get("model_actor_pools") or {}).get("EQCCT", [])
+
+        if self.standard:
+            logging.info("Standard pick delivery strategy active %s" % self.standard)
+        else:
+            logging.info("Standard pick delivery strategy not active %s" % self.standard)
+
+
+        if self.simulation:
+            logging.info("Simulation pick delivery strategy active %s" % self.simulation)
+            self._pacer_init(
+                max_sleep=10,
+                max_global_delay=20.0,
+                recover_threshold=5.0,
+                catchup_factor=0.5,
+                grace=0.01
+            )
+        else:
+            logging.info("Simulation pick delivery strategy not active %s" % self.simulation)
+
+        if self.bulk:
+            logging.info("Bulk pick delivery strategy active %s with %s s of interval" % (self.bulk,self.bulkInverval))
+            self.start_bulk_sender(interval_s=self.bulkInverval)
+        else:
+            logging.info("Bulk pick delivery strategy not active %s" % self.bulk)
+
+        return True
+
+    def _pacer_init(self,
+                    max_sleep=None,
+                    max_global_delay=None,
+                    recover_threshold=1.0,
+                    catchup_factor=0.5,
+                    grace=0.02):
+
+        self._pacer_max_sleep = max_sleep
+        self._pacer_max_global_delay = max_global_delay
+        self._pacer_recover_threshold = recover_threshold
+        self._pacer_catchup_factor = float(catchup_factor)
+        self._pacer_grace = float(grace)
+
+        self._pacer_q = PriorityQueue()
+        self._pacer_seq = count()
+        self._pacer_stop_evt = threading.Event()
+        self._pacer_thread = threading.Thread(target=self._pacer_run, daemon=True)
+
+        self._pacer_has_base = False
+        self._pacer_base_pick_time = 0.0
+        self._pacer_base_mono_time = 0.0
+
+        self._pacer_last_sent_ts = None 
+        self._pacer_initial_delay = None
+        self._pacer_seen_ids = set()
+
+        self._pacer_thread.start()
+
+    def _pacer_pick_id(self, p):
+        try:
+            pickObj = Pick.Cast(p)
+            key = (
+                pickObj.waveformID().networkCode(),
+                pickObj.waveformID().stationCode(),
+                pickObj.waveformID().locationCode(),
+                pickObj.waveformID().channelCode(),
+                pickObj.phaseHint().code(),
+                round(self._pacer_pick_epoch(p), 6),
+            )
+            return f"K:{key}"
+        except Exception:
+            return f"OBJ:{id(p)}"
+
+    def _pacer_pick_epoch(self, p):
+        t = p.time()
+        # try:
+        v = t.value()
+        sec = getattr(v, "seconds", lambda: None)()
+        usec = getattr(v, "microseconds", lambda: 0)()
+        if sec is not None:
+            return float(sec) + float(usec) / 1e6
+        else:
+            logging.error(f"Failed converting pick.time() to epoch (pick={p})")
+
+    def _pacer_submit(self, picks):
+        if not picks:
+            return
+        items = []
+        for p in picks:
+            pid = self._pacer_pick_id(p)
+            if pid in self._pacer_seen_ids:
+                continue
+            ts = self._pacer_pick_epoch(p)
+            items.append((ts, pid, p))
+        if not items:
+            return
+        items.sort(key=lambda x: x[0])
+
+        if not self._pacer_has_base:
+            self._pacer_base_pick_time = items[0][0]
+            self._pacer_base_mono_time = time.monotonic()
+            self._pacer_has_base = True
+            logging.info(f"[pacer] base set: base_ts={self._pacer_base_pick_time:.6f}, base_mono={self._pacer_base_mono_time:.3f}")
+
+        for ts, pid, p in items:
+            self._pacer_seen_ids.add(pid)
+            self._pacer_q.put((ts, next(self._pacer_seq), pid, p))
+
+        now_wall = time.time()
+        batch_sz  = len(items)
+        batch_min_ts = items[0][0]
+        batch_max_ts = items[-1][0]
+        batch_min_age = max(0.0, now_wall - batch_max_ts)
+        batch_max_age = max(0.0, now_wall - batch_min_ts)
+        qsize = self._pacer_q.qsize()
+
+        logging.info(f"[pacer] submit: batch={batch_sz} qsize={qsize} batch_min_age={batch_min_age:.3f}s batch_max_age={batch_max_age:.3f}s")
+
+    def _pacer_stop(self, timeout=None):
+        if getattr(self, "_pacer_thread", None) is None:
+            return
+        self._pacer_stop_evt.set()
+        self._pacer_q.put((float("inf"), next(self._pacer_seq), None, None))
+        self._pacer_thread.join(timeout=timeout)
+
+    def _pacer_compute_ideal_target(self, ts):
+        return self._pacer_base_mono_time + (ts - self._pacer_base_pick_time)
+
+    def _pacer_apply_recovery(self, ideal_target, now, current_global_delay):
+        target = ideal_target
+        if self._pacer_max_global_delay is not None:
+            lag_to_ideal = now - ideal_target
+            if lag_to_ideal > self._pacer_max_global_delay:
+                shift = lag_to_ideal - self._pacer_max_global_delay
+                self._pacer_base_mono_time += shift
+                target += shift
+                logging.warning(f"[pacer] rebasing base by +{shift:.3f}s to cap global delay at {self._pacer_max_global_delay:.3f}s")
+
+        if target < now:
+            if now - target <= self._pacer_grace:
+                target = now + (self._pacer_grace - (now - target))
+            else:
+                target = now
+
+        if (self._pacer_initial_delay is not None and
+            current_global_delay > self._pacer_initial_delay + self._pacer_recover_threshold):
+            sleep = target - now
+            if sleep > 0 and 0 < self._pacer_catchup_factor < 1.0:
+                comp = sleep * (1.0 - self._pacer_catchup_factor)
+                target = target - comp
+                if target < now:
+                    target = now
+                logging.debug(
+                    f"[pacer] catch-up: reducing sleep from {sleep:.3f}s to {(target-now):.3f}s "
+                    f"(factor={self._pacer_catchup_factor:.2f})"
+                )
+
+        if self._pacer_max_sleep is not None:
+            max_target = now + self._pacer_max_sleep
+            if target > max_target:
+                target = max_target
+
+        return target
+
+    def _pacer_run(self):
+        while not self._pacer_stop_evt.is_set():
+            try:
+                ts, _seq, pid, p = self._pacer_q.get(timeout=0.5)
+            except Empty:
+                continue
+            if p is None:
+                break
+
+            now = time.monotonic()
+            ideal_target = self._pacer_compute_ideal_target(ts)
+
+            global_delay_now = max(0.0, now - ideal_target)
+
+            if self._pacer_initial_delay is None:
+                self._pacer_initial_delay = global_delay_now
+                logging.info(f"[pacer] initial_delay set to {self._pacer_initial_delay:.3f}s")
+
+            target = self._pacer_apply_recovery(ideal_target, now, global_delay_now)
+
+            sleep = target - time.monotonic()
+            if sleep > 0:
+                time.sleep(sleep)
+
+            try:
+                logging.info(f"[pacer] trying to send pick {p}, time target: {target}")
+                self.sendPick(p, 'simul')
+            except Exception as e:
+                logging.error(f"[pacer] error sending pick: {e}")
+
+            now_wall = time.time()
+            real_delay = max(0.0, now_wall - ts)
+            logging.info(f"[pacer] sent: pid={pid} real_delay={real_delay:.3f}s ts={ts:.3f} now={now_wall:.3f}")
+
+            self._pacer_last_sent_ts = ts
+
+            now2 = time.monotonic()
+            last_target = self._pacer_compute_ideal_target(ts)
+            current_delay = max(0.0, now2 - last_target)
+            delta_vs_initial = current_delay - (self._pacer_initial_delay or 0.0)
+
+            logging.info(
+                f"[pacer] sent pick pid={pid} ts={ts:.3f} "
+                f"delay_current={current_delay:.3f}s delta_vs_initial={delta_vs_initial:+.3f}s"
+            )
+
+    def parse_time(self, time_str: str) -> UTCDateTime:
+        formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+        
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(time_str, fmt)
+                # Si el usuario solo pasó la fecha (%Y-%m-%d), completar con 00:00:00
+                if fmt == "%Y-%m-%d":
+                    dt = datetime(dt.year, dt.month, dt.day, 0, 0, 0)
+                return UTCDateTime(dt)
+            except ValueError:
+                continue
+        
+        # Si no se pudo convertir en ninguno de los formatos
+        logging.error(f"Invalid start time format: '{time_str}'. "
+                    f"Expected 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD'.")
+        self.handleClose()
+
+    def start_bulk_sender(self, interval_s=1800):
+        self._bulk_interval = interval_s
+        self._bulk_buffer = []
+        self._bulk_lock = threading.Lock()
+        self._bulk_stop_evt = threading.Event()
+        self._bulk_thread = threading.Thread(target=self._bulk_loop, daemon=True)
+        self._bulk_thread.start()
+        logging.info(f"[bulk] started with interval={interval_s}s")
+
+    def stop_bulk_sender(self):
+        if getattr(self, "_bulk_stop_evt", None):
+            self._bulk_stop_evt.set()
+        if getattr(self, "_bulk_thread", None):
+            self._bulk_thread.join(timeout=5)
+        logging.info("[bulk] stopped")
+
+    def add_pick_to_bulk(self, p):
+        if not hasattr(self, "_bulk_buffer"):
+            self._bulk_buffer = []
+        with self._bulk_lock:
+            self._bulk_buffer.append(p)
+
+    def _bulk_loop(self):
+        while not self._bulk_stop_evt.is_set():
+            start = time.monotonic()
+            time.sleep(self._bulk_interval)
+
+            with self._bulk_lock:
+                if not self._bulk_buffer:
+                    continue
+                picks_to_send = self._bulk_buffer
+                self._bulk_buffer = []
+
+            count = len(picks_to_send)
+            t0 = time.time()
+            try:
+                for p in picks_to_send:
+                    self.sendPick(p, 'bulk')
+            except Exception as e:
+                logging.warning(f"[bulk] error sending picks: {e}")
+
+            dt = time.time() - t0
+            logging.info(f"[bulk] sent {count} picks in {dt:.3f}s at {t0:.3f}")
+
+            elapsed = time.monotonic() - start
+            if elapsed < self._bulk_interval:
+                time.sleep(self._bulk_interval - elapsed)
+
+    def get_mseed_files(self, input_path: str) -> list[str]:
+        p = Path(input_path).expanduser()
+        if any(ch in input_path for ch in ["*", "?", "["]):
+            files = sorted(glob.glob(input_path))
+            if not files:
+                print(f"[ERROR] No .mseed files match pattern: {input_path}")
+                # raise RuntimeError("Empty stream: no traces loaded.")
+            return files
+        if p.is_dir():
+            files = sorted(str(x) for x in p.glob("*.mseed"))
+            if not files:
+                print(f"[ERROR] No .mseed files found in directory: {p}")
+                # raise RuntimeError("Empty stream: no traces loaded.")
+            return files
+        if p.is_file():
+            if p.suffix.lower() == ".mseed":
+                return [str(p)]
+            print(f"[ERROR] Path exists but is not a .mseed file: {p}")
+            # raise RuntimeError("Empty stream: no traces loaded.")
+        if p.suffix.lower() == ".mseed" and not p.is_absolute():
+            candidate = Path.cwd() / p.name
+            if candidate.exists():
+                return [str(candidate)]
+            print(f"[ERROR] File not found in current directory: {candidate}")
+            # raise RuntimeError("Empty stream: no traces loaded.")
+        print(f"[ERROR] Path not found: {p}")
+        # raise RuntimeError("Empty stream: no traces loaded.")
+
+    def get_relevant_stations(self,waveform_path,stations_all,start,end):
+        nets, stas = zip(*(ns.split(".") for ns in stations_all))
+        files_list = self.get_mseed_files(waveform_path)
+        relevant_files = set()
+        relevant_stations = set()
+        per_station_intervals = defaultdict(list)
+
+        for fn in files_list:
+            try:
+                head = read(fn, headonly=True)
+            except Exception as e:
+                print(f"[HEAD-ONLY ERROR] {fn}: {e!r}")
+                continue
+            for tr in head:
+                net, sta = tr.stats.network, tr.stats.station
+                if net in nets and sta in stas:
+                    tr_start = tr.stats.starttime
+                    tr_end   = tr.stats.endtime
+                    if (tr_start <= end) and (tr_end >= start):
+                        netsta = f"{net}.{sta}"
+                        relevant_stations.add(netsta)
+                        relevant_files.add(fn)
+                        seg_s = max(tr_start, start)
+                        seg_e = min(tr_end,   end)
+                        per_station_intervals[f"{netsta}"].append((seg_s, seg_e))
+
+        availability = {}
+        for netsta, iv in per_station_intervals.items():
+            availability[netsta] = self.merge_intervals(iv, join_tolerance=0.0)
+
+        return relevant_files, relevant_stations, availability
+
+    def merge_intervals(self, intervals, join_tolerance=0.0):
+        if not intervals:
+            return []
+        iv = sorted(((min(a,b), max(a,b)) for a,b in intervals), key=lambda x: x[0])
+        merged = []
+        cur_s, cur_e = iv[0]
+        for s, e in iv[1:]:
+            if s <= cur_e + join_tolerance:
+                if e > cur_e:
+                    cur_e = e
+            else:
+                merged.append((cur_s, cur_e))
+                cur_s, cur_e = s, e
+        merged.append((cur_s, cur_e))
+        return merged
+
+    def get_filters(self):
+        def is_true(x):
+            return (isinstance(x, bool) and x) or str(x).strip().lower() in ("true", "1", "yes", "y", "on")
+        out = []
+        for b in self.bindings:
+            if not b.get("net") or not b.get("sta"):
+                continue
+            key = f"{b['net']}.{b['sta']}"
+            for k, v in b.items():
+                if k.startswith("profiles.") and k.endswith(".pickEnable") and is_true(v):
+                    p = k.split(".")[1]
+                    f = b.get(f"profiles.{p}.filter")
+                    if f is not None:
+                        out.append({"key": key, "profile": p, "filter": f})
+        return out
+
+    @staticmethod
+    def _normalize_picker_model_label(token):
+        """Binding value: EQCCT or Parent/Child (slash) e.g. PhaseNet/original → PhaseNet|original."""
+        t = (token or "").strip()
+        if not t or t.upper() == "EQCCT":
+            return "EQCCT"
+        if "/" in t:
+            a, b = t.split("/", 1)
+            return f"{a.strip()}|{b.strip()}"
+        if "|" in t:
+            a, b = t.split("|", 1)
+            return f"{a.strip()}|{b.strip()}"
+        raise ValueError(f"Invalid pickerModel token(s): {token!r} (use EQCCT or e.g. PhaseNet/original)")
+
+    def get_station_picker_models(self):
+        """Map NET.STA → normalized backend key (EQCCT or Parent|Child)."""
+
+        def is_true(x):
+            return (isinstance(x, bool) and x) or str(x).strip().lower() in ("true", "1", "yes", "y", "on")
+
+        out = {}
+        default = getattr(self, "default_picker_model", "EQCCT")
+        for b in self.bindings:
+            if not b.get("net") or not b.get("sta"):
+                continue
+            key = f"{b['net']}.{b['sta']}"
+            for k, v in b.items():
+                if k.startswith("profiles.") and k.endswith(".pickEnable") and is_true(v):
+                    p = k.split(".")[1]
+                    raw = b.get(f"profiles.{p}.pickerModel")
+                    if raw is None or str(raw).strip() == "":
+                        raw = default
+                    try:
+                        out[key] = scmlpick._normalize_picker_model_label(str(raw))
+                    except ValueError as e:
+                        logging.error("Station %s: %s", key, e)
+                        out[key] = "EQCCT"
+        return out
+
+    def divide_stations(self, stations, num):
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for i, sta in enumerate(sorted(stations)):
+            grouped[i % num].append(sta)
+        return list(grouped.values())
+
+    def init_worker_processes(self):
+
+        self.worker_result_queues = []
+
+        for i, group in enumerate(self.worker_station_groups):
+            input_queue = mp.Queue()
+            result_queue = mp.Queue()
+            # p = mp.Process(target=self.worker_loop, args=(i, group, input_queue, result_queue, self.global_staSend_counts, self.global_delayStaSend_counts, self.global_staSet_counts))
+            p = mp.Process(target=self.worker_loop, args=(i, group, input_queue, result_queue, self.global_staSend_counts, self.global_staSet_counts))
+            p.start()
+            self.worker_queues.append(input_queue)
+            self.worker_result_queues.append(result_queue)
+            self.worker_processes.append(p)
+
+    def worker_loop(self, worker_id, station_list, input_queue, result_queue, global_staSend_counts, global_staSet_counts):
+        """Loop executed by each worker process."""
+
+        logPath = os.path.join(self.ei.logDir(), f"scmlpick")
+        Path(logPath).mkdir(parents=True, exist_ok=True)
+        log_file = os.path.join(self.ei.logDir(), f"scmlpick/worker_{worker_id}.log")
+
+        rotating_handler = RotatingFileHandler(
+            log_file, maxBytes=5 * 1024 * 1024, backupCount=3
+        )
+
+        rotating_handler.setFormatter(stdlogging.Formatter(
+            f"%(asctime)s [%(levelname)s/Worker {worker_id}] %(message)s"
+        ))
+
+        stdlogging.basicConfig(
+            level=stdlogging.DEBUG,
+            handlers=[
+                rotating_handler,
+                stdlogging.StreamHandler(sys.stdout)
+            ]
+        )
+
+        core_id = worker_id  # Asegúrate de que worker_id < número de cores físicos
+        try:
+            os.sched_setaffinity(0, {core_id})
+            # stdlogging.info(f"[Worker {worker_id}] Assigned to CPU core {core_id}")
+        except Exception as e:
+            stdlogging.warning(f"[Worker {worker_id}] Could not set CPU affinity: {e}")
+
+        stream = Stream()
+        streamPick = Stream()
+        # delayStream = Stream()
+        stasPick = set()
+        delayStasPick = set()
+        staSend = []
+        staSet = set()
+        # delayStaSend = []
+
+        running = True
+        # buffered_msgs = []
+
+        while True:
+
+            try:
+                msg = input_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                stdlogging.exception(f"[Worker {worker_id}] Unexpected error while reading input_queue: {e}")
+                continue
+            # except Exception as e:
+            #     result_queue.put(("ERROR", worker_id, f"{type(e).__name__}: {e}"))
+            #     continue
+
+            # msg = input_queue.get()
+
+            if msg is None:
+                break
+
+            elif msg == "PAUSE":
+                running = False
+                result_queue.put("PAUSED")
+                # continue
+
+            elif msg == "RESUME":
+                running = True
+                # continue
+
+            elif msg == "GET_RESULTS":
+                #logging.debug(f"[Worker {worker_id}] Received GET_RESULTS")
+                result_queue.put((worker_id, {
+                    "stream": stream,
+                    "staSend": staSend,
+                    "staSet": list(staSet),
+                    # "delayStaSend": delayStaSend,
+                    "streamPick": streamPick,
+                    # "delayStream": delayStream
+                }))
+                #logging.debug(f"[Worker {worker_id}] Sent GET_RESULTS response")
+                continue
+
+
+            # elif isinstance(msg, tuple) and msg[0] == "SET_STREAM":
+            #     stream = msg[1]
+            #     # continue
+
+            # elif isinstance(msg, tuple) and msg[0] == "SET_STREAM_PICK":
+            #     streamPick = msg[1]
+            #     # continue
+
+            # elif isinstance(msg, tuple) and msg[0] == "SET_STREAM_DELAY":
+            #     delayStream = msg[1]
+            #     # continue
+
+            elif msg == "RESET":
+                staSend.clear()
+                staSet.clear()
+                # delayStaSend.clear()
+                # continue
+
+            # if not running:
+            #     input_queue.put(msg)
+            #     time.sleep(0.05)
+            #     continue
+
+            elif isinstance(msg, tuple) and msg[0] == "TRIM_STREAMS":
+                instructions = msg[1]
+                slice_times = instructions.get("slice_times", [])
+                delete_ids = set(instructions.get("delete_ids", []))
+
+                for i, tr in enumerate(stream):
+                    for s in slice_times:
+                        if tr.id == s["id"]:
+                            try:
+                                stream[i] = tr.slice(starttime=UTCDateTime(s["start"]), endtime=tr.stats.endtime)
+                            except Exception as e:
+                                stdlogging.error(f"[Worker {worker_id}] Error slicing {tr.id}: {e}")
+
+                stdlogging.debug(f"[Worker {worker_id}] streamPick size before delete: {len(streamPick)}")
+                streamPick.traces = [tr for tr in streamPick if tr.id not in delete_ids]
+                # streamPick = Stream([tr for tr in streamPick if tr.id not in delete_ids])
+                stdlogging.debug(f"[Worker {worker_id}] streamPick size after delete: {len(streamPick)}")
+
+            elif running:
+                try:
+                    rec_dict = msg
+
+                    # print('STREAM-STREAM-STREAM-STREAM-STREAM')
+                    # print(stream)
+                    # for tr in stream:
+                    #     print(tr)
+
+                    startTime = UTCDateTime(rec_dict["starttime"])
+                    endTime =  UTCDateTime(rec_dict["endtime"])
+                    sta = rec_dict["station"]
+                    net = rec_dict["network"]
+                    loc = rec_dict["location"]
+                    chan = rec_dict["channel"]
+                    sampFreq = rec_dict["sampling_rate"]
+                    start_time = pd.to_datetime(str(startTime))
+                    end_time = pd.to_datetime(str(endTime))
+                    traceID = f'{net}.{sta}.{loc}.{chan}'
+
+                    net_sta = f"{net}.{sta}"
+
+                    if net_sta not in station_list:
+                        continue
+
+                    try:
+                        data=np.array(rec_dict["data"])
+                    except:
+                        stdlogging.debug('No data')
+                        continue
+
+                    header = {
+                        'network': net,
+                        'station': sta,
+                        'location': loc,
+                        'channel': chan,
+                        'npts': len(data),
+                        'sampling_rate': sampFreq,
+                        'starttime': UTCDateTime(start_time)
+                    }
+                    tr = Trace(data=data, header=header)
+
+                    if tr is None or len(tr.data) == 0:
+                        continue
+
+
+                    now = UTCDateTime(str(Time.GMT()))
+
+                    max_lag_seconds = 120
+                    data_lag = now - endTime
+
+                    if data_lag > max_lag_seconds:
+                        stdlogging.warning(f"[Worker {worker_id}] Delayed data detected for {net}.{sta}.{chan}: lag={data_lag:.2f}s")
+
+                    if now < self.startTime:
+                        stdlogging.debug('Waiting for the processing start time %s' % self.startTime)
+
+                    if stream:
+                        index, trace = next(((i, t) for i, t in enumerate(stream) if t.stats.network == net and t.stats.station == sta and t.stats.channel == chan),(None, None))
+                        if index is not None and trace is not None:
+                            tempSt = Stream([trace, tr])
+                            tempSt.merge(method=1, fill_value=0)
+                            tnew =  tempSt[0]
+                            stream[index] = tnew
+                        else:
+                            stream.append(tr)
+                            continue
+                        if not trace or (stream[index].stats.endtime - stream[index].stats.starttime) <= (self.windowLength + self.filterShift) or stream[index].stats.endtime <= self.startTime:
+                            continue
+                    else:
+                        stream.append(tr)
+                        continue
+
+                    # timeMark1 = self.startTime - self.filterShift
+                    # timeMark2 = self.startTime + self.timeShift - self.filterShift
+                    # timeMarks = [timeMark1,timeMark2]
+
+                    # if stream[index].stats.endtime < self.startTime +  timedelta(seconds=self.windowLength):
+                    #     stream[index].trim(self.startTime-self.filterShift, UTCDateTime(end_time), pad=True, fill_value=0)
+                    #     continue
+                    # else:
+                    #     in_window1 = abs((stream[index].stats.starttime - timeMarks[0])) < 0.5
+                    #     in_window2 = abs((stream[index].stats.starttime - timeMarks[1])) < 0.5
+                    #     # in_window1 = abs(stream[index].stats.starttime.second - timeMarks[0].second) < 0.5
+                    #     # in_window2 = abs(stream[index].stats.starttime.second - timeMarks[1].second) < 0.5
+                    #     if not in_window1 and not in_window2:
+                    #         stdlogging.info(f"Start time not in timeMarks: {stream[index].stats.starttime} not in {timeMarks}")
+                    #         stdlogging.info(f"Trace {stream[index]}")
+                    #         newTime = stream[index].stats.starttime.replace(second=timeMarks[0].second) if timeMarks[0].second < stream[index].stats.starttime.second else (stream[index].stats.starttime - 60).replace(second=timeMarks[1].second)
+                    #         try:
+                    #             stream[index].trim(newTime, UTCDateTime(end_time), pad=True, fill_value=0)
+                    #             stdlogging.info(f"Trimmed using closest allowed timestamp {newTime}")
+                    #         except Exception as e:
+                    #             stdlogging.error("Error trimming trace {} with error {}".format(stream[index],e))
+
+
+                    if stream[index].stats.endtime < self.startTime +  timedelta(seconds=self.windowLength):
+                        stream[index].trim(self.startTime-self.filterShift, UTCDateTime(end_time), pad=True, fill_value=0)
+                        continue
+
+                    base_time = self.startTime - self.filterShift
+                    base_second = base_time.second
+
+                    expected_seconds = [(base_second + i * self.timeShift) % 60 for i in range(60 // self.timeShift)]
+
+                    trace_second = stream[index].stats.starttime.second + stream[index].stats.starttime.microsecond / 1e6
+                    in_window = any(abs(trace_second - s) < 1 for s in expected_seconds)
+
+                    if not in_window:
+                        stdlogging.info(f"Start time not in expected timeMarks: {trace_second:.3f}s not near {expected_seconds}")
+                        stdlogging.info(f"Trace {stream[index]}")
+
+                        valid_secs = [s for s in expected_seconds if s <= trace_second]
+                        chosen_sec = max(valid_secs) if valid_secs else max(expected_seconds)
+                        new_start = stream[index].stats.starttime.replace(second=chosen_sec, microsecond=0)
+
+                        try:
+                            stream[index].trim(new_start, UTCDateTime(end_time), pad=True, fill_value=0)
+                            stdlogging.info(f"Trimmed using aligned second: {new_start}")
+                        except Exception as e:
+                            stdlogging.error(f"Error trimming trace {stream[index]} with new_start={new_start}: {e}")
+
+
+                    if stream[index].stats.endtime - stream[index].stats.starttime >= self.windowLength + self.filterShift:
+                        index_found = next((j for j, tr in enumerate(streamPick) if tr.id == traceID), None)
+                        if index_found is None:
+                            # trDelay = UTCDateTime(Time.GMT()) - stream[index].stats.starttime
+                            # if trDelay > self.traceDelay:
+                            #     index2_found = next((k for k, tr2 in enumerate(delayStream) if tr2.id == traceID), None)
+                            #     if index2_found is None:
+                            #         delayStream.append(stream[index])
+                            #         delayStasPick.add(stream[index].stats.station)
+                            #     else:
+                            #         delayStream[index2_found] = stream[index]
+                            # else:
+                            streamPick.append(stream[index])
+                            stasPick.add(stream[index].stats.station)
+                        else:
+                            streamPick[index_found] = stream[index]
+                            stasPick.add(stream[index].stats.station)
+                    else:
+                        continue
+
+                    # streamPick, delayStream = self.checkCommonChan(stream[index],streamPick, delayStream)
+
+                    #if streamPick:
+                    #    logging.info("STREAM PICK")
+                    #    logging.info("\n".join(str(trace) for trace in streamPick))
+
+                    #if delayStream:
+                    #    logging.info("DELAY STREAM PICK")
+                    #    logging.info("\n".join(str(trace) for trace in delayStream))
+
+                    # Adding delayed stations with data for all channels avail. to delayStaSend
+                    # delayStaSend,delayStasPick = self.checkChann(stream[index],delayStasPick,delayStream,delayStaSend)
+
+                    # Adding stations with data for all channels avail. to staSend
+                    staSend,stasPick = self.checkChann(stream[index],stasPick,streamPick,staSend)
+
+                    removed_streams = [trace for trace in stream if (trace.stats.endtime - trace.stats.starttime) > self.timeRemoveTrace]
+                    stream = [trace for trace in stream if (trace.stats.endtime - trace.stats.starttime) <= self.timeRemoveTrace]
+
+                    if removed_streams:
+                        stdlogging.info(f"Removed streams, (length > {self.timeRemoveTrace} secs):")
+                        stdlogging.info("\n".join(str(trace) for trace in removed_streams))
+
+                    # Check delay for stations in memory
+                    for i,trace in enumerate(streamPick):
+                        sta = streamPick[i].stats.station
+                        if sta in staSend and sta not in staSet:
+                            delayEnd = UTCDateTime(str(Time.GMT())) - trace.stats.endtime # Leave here but this time is different than the one use in oneMinuteStream (to evaluate).
+                            delayStart = UTCDateTime(str(Time.GMT())) - trace.stats.starttime # Same than oneMinuteStream this is the correct time to count the delay.
+                            if delayEnd >= self.firstWait or delayStart >= self.firstWait + self.windowLength:
+                                staSet.add(sta)
+
+                    global_staSend_counts[worker_id] = len(staSend)
+                    # global_delayStaSend_counts[worker_id] = len(delayStaSend)
+                    global_staSet_counts[worker_id] = len(staSet)
+
+                    # with global_staSend_count.get_lock():
+                    #     global_staSend_count.value += len(staSend)
+
+                    # with global_delayStaSend_count.get_lock():
+                    #     global_delayStaSend_count.value += len(delayStaSend)
+
+                    # with global_staSet_count.get_lock():
+                    #     global_staSet_count.value += len(staSet)
+                except Exception as e:
+                    stdlogging.exception(f"Unhandled error in worker {worker_id}")
+                    # result_queue.put(("ERROR", worker_id, str(e)))
+            else:
+                time.sleep(0.05)
+
+    def _paramset_to_dict(self, pset):
+        """Flatten DataModel::ParameterSet to a {name: value} dict."""
+        out = {}
+        if pset is None:
+            return out
+        for i in range(pset.parameterCount()):
+            p = pset.parameter(i)
+            out[p.name()] = p.value()
+        return out
+
+    def profilesConfig(self):
+        profiles = []
+		# try:
+        profiles = self.configGetStrings('pipelines.profiles')
+
+        try:
+            self.standard = self.configGetBool('pipelines.Standard')
+        except Exception as e:
+            logging.info('Standard could not be read : %s' % e)
+        try:
+            self.simulation = self.configGetBool('pipelines.Simulation')
+        except Exception as e:
+            logging.info('Simulation could not be read : %s' % e)
+        try:
+            self.bulk = self.configGetBool('pipelines.Bulk')
+        except Exception as e:
+            logging.info('Bulk could not be read : %s' % e)
+        try:
+            self.bulkInverval = self.configGetInt('pipelines.bulkInverval')
+        except Exception as e:
+            logging.info('bulkInverval could not be read : %s' % e)
+
+        if len(profiles) != 0:
+            for profile in profiles:
+                profDic = {}
+                profDic['name'] = profile              
+                try:
+                    profDic['pickTargetGroup'] = self.configGetString('pipelines.profiles.'+profile+'.pickTargetGroup')
+                except:
+                    logging.warning('Error when reading pipelines.profiles.'+profile+'.pickTargetGroup')
+                    logging.warning('setting default pickTargetGroup')
+                    profDic['pickTargetGroup'] = ''
+                    pass
+                try:
+                    profDic['pickSimulTargetGroup'] = self.configGetString('pipelines.profiles.'+profile+'.pickSimulTargetGroup')
+                except:
+                    logging.warning('Error when reading pipelines.profiles.'+profile+'.pickSimulTargetGroup')
+                    logging.warning('setting default pickSimulTargetGroup')
+                    profDic['pickSimulTargetGroup'] = ''
+                    pass
+                try:
+                    profDic['pickBulkTargetGroup'] = self.configGetString('pipelines.profiles.'+profile+'.pickBulkTargetGroup')
+                except:
+                    logging.warning('Error when reading pipelines.profiles.'+profile+'.pickBulkTargetGroup')
+                    logging.warning('setting default pickBulkTargetGroup')
+                    profDic['pickBulkTargetGroup'] = ''
+                    pass
+                try:
+                    profDic['locTargetGroup'] = self.configGetString('pipelines.profiles.'+profile+'.locTargetGroup')
+                except:
+                    logging.warning('Error when reading pipelines.profiles.'+profile+'.locTargetGroup')
+                    logging.warning('setting default locTargetGroup')
+                    profDic['locTargetGroup'] = ''
+                    pass
+
+                try:
+                    profDic['authorTarget'] = self.configGetString('pipelines.profiles.'+profile+'.authorTarget')
+                except:
+                    logging.warning('Error when reading pipelines.profiles.'+profile+'.authorTarget')
+                    logging.warning('setting default authorTarget')
+                    profDic['authorTarget'] = ''
+                    pass
+
+                try:
+                    profDic['stations'] = self.configGetStrings('pipelines.profiles.'+profile+'.stations')
+                except:
+                    logging.warning('error when reading pipelines.profiles.'+profile+'.stations')
+                    logging.warning('setting stations = ""')
+                    profDic['stations'] = ''
+                    pass
+
+                try:
+                    profDic['region'] = self.configGetString('pipelines.profiles.'+profile+'.region')
+                except:
+                    logging.warning('error when reading pipelines.profiles.'+profile+'.region')
+                    logging.warning('setting stations = ""')
+                    profDic['region'] = ''
+                    pass
+
+                try:
+                    profDic['filtersFile'] = self.configGetString('pipelines.profiles.'+profile+'.filtersFile')
+                except:
+                    logging.warning('error when reading pipelines.profiles.'+profile+'.filtersFile')
+                    logging.warning('setting filtersFile = ""')
+                    profDic['filtersFile'] = ''
+                    pass
+                self.profiles.append(profDic)
+        else:
+            logging.warning('No profiles configured. Nothing to do')
+            pass
+
+    def _load_bindings_from_db(self):
+        # profiles = {}  # profileName -> dict
+        # modName = self.configModuleName()
+        # print(modName)
+        cfgMod = self.configModule()
+        # cfg = cfgMod.config()
+
+        # for j in range(cfg.parameterSetCount()):
+        #     pset = cfg.parameterSet(j)
+        #     profiles[j] = self._paramset_to_dict(pset)
+
+        for i in range(cfgMod.configStationCount()):
+            st = cfgMod.configStation(i)  # ConfigStation
+            key = (st.networkCode(), st.stationCode())
+            # print(key)
+            # if st.stationCode() == 'SA01':
+            for s in range(st.setupCount()):
+                pid = st.setup(s).parameterSetID()
+                mdName = st.setup(s).name()
+                # cfg_setup = dm.findSetup(st, self.module)
+                p = dm.ParameterSet.Find(pid)
+                params = {}
+                if mdName == self.name():
+                    for i in range(p.parameterCount()):
+                        p_i = p.parameter(i)
+                        params[p_i.name()] = p_i.value()
+                    params['net'], params['sta'] = key
+                    # print(st.setup(s).name())
+                    # print(params)
+                    self.bindings.append(params)
+        return
+
+    def updateStreams(self):
+        # streamIDs = self.configStreams()
+        streamIDs = self.currentStreams()
+        for streamID in streamIDs:
+            for sta in self.all_station_codes:
+                staCheck = False
+                if (streamID[0] == sta.split('.')[0] and streamID[1] == sta.split('.')[1]):
+                    staCheck = True
+                if staCheck:
+                        if streamID[1] in self.stasDict:
+                            self.stasDict[streamID[1]].append(streamID[3])
+                        else:
+                            self.stasDict[streamID[1]] = [streamID[3]]
+                        self.initStreams.append(streamID)
+                        self.recordStream().addStream(*streamID)
+        return
+
+    def configStreams(self):
+        streamIDs=[]
+        cfg = self.configModule()
+        inv = Inventory.Instance().inventory()
+        for i in range(cfg.configStationCount()):
+            cfg_sta = cfg.configStation(i)
+            net = cfg_sta.networkCode()
+            sta = cfg_sta.stationCode()
+            nets = inv.networkCount()
+            for n in range(nets):
+                network = inv.network(n)
+                if network.code() == net:
+                    stas = network.stationCount()
+                    for s in range(stas):
+                        station = network.station(s)
+                        if station.code() == sta:
+                            locs = station.sensorLocationCount()
+                            for l in range(locs):
+                                location = station.sensorLocation(l)
+                                loc = location.code()
+                                chans = location.streamCount()
+                                for c in range(chans):
+                                    channel = location.stream(c)
+                                    chan = channel.code()
+                                    if chan[0:2] in self.whiteChanns:
+                                        streamIDs.append([net, sta, loc, chan])
+        return streamIDs
+
+    def currentStreams(self):
+        now = Time.GMT()
+        streamIDs=[]
+        inv = Inventory.Instance()
+        nets = inv.inventory().networkCount()
+        for n in range(nets):
+            network = inv.inventory().network(n)
+            net = network.code()
+            stas = network.stationCount()
+            for s in range(stas):
+                station = network.station(s)
+                sta = station.code()
+                station_now = False
+                station_now = inv.getStation(network.code(),sta,now)
+                if station_now:
+                    staCode = station_now.code()
+                    locs = station_now.sensorLocationCount()
+                    for l in range(locs):
+                        location = station_now.sensorLocation(l)
+                        loc = location.code()
+                        loc_now = False
+                        loc_now = inv.getSensorLocation(network.code(),staCode,loc,now)
+                        if loc_now:
+                            locCode = loc_now.code()
+                            chans = location.streamCount()
+                            for c in range(chans):
+                                channel = location.stream(c)
+                                chan = channel.code()
+                                if chan[0:2] in self.whiteChanns:
+                                    chan_now = False
+                                    chan_now = inv.getStream(network.code(),staCode,locCode,chan,now)
+                                    if chan_now:
+                                        chanCode = chan_now.code()
+                                        sid = [net, staCode, locCode, chanCode]
+                                        if sid not in streamIDs:
+                                            streamIDs.append([net, staCode, locCode, chanCode])
+        return streamIDs
+
+    def handleRecord(self, rec):
+        #logging.debug(f"[Main] handleRecord called at {UTCDateTime.now()}")
+        self.recordDispatch(rec)
+        for i, q in enumerate(self.worker_queues):
+            try:
+                qsize = q.qsize()
+                if qsize > 100:
+                    logging.warning(f"[Main] Queue size for worker {i} is high: {qsize}")
+                # else:
+                #     logging.debug(f"[Main] Queue size for worker {i}: {qsize}")
+            except NotImplementedError:
+                logging.debug(f"[Main] Queue size not supported for worker {i}")
+
+        threading.Thread(target=self.run_minute_stream_in_thread, daemon=True).start()
+
+        #self.run_minute_stream(rec)
+        #logging.debug(f"[Main] Finished run_minute_stream at {UTCDateTime.now()}")
+
+        # for q in self.worker_result_queues:
+        #     while not q.empty():
+        #         try:
+        #             msg = q.get_nowait()
+        #             if isinstance(msg, tuple) and msg[0] == "ERROR":
+        #                 logging.error(f"[Main] Worker {msg[1]} reported error: {msg[2]}")
+        #             elif msg is None:
+        #                 logging.warning("[Main] Received unexpected None from result queue.")
+        #         except queue.Empty:
+        #             break
+
+    def run_minute_stream_in_thread(self):
+        if self.stream_lock.locked():
+            return
+
+#        if (self.global_staSend_count.value < self.minStasBulk or
+#            self.global_staSet_count.value < self.minStasBulk) and \
+#            self.global_delayStaSend_count.value < self.minDelayStasBulk:
+
+        total_staSend = sum(self.global_staSend_counts[:])
+        total_staSet = sum(self.global_staSet_counts[:])
+        # total_delayStaSend = sum(self.global_delayStaSend_counts[:])
+
+        # if self.global_staSend_count.value < self.minStasBulk or self.global_staSet_count.value < self.minStasBulk:
+        if total_staSend < self.minStasBulk or total_staSet < self.minStasBulk:
+            return
+
+        with self.stream_lock:
+            try:
+                self.run_minute_stream()
+                logging.debug("Running run_minute_stream in new thread")
+            except Exception as e:
+                logging.error(f"[run_minute_stream_in_thread] Exception: {e}")
+
+    def run_minute_stream(self):
+
+        # streams, staSend,  staSet, delayStaSend, streamPicks, delayStreams = self.gather_worker_results()
+        streams, staSend,  staSet, streamPicks = self.gather_worker_results()
+
+        total_stream_traces = sum(len(st) for st in streams)
+        total_stream_duration = sum(
+            sum((tr.stats.endtime - tr.stats.starttime) for tr in st)
+            for st in streams
+        )
+
+        total_pick_traces = sum(len(st) for st in streamPicks)
+        total_pick_duration = sum(
+            sum((tr.stats.endtime - tr.stats.starttime) for tr in st)
+            for st in streamPicks
+        )
+
+        logging.info(f"[Summary] Total stream traces: {total_stream_traces}, total duration: {total_stream_duration:.1f} s")
+        logging.info(f"[Summary] Total streamPick traces: {total_pick_traces}, total duration: {total_pick_duration:.1f} s")
+        logging.info(f"[Summary] staSend size: {len(staSend)}, staSet size: {len(staSet)}")
+
+        # logging.info(f"streamPicks, streamPicks, streamPicks, streamPicks, streamPicks")
+        # for streamPick in streamPicks:
+        #     for i, trace in enumerate(streamPick):
+        #         logging.info(f'{trace}')
+
+        # logging.info(f"STREAMS,STREAMS,STREAMS,STREAMS,STREAMS")
+        # for stream in streams:
+        #     for i, trace in enumerate(stream):
+        #         logging.info(f'{trace}')
+
+        self.sendNow = False
+        if self.wait:
+            delay = UTCDateTime(str(Time.GMT())) - self.sendTime
+            if delay >= self.maxWait:
+                self.wait = False
+            elif delay >= self.secondWait and len(staSend) > 0:
+                self.sendNow = True
+
+        if (len(staSend) >= self.minStasBulk and len(staSet) >= self.minStasBulk and self.wait == False) or self.sendNow:
+
+            if self.sendNow:
+                logging.info(f"Sending now due to second delay")
+                self.wait = False
+
+            else:
+                logging.info(f"Sending now due to first delay")
+                self.sendTime = UTCDateTime(str(Time.GMT()))
+                self.wait = True
+
+            tp = 'realtime'
+
+            for q in self.worker_queues:
+                q.put("PAUSE")
+
+            for result_q in self.worker_result_queues:
+                while True:
+                    status = result_q.get()
+                    if status == "PAUSED":
+                        break
+
+            self.minuteStream(tp,self.params,streamPicks,streams,staSend)
+            #self.reset_worker_output()
+
+
+        #if len(delayStaSend) >= self.minDelayStasBulk:
+        #    for q in self.worker_queues:
+        #        q.put("PAUSE")
+        #    logging.info(f"Sending now delayed stations")
+        #    tp = 'delay'
+        #    self.minuteStream(tp,self.params,delayStreams,streams,delayStaSend)
+        #    self.reset_worker_output()
+
+    def gather_worker_results(self):
+
+        worker_results = {}
+
+        for q in self.worker_queues:
+            q.put("GET_RESULTS")
+
+        logging.warning(f"Started {len(self.worker_queues)} worker processes.")
+
+        for i, result_q in enumerate(self.worker_result_queues):
+            try:
+                start_time = time.time()
+                #worker_id, result = result_q.get(timeout=2.5)
+                worker_id, result = result_q.get()
+                worker_results[worker_id] = result
+                logging.debug(f"[Main] Got result from worker {worker_id} in {time.time() - start_time:.3f} sec")
+            except queue.Empty:
+                logging.warning(f"[Main] Worker {i} did not respond in time.")
+            except Exception as e:
+                logging.error(f"[Main] Unexpected error from worker {i}: {e}")
+
+        streams = []
+        streamPicks = []
+        # delayStreams = []
+        combined_staSend = []
+        # combined_delayStaSend = []
+        combined_staSet = set()
+
+        for i in range(self.numWorkers):
+            if i in worker_results:
+                result = worker_results[i]
+                streams.append(result["stream"])
+                streamPicks.append(result["streamPick"])
+                # delayStreams.append(result["delayStream"])
+                combined_staSend += result.get("staSend", [])
+                # combined_delayStaSend += result.get("delayStaSend", [])
+                combined_staSet.update(result.get("staSet", []))
+            else:
+                logging.warning(f"[Main] Missing result from worker {i}, inserting empty defaults")
+                streams.append(Stream())
+                streamPicks.append(Stream())
+                # delayStreams.append(Stream())
+
+        # return streams, combined_staSend, combined_staSet, combined_delayStaSend, streamPicks, delayStreams
+        return streams, combined_staSend, combined_staSet, streamPicks
+
+    def reset_worker_output(self):
+        for q in self.worker_queues:
+            q.put("RESET")
+            q.put("RESUME")
+
+    def recordDispatch(self, rec):
+        # try:
+        if not rec.data():
+            return
+
+        dataObj = FloatArray.Cast(rec.data())
+        if not dataObj:
+            logging.debug("No data available in record.")
+            return
+
+        # Extract raw data as a list of floats
+        data = [dataObj.get(i) for i in range(dataObj.size())]
+
+        # Extract record metadata
+        net = rec.networkCode()
+        sta = rec.stationCode()
+        loc = rec.locationCode()
+        chan = rec.channelCode()
+        sampFreq = rec.samplingFrequency()
+        startTime = rec.startTime()
+        endTime = rec.endTime()
+
+        # Create a serializable dictionary
+        rec_dict = {
+            "network": net,
+            "station": sta,
+            "location": loc,
+            "channel": chan,
+            "sampling_rate": sampFreq,
+            "starttime": UTCDateTime(str(startTime)).timestamp,
+            "endtime": UTCDateTime(str(endTime)).timestamp,
+            "data": data
+        }
+
+        # Find the corresponding worker group and send the record
+        net_sta = f"{net}.{sta}"
+        for i, group in enumerate(self.worker_station_groups):
+            if net_sta in group:
+                max_lag_seconds = 600
+                now = UTCDateTime.now()
+                rec_end = UTCDateTime(str(endTime))
+                lag = now - rec_end
+
+                if lag > max_lag_seconds:
+                    logging.warning(f"[recordDispatch] Skipping delayed record {net}.{sta}.{chan}, lag={lag:.1f}s")
+                    return
+
+                self.worker_queues[i].put(rec_dict)
+                break
+
+        # except Exception as e:
+        #     logging.error(f"Failed to dispatch record: {e}")
+
+    def checkCommonChan(self, tnew, streamPick, delayStream):
+        if not tnew:
+            return
+        station_tnew = tnew.stats.station
+        if any(trace.stats.station == station_tnew for trace in streamPick):
+            traces_to_move = [trace for trace in delayStream if trace.stats.station == station_tnew]
+            if traces_to_move:
+                streamPick += Stream(traces_to_move)
+                delayStream = Stream([trace for trace in delayStream if trace.stats.station != station_tnew])
+        return(streamPick,delayStream)
+
+    def minuteStream(self,tp,params,streamPicks,streams,staSend):
+        oneMinuteStream = Stream()
+
+        # Process the one-minute stream
+        for streamPick in streamPicks:
+            toRemove = []
+            for i,trace in enumerate(streamPick):
+                if streamPick[i].stats.station in staSend:
+                    duration = streamPick[i].stats.endtime - streamPick[i].stats.starttime
+                    Nminutes = int(duration // self.windowLength)
+                    if Nminutes > 0:
+                        startMinute = streamPick[i].stats.starttime
+                        endMinute = streamPick[i].stats.starttime + (Nminutes*self.windowLength) + self.filterShift
+                        if endMinute > streamPick[i].stats.endtime and Nminutes > 1:
+                            Nminutes -= 1
+                            endMinute = startMinute + (Nminutes * self.windowLength) + self.filterShift
+                        if Nminutes > 0:
+                            traceMin = trace.slice(
+                                            starttime=startMinute,
+                                            endtime=endMinute
+                                            )
+                            oneMinuteStream.append(traceMin)
+                            toRemove.append(i)
+                        else:
+                            logging.info(f"This should never happen, Trying to send a trace with less than a minute duration {streamPick[i]}")
+                    else:
+                        logging.info(f"This should never happen, Trying to send a trace with less than a minute duration{streamPick[i]}")
+                        continue
+
+            # for i in sorted(toRemove, reverse=True): del streamPick[i]
+
+        for i in range(self.numWorkers):
+            trim_instructions = {
+                "slice_times": [],
+                "delete_ids": []
+            }
+
+            for tr in oneMinuteStream:
+                trace_id = tr.id
+
+                trim_instructions["slice_times"].append({
+                    "id": trace_id,
+                    "start": tr.stats.endtime - self.timeShift - self.filterShift
+                })
+
+                if tr.stats.station in staSend:
+                    trim_instructions["delete_ids"].append(trace_id)
+
+            self.worker_queues[i].put(("TRIM_STREAMS", trim_instructions))
+
+
+        # for stream in streams:
+        #     for i,trace in enumerate(stream):
+        #         for tr in oneMinuteStream:
+        #             if trace.stats.network == tr.stats.network and trace.stats.station == tr.stats.station and trace.stats.channel == tr.stats.channel:
+        #                 try:
+        #                     # logging.info(f"Stream before slice {stream[i]}")
+        #                     stream[i] = trace.slice(
+        #                         starttime=tr.stats.endtime - self.timeShift - self.filterShift,
+        #                         endtime=stream[i].stats.endtime,
+        #                         )
+        #                     # logging.info(f"Stream after slice {stream[i]}")
+        #                     # logging.info(f"Endtime oneminute-tr{tr.stats.endtime}")
+        #                     # logging.info(f"Endtime stream(i){stream[i].stats.endtime}")
+        #                 except:
+        #                     logging.error(f"Error when slice the trace %s" % stream[i])
+
+        # if tp == 'realtime':
+        #     for i, updated_streamPick in enumerate(streamPicks):
+        #         self.worker_queues[i].put(("SET_STREAM_PICK", updated_streamPick))
+        # elif tp == 'delay':
+        #     for i, updated_streamPick in enumerate(streamPicks):
+        #         self.worker_queues[i].put(("SET_STREAM_DELAY", updated_streamPick))
+
+        # for i, updated_stream in enumerate(streams):
+        #     self.worker_queues[i].put(("SET_STREAM", updated_stream))
+
+        self.reset_worker_output()
+
+        logging.info(f"ONE MINUTE STREAM")
+        for i, trace in enumerate(oneMinuteStream):
+            logging.info(f'{trace}')
+
+        for i in range(self.numWorkers):
+            self.global_staSend_counts[i] = 0
+            # self.global_delayStaSend_counts[i] = 0
+            self.global_staSet_counts[i] = 0
+
+        # with self.global_staSend_count.get_lock():
+        #     self.global_staSend_count.value = 0
+
+        # with self.global_delayStaSend_count.get_lock():
+        #     self.global_delayStaSend_count.value = 0
+
+        # with self.global_staSet_count.get_lock():
+        #     self.global_staSet_count.value = 0
+
+        # Run EQCCT picker
+        stream_ref = ray.put(oneMinuteStream)
+        self.task_queue.put(scmlpick.run_picker.remote(startMinute,endMinute,stream_ref,params))
+        self.log_queue_size()
+        logging.info(f"Task for data {startMinute}, {endMinute}, {oneMinuteStream} assigned.")
+        logging.info(f"The main process continues to generate and launch tasks.")
+
+        # resultados = ray.get(self.tasks_ids)
+        # print("Resultados de las tareas secundarias:", resultados)
+
+        # self.sendTask(startMinute,endMinute,self.oneMinuteStream)
+        # self.run_picker()
+
+        # oneMinuteStream = Stream()
+        # staSend = []
+
+    def checkChann(self, tnew, stasPick, streamPick, staSend):
+        if not tnew:
+            return
+        station_tnew = tnew.stats.station
+        if station_tnew in stasPick:
+            checkSta = all(
+                any(trace.stats.station == station_tnew and recChann == trace.stats.channel for trace in streamPick)
+                for recChann in self.stasDict.get(station_tnew, [])
+            )
+            if checkSta and station_tnew not in staSend:
+                staSend.append(station_tnew)
+                stasPick.discard(station_tnew)
+        return(staSend,stasPick)
+
+    @ray.remote
+    class DedupRegistry:
+        def __init__(self): self.seen = set()
+        def add_if_absent(self, key):
+            if key in self.seen: return False
+            self.seen.add(key); return True
+
+    @classmethod
+    def get_dedup_registry(cls):
+        if cls._REGISTRY_HANDLE is not None:
+            return cls._REGISTRY_HANDLE
+        with cls._REGISTRY_LOCK:
+            if cls._REGISTRY_HANDLE is not None:
+                return cls._REGISTRY_HANDLE
+            try:
+                actor = ray.get_actor("dedup_registry")
+            except ValueError:
+                try:
+                    actor = cls.DedupRegistry.options(name="dedup_registry",
+                                                      lifetime="detached").remote()
+                except Exception:
+                    actor = ray.get_actor("dedup_registry")
+            cls._REGISTRY_HANDLE = actor
+            return actor
+
+    def job_key(job):
+        net, sta, t0, t1 = job
+        # UTCDateTime es hashable vía timestamp
+        return (net, sta, float(t0), float(t1))
+
+    # If needed to create ray tasks based on time chunks
+    # def chunk_time(self, starttime, endtime, dt, overlap):
+    #     times_list = []
+
+    #     start = starttime
+    #     end = start + dt
+
+    #     while start <= endtime:
+    #         if end >= endtime:
+    #             end = endtime
+    #             times_list.append([start, end])
+    #             break
+    #         times_list.append([start, end])
+    #         start = end - overlap
+    #         end = start + dt
+
+    #     logging.debug(f"[{datetime.now()}] {len(times_list)} time chunk(s) from {starttime} to {endtime} (dt={dt}secs, overlap={overlap}secs).")
+
+    #     return times_list
+
+    def chunk_time(self, starttime, endtime, dt, overlap):
+        times_list = [[starttime, endtime]]
+        logging.debug(f"[{datetime.now()}] 1 time chunk from {starttime} to {endtime} (single window).")
+        return times_list
+
+    def build_jobs_with_coverage(base_chunks, availability, min_coverage=0.5):
+        jobs = []
+        for netsta, intervals in availability.items():
+            net, sta = netsta.split(".")
+            for t0, t1 in base_chunks:
+                dur = float(t1 - t0)
+                if dur <= 0:
+                    continue
+                cov = 0.0
+                for a, b in intervals:
+                    s = max(t0, a)
+                    e = min(t1, b)
+                    if e > s:
+                        cov += float(e - s)
+                    if cov >= min_coverage * dur:
+                        jobs.append((net, sta, t0, t1))
+                        break
+        return jobs
+
+    def _spawn_eqcct_model_actors_only(self):
+        """Load EQCCT once per Ray actor; picker tasks round-robin across this pool."""
+        if getattr(self, "inference_mode", "model_actor") == "ripper":
+            logging.info(
+                "EQCCTPro: inferenceMode=ripper — no EQCCT ModelActors; each picker task loads EQCCT (Ripper)."
+            )
+            return []
+
+        from eqcctpro.parallelization import ModelActor
+
+        p, s = self.eqcct_Pmodel, self.eqcct_Smodel
+        vram_mb = None
+        if getattr(self, "actor_gpu_memory_limit_mb", 0) and int(self.actor_gpu_memory_limit_mb) > 0:
+            vram_mb = int(self.actor_gpu_memory_limit_mb)
+
+        num_gpus = len(getattr(self, "ray_gpu_device_ids", []) or [])
+        use_gpu = num_gpus > 0
+        mq = max(1, int(self.maxTasksQueue))
+
+        if not use_gpu:
+            n_auto = max(1, min(mq, max(2, min(8, max(1, int(self.numCPUs)) // 2))))
+            n_act = int(self.num_model_actors_config) if int(self.num_model_actors_config) > 0 else n_auto
+            n_act = max(1, min(n_act, mq))
+            logging.info("EQCCTPro ModelActor: CPU — spawning %s actor(s) (auto cap %s)", n_act, n_auto)
+            actors = [
+                ModelActor.remote(p, s, False, 2, 2, None, False)
+                for _ in range(n_act)
+            ]
+        else:
+            n_auto = max(1, min(mq, max(num_gpus * 2, 4)))
+            n_act = int(self.num_model_actors_config) if int(self.num_model_actors_config) > 0 else n_auto
+            n_act = max(1, min(n_act, mq))
+            actors_per_gpu = max(1, math.ceil(n_act / num_gpus))
+            frac = min(0.95, max(0.05, 0.95 / actors_per_gpu))
+            logging.info(
+                "EQCCTPro ModelActor: GPU — %s visible device(s), %s actor(s), ~%.3f GPU fraction each "
+                "(≤%s actors/GPU worst case, actor VRAM cap=%s)",
+                num_gpus,
+                n_act,
+                frac,
+                actors_per_gpu,
+                vram_mb if vram_mb else "unset",
+            )
+            actors = [
+                ModelActor.options(num_gpus=frac, num_cpus=0).remote(
+                    p, s, [0], 2, 2, vram_mb, True
+                )
+                for _ in range(n_act)
+            ]
+        ray.get([a.ready.remote() for a in actors])
+        logging.info("EQCCTPro ModelActor: %s actor(s) ready.", len(actors))
+        return actors
+
+    def _spawn_seisbench_model_actors_only(self, parent_model_name, child_model_name):
+        """SeisBench pool for one (parent, child) pair; same concurrency heuristics as EQCCT."""
+        if getattr(self, "inference_mode", "model_actor") == "ripper":
+            logging.info(
+                "SeisBench %s/%s: inferenceMode=ripper — no ModelActors; each task loads the model.",
+                parent_model_name,
+                child_model_name,
+            )
+            return []
+
+        from eqcctpro.parallelization import SeisBenchModelActor
+
+        num_gpus = len(getattr(self, "ray_gpu_device_ids", []) or [])
+        use_gpu = num_gpus > 0
+        mq = max(1, int(self.maxTasksQueue))
+
+        if not use_gpu:
+            n_auto = max(1, min(mq, max(2, min(8, max(1, int(self.numCPUs)) // 2))))
+            n_act = int(self.num_model_actors_config) if int(self.num_model_actors_config) > 0 else n_auto
+            n_act = max(1, min(n_act, mq))
+            logging.info(
+                "SeisBench ModelActor %s/%s: CPU — spawning %s actor(s) (auto cap %s)",
+                parent_model_name,
+                child_model_name,
+                n_act,
+                n_auto,
+            )
+            actors = [
+                SeisBenchModelActor.remote(parent_model_name, child_model_name, False, False)
+                for _ in range(n_act)
+            ]
+        else:
+            n_auto = max(1, min(mq, max(num_gpus * 2, 4)))
+            n_act = int(self.num_model_actors_config) if int(self.num_model_actors_config) > 0 else n_auto
+            n_act = max(1, min(n_act, mq))
+            actors_per_gpu = max(1, math.ceil(n_act / num_gpus))
+            frac = min(0.95, max(0.05, 0.95 / actors_per_gpu))
+            logging.info(
+                "SeisBench ModelActor %s/%s: GPU — %s device(s), %s actor(s), ~%.3f GPU fraction each",
+                parent_model_name,
+                child_model_name,
+                num_gpus,
+                n_act,
+                frac,
+            )
+            actors = [
+                SeisBenchModelActor.options(num_gpus=frac, num_cpus=0).remote(
+                    parent_model_name, child_model_name, [0], True
+                )
+                for _ in range(n_act)
+            ]
+        ray.get([a.ready.remote() for a in actors])
+        logging.info(
+            "SeisBench %s/%s: %s ModelActor(s) ready.",
+            parent_model_name,
+            child_model_name,
+            len(actors),
+        )
+        return actors
+
+    def _spawn_inference_actor_pools(self):
+        """One actor pool per backend key: EQCCT or Parent|Child for SeisBench."""
+        pools = {}
+        if getattr(self, "inference_mode", "model_actor") == "ripper":
+            logging.info(
+                "inferenceMode=ripper — no ModelActor pools; EQCCT and SeisBench load inside each picker task."
+            )
+            return pools
+
+        specs = set(self.get_station_picker_models().values())
+        try:
+            specs.add(scmlpick._normalize_picker_model_label(self.default_picker_model))
+        except ValueError:
+            specs.add("EQCCT")
+
+        for spec in specs:
+            if spec == "EQCCT":
+                pools["EQCCT"] = self._spawn_eqcct_model_actors_only()
+            else:
+                parent, child = spec.split("|", 1)
+                pools[spec] = self._spawn_seisbench_model_actors_only(
+                    parent.strip(), child.strip()
+                )
+        return pools
+
+    @staticmethod
+    @ray.remote(max_retries=1)
+    def run_picker(start_time,end_time,stream_ref,params):
+        # registry = scmlpick.get_dedup_registry()
+        if isinstance(stream_ref, ray.ObjectRef):
+            stream = ray.get(stream_ref)
+        else:
+            stream = stream_ref
+        # Get picker tasks
+        start_time = UTCDateTime(start_time)
+        end_time = UTCDateTime(end_time)
+        stations = []
+
+        # Prepare tasks for EQCCT picking
+        if params['playback'] and params['mseed']:
+            stations = params['stations']
+            availability = params['availability']
+            times_list = params['time_list']
+            logging.debug('Sending stations to EQCCT %s'% stations)
+            jobs = scmlpick.build_jobs_with_coverage(times_list,availability, min_coverage=0.5)
+            # tasks = [[f"({i+1}/{len(times_list)})", times_list[i][0], times_list[i][1], stations] for i in range(len(times_list))]
+        else:
+            for trace in stream:
+                # station = f'{trace.stats.network}.{trace.stats.station}.{trace.stats.location}.{trace.stats.channel}'
+                station = f'{trace.stats.network}.{trace.stats.station}'
+                if station not in stations:
+                    stations.append(station)
+            times_list = [[start_time, end_time]]
+            logging.debug('Sending stations to EQCCT %s'% stations)
+            # tasks = [[f"({i+1}/{len(times_list)})", times_list[i][0], times_list[i][1], stations] for i in range(len(times_list))]
+            sta_pairs = [tuple(s.split(".", 1)) for s in stations]
+            jobs = [(net, sta, t0, t1) for (net, sta), (t0, t1) in product(sta_pairs, times_list)]
+
+        print(jobs)
+        total = len(jobs)
+        if total == 0:
+            return {"info": "no jobs", "picks": []}
+
+        counts = Counter(scmlpick.job_key(j) for j in jobs)
+        dups = [(k, c) for k, c in counts.items() if c > 1]
+        if dups:
+            print(f"[DUP] {len(dups)} claves duplicadas en jobs:")
+            for (net, sta, t0, t1), c in dups[:10]:
+                print(f"  {net}.{sta} {t0}->{t1} se repite {c} veces")
+        else:
+            print("[OK] No jobs duplicated.")
+
+        params_ref = ray.put(params)
+
+        picks = []
+        tasks_queue = []
+        max_tasks_queue = params['maxTasksQueue']
+        # TASK_TIMEOUT = 300
+
+        stream_ref_pick = ray.put(stream)
+        jobs_indexed = list(enumerate(jobs))
+        it = iter(jobs_indexed)
+        for _ in range(min(max_tasks_queue, total)):
+            try:
+                job_idx, job = next(it)
+                tasks_queue.append(
+                    scmlpick.picker.remote(job_idx, job, stream_ref_pick, params_ref)
+                )
+                # else:
+                    # print(f"[dedup] skipped {key}")
+            except StopIteration:
+                break
+
+        logging.debug(f"[{datetime.now()}] Started station×time matrix ({total} jobs).")
+
+        while tasks_queue:
+            tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+            for finished_task in tasks_finished:
+                try:
+                    picks_parall = ray.get(finished_task)
+                    if not picks_parall.get("ok", True):
+                        logging.warning(f"Task skipped: {picks_parall.get('error')}")
+                        continue
+                    logging.info(picks_parall.get("info", ""))
+                    picks.extend(picks_parall.get("picks", []))
+                except ray.exceptions.RayTaskError as e:
+                    logging.warning(f"Task failed: {e.as_instance_of_cause()}")
+                    continue
+                except ray.exceptions.RayError as e:
+                    logging.warning(f"Ray error: {e}")
+                    continue
+            try:
+                while len(tasks_queue) < max_tasks_queue:
+                    job_idx, job = next(it)
+                    tasks_queue.append(
+                        scmlpick.picker.remote(job_idx, job, stream_ref_pick, params_ref)
+                    )
+                    # else:
+                        # logging.debug(f"[dedup] skipped {key}")
+            except StopIteration:
+                pass
+
+        #     # First approach to create ray tasks using time list
+        #     # # Submit tasks to ray in a queue
+        #     # tasks_queue = []
+        #     # logging.debug(f"[{datetime.now()}] Started EQCCT picking process.\n")
+        #     # for i in range(len(tasks)):
+        #     #     while True:
+        #     #         # Add new task to queue while max is not reached
+        #     #         if len(tasks_queue) < maxTimeTasksQueue:
+        #     #             tasks_queue.append( scmlpick.picker.remote(tasks[i],stream,params))
+        #     #             break
+        #     #         # If there are more tasks than maximum, just process them
+        #     #         else:
+        #     #             tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+        #     #             for finished_task in tasks_finished:
+        #     #                 log_entry = ray.get(finished_task)
+        #     #                 logging.info(log_entry + "\n")
+
+        #     # # After adding all the tasks to queue, process what's left
+        #     # while tasks_queue:
+        #     #     tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+        #     #     for finished_task in tasks_finished:
+        #     #         log_entry = ray.get(finished_task)
+        #     #         logging.info(log_entry + "\n")
+        #     # # ray.shutdown()
+
+        # # # Run picker
+        # # for task in tasks:
+        # #     picks = scmlpick.picker(task,stream,params)
+
+        return picks
+
+    def log_queue_size(self):
+        current_size = self.task_queue.qsize()
+        if current_size != self.last_queue_size:
+            logging.info(f"Pending tasks on the monitor: {current_size}")
+            self.last_queue_size = current_size
+
+    def monitorTasks(self):
+        results = []
+
+        #while tasks_ids or not self.tasks_ids_end.is_set():
+        #while not self.tasks_ids_end.is_set() or (not self.task_queue.empty() and not self.tasks_ids_end.is_set()):
+        while not self.tasks_ids_end.is_set() or not self.task_queue.empty():
+            # We check the completed results without blocking
+            try:
+                tasks_ids = []
+
+                for _ in range(10):
+                    try:
+                        tasks_ids.append(self.task_queue.get(timeout=1))
+                        # tasks_ids.append(self.task_queue.get_nowait())
+                    except queue.Empty:
+                        break
+
+                # while not self.task_queue.empty():
+                    # tasks_ids.append(self.task_queue.get_nowait())
+
+                if tasks_ids:
+                    results_ready, remaining_tasks = ray.wait(tasks_ids, num_returns=min(10, len(tasks_ids)), timeout=1)
+                    #results_ready, tasks_ids[:] = ray.wait(tasks_ids, num_returns=len(tasks_ids), timeout=1)
+
+                    # We process the results that are ready
+                    for result_id in results_ready:
+                        try:
+                            result = ray.get(result_id)
+                            # logging.info(f"Result received on the monitor: {result}")
+                            # picks = self.scPhase(result)
+                            picks = self.scPhase(result)
+                            results.append(result)
+                            if self.simulation:
+                                self._pacer_submit(picks)
+                            if self.bulk:
+                                for pick in picks:
+                                    self.add_pick_to_bulk(pick)
+                        except Exception as task_error:
+                            logging.error("Error while processing task {}".format(task_error))
+                            logging.error(traceback.format_exc())
+
+                    for task in remaining_tasks:
+                        self.task_queue.put(task)
+
+                self.log_queue_size()
+
+            except Exception as e:
+                logging.error("Task Monitor Error {}".format(e))
+                logging.error(traceback.format_exc())
+
+        logging.info(f"The monitor has processed all the results.")
+        return results
+
+    @staticmethod
+    @ray.remote(max_retries=1)
+    def picker(job_idx, task, stream_ref_pick, params_ref):
+        try:
+            if isinstance(stream_ref_pick, ray.ObjectRef):
+                stream = ray.get(stream_ref_pick)
+            else:
+                stream = stream_ref_pick
+            picks = None
+
+            if isinstance(params_ref, ray.ObjectRef):
+                params = ray.get(params_ref)
+            else:
+                params = params_ref
+
+            net, sta, _, _ = task
+            net_sta = f"{net}.{sta}"
+            picker_spec = (params.get("station_picker_model") or {}).get(net_sta)
+            if not picker_spec:
+                picker_spec = params.get("default_picker_model_resolved", "EQCCT")
+
+            if picker_spec == "EQCCT":
+                pools = params.get("model_actor_pools") or {}
+                actors = pools.get("EQCCT") or params.get("model_actors") or []
+                model_actor = None
+                if actors:
+                    model_actor = actors[int(job_idx) % len(actors)]
+                picks = mseed_predictor(
+                    stream=stream,
+                    filterShift=params["filterShift"],
+                    wfinfo=task,
+                    files=params["files"],
+                    P_threshold=params["P_threshold"],
+                    S_threshold=params["S_threshold"],
+                    normalization_mode=params["normalization_mode"],
+                    overlap=params["overlap"],
+                    batch_size=params["batch_size"],
+                    overwrite=params["overwrite"],
+                    p_model=params["p_model"],
+                    s_model=params["s_model"],
+                    numCPUs=params["numCPUs"],
+                    gpu_id=params["gpu_id"],
+                    gpu_limit=params["gpu_limit"],
+                    stations_filters=params["df_filters"],
+                    playback=params["playback"],
+                    model_actor=model_actor,
+                    inference_mode=params.get("inference_mode", "model_actor"),
+                    ripper_gpu_memory_limit_mb=params.get("ripper_gpu_memory_limit_mb"),
+                    waveform_filter_type=params.get("waveform_filter_type", "bandpass"),
+                    waveform_filter_corners=params.get("waveform_filter_corners", 2),
+                    waveform_filter_zerophase=params.get("waveform_filter_zerophase", True),
+                )
+            else:
+                parent_model, child_model = picker_spec.split("|", 1)
+                parent_model, child_model = parent_model.strip(), child_model.strip()
+                pools = params.get("model_actor_pools") or {}
+                sb_actors = pools.get(picker_spec) or []
+                model_actor = None
+                if sb_actors:
+                    model_actor = sb_actors[int(job_idx) % len(sb_actors)]
+                picks = mseed_predictor_seisbench(
+                    stream=stream,
+                    filterShift=params["filterShift"],
+                    wfinfo=task,
+                    files=params["files"],
+                    stations_filters=params["df_filters"],
+                    playback=params["playback"],
+                    parent_model=parent_model,
+                    child_model=child_model,
+                    P_threshold=params["P_threshold"],
+                    S_threshold=params["S_threshold"],
+                    Detection_threshold=params.get("Detection_threshold", 0.3),
+                    model_actor=model_actor,
+                    inference_mode=params.get("inference_mode", "model_actor"),
+                    gpu_id=params["gpu_id"],
+                    ripper_gpu_memory_limit_mb=params.get("ripper_gpu_memory_limit_mb"),
+                    waveform_filter_type=params.get("waveform_filter_type", "bandpass"),
+                    waveform_filter_corners=params.get("waveform_filter_corners", 2),
+                    waveform_filter_zerophase=params.get("waveform_filter_zerophase", True),
+                )
+
+            picks["ok"] = True
+            return picks
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def scPhase(self,picks):
+        ep = EventParameters()
+        resPicks = []
+        for pickData in picks:
+            logging.info(str(pickData))
+            if pickData['PdateTime']:
+                PpickID, pick = self.scPick(pickData, 'P', 'PdateTime', 'p_prob')
+                ep.add(pick)
+                resPicks.append(pick)
+                if pickData['SdateTime']:
+                    pickData['PpickID'] = PpickID
+                    SpickID, pick = self.scPick(pickData, 'S', 'SdateTime', 's_prob')
+                    ep.add(pick)
+                    resPicks.append(pick)
+        if self.playback:
+            self.writeXMLObj(ep)
+            # self.writeXMLObj(comm)
+        return resPicks
+
+    def scPick(self,pickData,phaseHint,strDate,strProp):
+        pick = Pick.Create()
+        Ptime = pickData[strDate]
+        scPtime = Ptime.strftime('%Y-%m-%d %H:%M:%S.%f')
+        scPtime = Time()
+        scPtime.set(Ptime.year,Ptime.month,Ptime.day,Ptime.hour,Ptime.minute,Ptime.second,Ptime.microsecond)
+        timeQ = TimeQuantity()
+        timeQ.setValue(scPtime)
+        # timeQ.setUncertainty(float(pickData[strProp]))
+        pick.setTime(timeQ)
+        propValue = str(pickData[strProp])
+        comm = Comment()
+        comm.setId('eqcctProb')
+        comm.setText(propValue)
+        ci = CreationInfo()
+        ci.setCreationTime(Time().GMT())
+        ci.setAgencyID(self.agencyID())
+        ci.setAuthor(self.author())
+        comm.setCreationInfo(ci)
+        pick.add(comm)
+        net_sta = f"{pickData['trace_name'].split('.')[0]}.{pickData['trace_name'].split('.')[1]}"
+        staName = pickData['trace_name'].split('.')[1]
+        freqmin = 1.0
+        freqmax = 45.0
+        filterID = f"BW(2,{freqmin},{freqmax})"
+        try:
+            f = next(d for d in self.df_filters if d["key"].split(".", 1)[-1] == staName)["filter"]
+            freqmin, freqmax = sorted(float(x) for x in f[f.index("(")+1:f.index(")")].split(",")[1:3])
+            filterID = f"BW(2,{freqmin},{freqmax})"
+        except:
+            pass
+
+        # for profile in self.profiles:
+        #     if net_sta in profile["stations"]:
+        #         try:
+        #             filters = pd.read_csv(profile["filtersFile"], header=None, names=["sta", "hp", "lp"])
+        #             freqmin = filters[filters.sta == staName].iloc[0]["hp"]
+        #             freqmax = filters[filters.sta == staName].iloc[0]["lp"]
+        #             filterID = f"BW(2,{freqmin},{freqmax})"
+        #         except:
+        #             pass
+
+        wfID = WaveformStreamID()
+        wfID.setNetworkCode(pickData['trace_name'].split('.')[0])
+        wfID.setStationCode(pickData['trace_name'].split('.')[1])
+        wfID.setLocationCode(pickData['trace_name'].split('.')[2])
+        wfID.setChannelCode(pickData['trace_name'].split('.')[3])
+        pick.setWaveformID(wfID)
+        phase = Phase()
+        phase.setCode(phaseHint)
+        pick.setPhaseHint(phase)
+        pick.setMethodID('EQCCT')
+        pick.setEvaluationMode(1)
+        pick.setCreationInfo(ci)
+
+        filterAndProp = "  ".join([f"Probability_{propValue}", f"Filter: {filterID}"])
+        pick.setFilterID(filterAndProp)
+
+        logging.debug("Pick produced by EQCCT %s.%s" % (pick.waveformID().networkCode(), pick.waveformID().stationCode()))
+        logging.debug('%s' % pick)
+
+        if self.playback:
+            pass
+        else:
+            if self.standard:
+                self.sendPick(pick, 'asap')
+                self.sendComt(comm, pick)
+
+                # pickRef = PickReference()
+                if phaseHint == 'S':
+                    # pickRef.setPickID(pickData['PpickID'])
+                    comt = Comment()
+                    comt.setId('RefPickID')
+                    comt.setText(str(pickData['PpickID']))
+                    ci = CreationInfo()
+                    ci.setCreationTime(Time().GMT())
+                    comt.setCreationInfo(ci)
+                    # print(pick.comment(0).id())
+                    # print(pick.comment(0).text())
+                    pick.add(comt)
+                    self.sendComt(comt, pick)
+                else:
+                    # pickRef.setPickID(pick.publicID())
+                    pass
+            else:
+                pass
+        return pick.publicID(), pick
+
+    def writeXMLObj(self, obj):
+        if self._outputFile is not None:
+            ar = seiscomp.io.XMLArchive()
+            if not ar.create(self._outputFile):
+                logging.error(
+                    f"Failed to created output file: {self._outputFile}",
+                    file=sys.stderr,
+                )
+                return False
+
+            ar.setFormattedOutput(True)
+            ar.writeObject(obj)
+            ar.close()
+
+    def sendComt(self, comt, pick):
+        op = OP_ADD
+        if comt:
+            n = Notifier(pick.publicID(), op, comt)
+            msg = NotifierMessage()
+            msg.attach(n)
+            out = self.connection().send(msg)
+            logging.debug("Comment sent? %s" % "Yes" if out else "No, failed" )
+            # comtObj = Comment.Cast(comt)
+            # Notifier.Enable()
+            # n = Notifier("EventParameters", op, comtObj)
+            # msg = NotifierMessage()
+            # msg.attach(n)
+            # out = self.connection().send(msg)
+            # logging.debug("Comment sent? %s" % "Yes" if out else "No, failed" )
+
+    def sendPick(self, pick, mode='asap'):
+        op = OP_ADD
+        if pick:
+            pickObj = Pick.Cast(pick)
+            Notifier.Enable()
+            # ep = EventParameters()
+            # ep.add(pickObj)
+            netSta_pick = f"{pickObj.waveformID().networkCode()}.{pickObj.waveformID().stationCode()}"
+            if mode == 'simul':
+                profile_to_target = {p["name"]: p.get("pickSimulTargetGroup") for p in self.profiles}
+            elif mode == 'asap':
+                profile_to_target = {p["name"]: p.get("pickTargetGroup") for p in self.profiles}
+            elif mode == 'bulk':
+                profile_to_target = {p["name"]: p.get("pickBulkTargetGroup") for p in self.profiles}
+            # targets = {
+            #     profile_to_target.get(b["profile"])
+            #     for b in self.bindings
+            #     if b.get("key") == netSta
+            # }
+            logging.debug(f"Profile_to_target {profile_to_target}")
+            targets = set()
+            matched = False
+            for b in self.bindings:
+                b_net = b.get("net")
+                b_sta = b.get("sta")
+                if not b_net or not b_sta:
+                    continue
+                b_netsta = f"{b_net}.{b_sta}"
+                if b_netsta != netSta_pick:
+                    continue
+
+                matched = True
+                raw_profiles = b.get("profiles", "")
+                prof_list = [p for p in re.split(r"[,\s]+", raw_profiles) if p]
+
+                if not prof_list:
+                    targets.add(None)
+                    continue
+
+                for prof in prof_list:
+                    tgt = profile_to_target.get(prof)
+                    if tgt:
+                        targets.add(tgt)
+
+            if not matched or not targets:
+                targets = {None}
+
+            n = Notifier("EventParameters", op, pickObj)
+            msg = NotifierMessage()
+            msg.attach(n)
+
+            for target in targets:
+                if target:
+                    logging.debug(f"Trying to send pick {netSta_pick} to {target}")
+                    out = self.connection().send(target, msg)
+                else:
+                    logging.debug(f"Trying to send pick {netSta_pick} to default target")
+                    out = self.connection().send(msg)
+                logging.debug("Pick sent? {}".format("Yes" if out else "No, failed"))
+
+            # for profile in self.profiles:
+            #     logging.debug("PROFILE %s" % profile["name"])
+            #     logging.debug("wfID %s" % pickObj.waveformID())
+            #     logging.debug("net %s" % pickObj.waveformID().networkCode())
+            #     netSta = f"{pickObj.waveformID().networkCode()}.{pickObj.waveformID().stationCode()}"
+            #     if netSta in profile["stations"]:
+            #         target = profile["pickTargetGroup"]
+            #         if target:
+            #             logging.debug("Trying to send pick %s to %s" % (netSta,target))
+            #             out = self.connection().send(target,msg)
+            #             logging.debug("Pick sent? %s" % "Yes" if out else "No, failed" )
+            #         else:
+            #             logging.debug("Trying to send pick %s to default target" % (netSta))
+            #             out = self.connection().send(msg)
+            #             logging.debug("Pick sent? %s" % "Yes" if out else "No, failed" )
+
+        # if pickRef:
+        #     pickRefObj = PickReference.Cast(pickRef)
+        #     Notifier.Enable()
+        #     n2 = Notifier("EventParameters", op, pickRefObj)
+        #     msg2 = NotifierMessage()
+        #     msg2.attach(n2)
+        #     out2 = self.connection().send(msg2)
+        #     logging.debug("PickReference sent? %s" % "Yes" if out2 else "No, failed" )
+        # return out
+
+    def changeOrigStatus(self, origin, EvalStat):
+        try:
+            origin.setEvaluationStatus(EvalStat)
+            logging.debug("Changing origin %s evaluation status %s" % (origin.publicID(),EvalStat))
+        except Exception as e:
+            logging.error("Error changing origin evaluation status {} with error {}".format(origin.publicID(),e))
+        return origin
+
+    def qualityCheckOrigin(self, origin):
+
+        latUnc = origin.latitude().uncertainty()
+        lonUnc = origin.longitude().uncertainty()
+        try:
+            depthUnc = origin.depth().uncertainty()
+        except ValueError:
+            depthUnc = 0
+        depth = origin.depth().value()
+        azGap = origin.quality().azimuthalGap()
+
+        thresholds = {'latUnc': self.latUncTHR, 'lonUnc': self.lonUncTHR, 'depthUnc': self.depthUncTHR, 'depth': self.depthTHR, 'azGap': self.azGapTHR}
+        values = {'latUnc': latUnc, 'lonUnc': lonUnc, 'depthUnc': depthUnc, 'depth': depth, 'azGap': azGap}
+
+        exceeding = {key: value for key, value in values.items() if value > thresholds[key]}
+
+        if exceeding:
+            logging.debug(f"Values exceeding thresholds: {exceeding}")
+            return False
+        else:
+            logging.debug(f"Origin fulfills thresholds: {exceeding}")
+            return True
+
+    def geographicCheckOrigin(self, region, origin):
+        if isinstance(region, str):
+            if region.split('.')[-1] == 'bna':
+                try:
+                    within = self.inPolygon(region, origin.latitude().value(), origin.longitude().value())
+                    return within
+                except FileNotFoundError:
+                    logging.error(f'\n\n\t {region} file not found\n\n')
+                    return False
+            elif len(region.split(',')) == 4:
+                quadrant = region.split(',')
+                quadrant = tuple(map(float, quadrant))
+                return self.inQuadrant(quadrant, origin)
+            else:
+                logging.error(f'Provide a quadrant or bna file')
+                return False
+        elif isinstance(region, tuple):
+            return self.inQuadrant(quadrant, origin)
+        else:
+            logging.error(f'Provide a quadrant or bna file')
+            return False
+
+    def inPolygon(self, fileName, lat, lon) -> bool:
+        self.fs = geo.GeoFeatureSet()
+        if not self.fs.readBNAFile(fileName, None):
+            logging.error('Impossible to open the bna file %s'%fileName)
+            return False
+
+        feature = self.fs.features()[0]
+        closed = feature.closedPolygon()
+        if not closed:
+            logging.error('Please fix this: Polygon %s does not not exist or is not closed'%fileName)
+
+        coordinates = geo.GeoCoordinate(lat,lon)
+        within = feature.contains(coordinates)
+        if not within:
+            logging.debug('Origin (lat: %s and lon: %s) is not within polygon %s.' % (lat,lon,fileName))
+
+        return(within)
+
+    def inQuadrant(self, quadrant: tuple, origin) -> bool:
+        """Check if event location is in a quadrant
+
+        Parameters
+        ----------
+        quadrant : Tuple
+            Quadrant to check in format (lat_min, lat_max, lon_min,  lon_max)
+
+        Returns
+        -------
+        bool
+            True if event is in quadrant, False if not
+        """
+        assert len(quadrant) == 4, 'Quadrant must be a tuple with 4 elements'
+        assert quadrant[0] < quadrant[1], 'The minimum latitude must be less than the maximum latitude'
+        assert quadrant[2] < quadrant[3], 'The minimum longitude must be less than the maximum longitude'
+        return (quadrant[0] <= origin.latitude().value() <= quadrant[1]
+                and quadrant[2] <= origin.longitude().value() <= quadrant[3])
+
+    def handleOrigin(self, org, op=OP_UPDATE):
+        """
+        Test origins
+        """
+        logging.debug("Received origin %s" % org.publicID())
+        author = org.creationInfo().author()
+        profNames = (list(map(lambda p: p['name'], self.profiles)))
+        logging.debug("PROFILES %s" % profNames)
+        for profile in self.profiles:
+            if author == profile["authorTarget"]:
+                try:
+                    polygon = profile["region"]
+                    if polygon != 'none':
+                        checkReg = self.geographicCheckOrigin(polygon, org)
+                    else:
+                        checkReg = True
+                    checkQc = self.qualityCheckOrigin(org)
+                except:
+                    logging.error("Error when performing quality checks for the origin %s" % org.publicID())
+                    return
+                if checkQc and checkReg:
+                    org = self.changeOrigStatus(org,self.TrueOrgEvalStat)
+                    locTarget = profile["locTargetGroup"]
+                    if org and locTarget:
+                        msg = NotifierMessage()
+                        n = Notifier("EventParameters", op, org)
+                        msg.attach(n)
+                        out = self.connection().send(locTarget,msg)
+                        logging.debug("Evaluation status updated? %s" % "Yes" if out else "No, failed" )
+                # else:
+                    # org = self.changeOrigStatus(org,self.FalseOrgEvalStat)
+            else:
+                logging.debug("Author %s not in scmlpick profile %s" %(author,profile["name"]))
+
+    def addObject(self, parentID, object):
+        """
+        Call-back function if a new object is received.
+        """
+        origin = Origin.Cast(object)
+        if origin:
+            self.handleOrigin(origin, op=OP_UPDATE)
+
+    def updateObject(self, parentID, object):
+        """
+        Call-back function if an object is updated.
+        """
+        origin = Origin.Cast(object)
+        if origin:
+            self.handleOrigin(origin, op=OP_UPDATE)
+
+    def handleClose(self):
+        if self.recordStream() is not None:
+            self.recordStream().close()
+        try:
+            self.tasks_ids_end.set()
+            self.monitorThread.join()
+            logging.info(f'The main process has completed all tasks.')
+            ray.shutdown()
+            self._pacer_stop()
+            self.stop_bulk_sender()
+        except Exception:
+            pass
+
+    def handleAutoShutdown(self):
+        if self.recordStream() is not None:
+            self.recordStream().close()
+        try:
+            self.tasks_ids_end.set()
+            self.monitorThread.join()
+            logging.info(f'The main process has completed all tasks.')
+            ray.shutdown()
+            self._pacer_stop()
+            self.stop_bulk_sender()
+        except Exception:
+            pass
+
+    def run(self):
+        if self.playback and self.mseed:
+            try:
+                if self.commandline().hasOption("start"):
+                    start_time = self.commandline().optionString("start")
+                    start_time = UTCDateTime(start_time)
+                if self.commandline().hasOption("end"):
+                    end_time = self.commandline().optionString("end")
+                    end_time = UTCDateTime(end_time)
+                stream = None
+                stream_ref = ray.put(stream)
+                params = self.params
+                result = ray.get(scmlpick.run_picker.remote(start_time,end_time,stream_ref,params))
+                # result = scmlpick.run_picker(start_time,end_time,stream_ref,params)
+                self.scPhase(result)
+            finally:
+                if self.recordStream() is not None:
+                    self.recordStream().close()
+                try:
+                    self.tasks_ids_end.set()
+                    self.monitorThread.join()
+                    logging.info(f'The main process has completed all tasks.')
+                    ray.shutdown()
+                    self._pacer_stop()
+                    self.stop_bulk_sender()
+                except Exception:
+                    pass
+            return True
+        else:
+            return StreamApplication.run(self)
+
+def set_cpu_affinity(cores):
+    """Set CPU affinity for the current process."""
+    p = psutil.Process(os.getpid())
+    p.cpu_affinity(cores)
+
+def main(argv):
+    app = scmlpick(len(argv), argv)
+    return app()
+
+if __name__ == '__main__':
+    import sys
+    # script_name = os.path.basename(sys.argv[0])
+    script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    num_cores = os.cpu_count() - 1
+    core_mappings = {
+        # "scmlpick": list(range(4, 46))
+        script_name : list(range(num_cores))
+    }
+    listCores = core_mappings.get(script_name, list(range(0, 4)))
+    set_cpu_affinity(listCores)
+    sys.exit(main(sys.argv))

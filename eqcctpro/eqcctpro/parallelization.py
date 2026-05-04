@@ -3,6 +3,8 @@ parallelization.py has access to all Ray functions: mseed_predictor(), parallel_
 It is a level of abstraction so we can make the code more concise and cleaner
 """
 import os 
+from collections import defaultdict
+
 import ray
 import csv
 import sys
@@ -22,6 +24,26 @@ import traceback
 import numpy as np
 from eqcctpro.tools import *
 from eqcctpro.timing_util import cuda_synchronize_best_effort, monotonic_s
+from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
+from eqcctpro.pick_output import (
+    PickOutputSink,
+    aggregate_station_mseed_for_summary,
+    ascii_summary_results_path,
+    build_ascii_summary_row_tuple,
+    format_detection_confidence_threshold_summary,
+    format_pick_time_cell,
+    merge_ascii_summary_rows,
+    normalize_ascii_station_pick_format,
+    normalize_pick_output_format,
+    prediction_results_path,
+    resolve_picker_model_label,
+    write_ascii_run_summary,
+    write_mseed_error_reference_beside_summary,
+    refresh_executive_picks_summary,
+    refresh_executive_picks_summary_from_chunk_output_dir,
+    write_station_pick_log,
+)
+from eqcctpro.waveform_data_quality import log_known_waveform_quality_issues
 from os import listdir
 from obspy import UTCDateTime
 from datetime import datetime, timedelta 
@@ -354,7 +376,55 @@ def parse_time_range(time_string):
 
     except ValueError as e:
         return None, None, None #Error handling.
-    
+
+
+def _format_analysis_time_window(
+    analysis_window_start_str,
+    analysis_window_end_str,
+    timechunk_id,
+    analysis_period_minutes,
+):
+    """
+    Human-readable analysis period for ASCII summary: user start/end if provided,
+    else timechunk directory bounds, else minutes span only.
+    """
+    s = (analysis_window_start_str or "").strip()
+    e = (analysis_window_end_str or "").strip()
+    if s and e:
+        return f"{s} – {e}"
+    if timechunk_id:
+        try:
+            st, en, _ = parse_time_range(timechunk_id)
+            if st is not None and en is not None:
+                return (
+                    f"{st.strftime('%Y-%m-%d %H:%M:%S')} – "
+                    f"{en.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+        except Exception:
+            pass
+    if analysis_period_minutes is not None:
+        try:
+            return f"(analysis span {float(analysis_period_minutes):.6g} minutes)"
+        except Exception:
+            pass
+    return ""
+
+
+def _unpack_modelactor_predict_result(result):
+    """``(log, wf_time)`` or ``(log, wf_time, ascii_row)`` from ModelActor station tasks."""
+    if len(result) == 3:
+        return result[0], result[1], result[2]
+    return result[0], result[1], None
+
+
+def _unpack_ripper_predict_result(result):
+    """``(log, model_load, wf_time)`` or ``(..., ascii_row)`` from Ripper station tasks."""
+    if len(result) == 4:
+        return result[0], result[1], result[2], result[3]
+    log_e, ml, wf = result
+    return log_e, ml, wf, None
+
+
 def _eqcct_stream_to_nparray(args, st, station, files_list=None):
     """
     EQCCT preprocessing from an in-memory ObsPy Stream for a single station
@@ -375,22 +445,14 @@ def _eqcct_stream_to_nparray(args, st, station, files_list=None):
 
     max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)
     st.taper(max_percentage=max_percentage, type='cosine')
-    freqmin = 1.0
-    freqmax = 45.0
-    if args["stations_filters"] is not None:
-        try:
-            df_filters = args["stations_filters"]
-            freqmin = df_filters[df_filters.sta == station].iloc[0]["hp"]
-            freqmax = df_filters[df_filters.sta == station].iloc[0]["lp"]
-        except Exception:
-            pass
-    st.filter(type='bandpass', freqmin=freqmin, freqmax=freqmax, corners=2, zerophase=True)
+    ftype, freqmin, freqmax, f_corners, f_zp = resolve_waveform_filter_params(args, station)
+    apply_waveform_filter(st, ftype, freqmin, freqmax, f_corners, f_zp)
 
     if any(tr.stats.sampling_rate != 100.0 for tr in st):
         try:
             st.interpolate(100, method="linear")
         except Exception:
-            st = _resampling(st)
+            st = _resampling(st, antialias_lowpass_hz=freqmax)
 
     st.trim(min(tr.stats.starttime for tr in st), max(tr.stats.endtime for tr in st), pad=True, fill_value=0)
     start_time = st[0].stats.starttime
@@ -467,38 +529,213 @@ def _mseed2nparray(args, files_list, station):
 
     st = obspy.Stream()
     for file in files_list:
-        temp_st = obspy.read(file)
-        try:
-            temp_st.merge(fill_value=0)
-        except Exception:
-            temp_st.merge(fill_value=0)
+        temp_st = read_station_waveform_file(file)
+        merge_mseed_stream_after_read(temp_st)
         temp_st.detrend('demean')
         if temp_st:
             st += temp_st
+
+    if (not st or len(st) == 0) and files_list and isinstance(args, dict):
+        inp = args.get("input_dir")
+        if inp:
+            chunk_abs = {os.path.abspath(p) for p in files_list}
+            for file in parent_timechunk_station_waveform_files(str(inp), station):
+                if os.path.abspath(file) in chunk_abs:
+                    continue
+                temp_st = read_station_waveform_file(file)
+                merge_mseed_stream_after_read(temp_st)
+                temp_st.detrend('demean')
+                if temp_st:
+                    st += temp_st
 
     if not st or len(st) == 0:
         return None
     return _eqcct_stream_to_nparray(args, st, station, files_list=files_list)
 
 
-def _load_ripper_mseed_stream(input_dir: str, station_list: list) -> obspy.Stream:
+def _mseed_predictor_log_prefix(timechunk_id: str | None, input_dir: str) -> str:
+    """Bracket prefix for mseed_predictor / station-task logs when multiple timechunks run concurrently."""
+    tid = (timechunk_id or "").strip()
+    if not tid:
+        base = os.path.basename(os.path.abspath(input_dir))
+        if "_" in base and len(base) >= 10:
+            tid = base
+        else:
+            tid = "unknown_chunk"
+    return f"[timechunk_id={tid}] "
+
+
+class _ChunkLogAdapter(logging.LoggerAdapter):
+    """Prepends a fixed chunk context to every message (driver-side mseed_predictor process)."""
+
+    def process(self, msg, kwargs):
+        p = self.extra.get("prefix") or ""
+        return f"{p}{msg}", kwargs
+
+
+def _apply_log_chunk_prefix(args: dict | None, msg: str) -> str:
+    """Reserved for worker returns; chunk context is applied by driver :class:`_ChunkLogAdapter` only."""
+    return msg
+
+
+def _glob_waveform_files_in_dir(station_dir: str) -> list[str]:
+    """Delegate to :func:`~eqcctpro.tools.glob_waveform_files_in_directory` (single glob implementation)."""
+    return glob_waveform_files_in_directory(station_dir)
+
+
+def _list_station_mseed_files(input_dir: str, station: str) -> list[str]:
+    """
+    Per-station miniSEED paths for a timechunk directory.
+    Supports classic ``input_dir/<station>/*`` and post-split ``abstracted_waveforms/<station>/*``.
+
+    **Resolution order**
+
+    1. **Chunk-local** files under *input_dir* (the timechunk folder) take precedence when
+       present. That guarantees listing matches the tree users see under each chunk.
+
+    2. If the chunk has **no** miniSEED for that station, fall back to the parent directory
+       ``<parent>/<station>/*.mseed`` when *input_dir* looks like a timechunk id.
+
+    If chunk-local paths exist but **decode to no traces** (empty or corrupt copies),
+    :func:`_load_ripper_mseed_stream`, :func:`_mseed2nparray`, and
+    :func:`~eqcctpro.seisbench_models.mseed2stream_3c` try the same parent directory
+    (skipping paths already read from the chunk) so good originals next to the chunk
+    folders are still used.
+    """
+    input_dir = os.path.abspath(input_dir)
+    chunk_base = os.path.basename(input_dir)
+    parent = os.path.dirname(input_dir)
+    parent_station = os.path.join(parent, str(station))
+
+    chunk_paths: list[str] = []
+    for base in (
+        os.path.join(input_dir, str(station)),
+        os.path.join(input_dir, "abstracted_waveforms", str(station)),
+    ):
+        chunk_paths.extend(_glob_waveform_files_in_dir(base))
+    seen_chunk: set[str] = set()
+    unique_chunk: list[str] = []
+    for p in chunk_paths:
+        if p not in seen_chunk:
+            seen_chunk.add(p)
+            unique_chunk.append(p)
+    if unique_chunk:
+        return unique_chunk
+
+    if looks_like_timechunk_id(chunk_base) and os.path.isdir(parent_station):
+        from_parent = _glob_waveform_files_in_dir(parent_station)
+        if from_parent:
+            return from_parent
+
+    return []
+
+
+def _load_ripper_mseed_stream(
+    input_dir: str,
+    station_list: list,
+    logger: logging.Logger | None = None,
+) -> tuple[obspy.Stream, dict[str, dict[str, str]]]:
     """
     Read all station miniSEED once on the driver (scmlpick-style) for ray.put.
     Traces are read, merged per file, demeaned — same as the start of per-task disk reads.
+
+    Reads are **sequential** (one file at a time). Parallel decode inside a Ray worker has
+    been observed to crash workers (libmseed / ObsPy not reliably thread-safe per process).
+
+    When *logger* is set, each file is logged with ``[mSEED CLEAN|RECOVERED|FAILED]`` and a
+    run summary counts files and total decoded vs header-implied samples.
+
+    Returns ``(stream, station_mseed_stats)`` where *station_mseed_stats* maps station id to
+    ``aggregate_station_mseed_for_summary`` strings for ``summary_results.ascii``.
     """
     full = obspy.Stream()
+    n_files = 0
+    n_clean = n_rec = n_fail = 0
+    sum_dec = 0
+    sum_exp = 0
+    n_exp_known = 0
+    per_station_reports: dict[str, list[dict]] = defaultdict(list)
+
+    def _consume_preload_report(rep: dict, station_key: str) -> None:
+        nonlocal n_files, n_clean, n_rec, n_fail, sum_dec, sum_exp, n_exp_known
+        if not rep:
+            return
+        per_station_reports[str(station_key)].append(dict(rep))
+        n_files += 1
+        q = (rep.get("quality") or "").upper()
+        if q == "CLEAN":
+            n_clean += 1
+        elif q == "FAILED":
+            n_fail += 1
+        else:
+            n_rec += 1
+        d = int(rep.get("decoded_samples") or 0)
+        sum_dec += d
+        ex = rep.get("expected_header_samples")
+        if ex is not None:
+            sum_exp += int(ex)
+            n_exp_known += 1
+        if logger is not None:
+            exp_s = str(ex) if ex is not None else "?"
+            logger.info(
+                "[mSEED %s] %s decoded=%s expected_header=%s tags=%s",
+                q,
+                rep.get("basename", "?"),
+                d,
+                exp_s,
+                rep.get("recovery_tags") or [],
+            )
+
     for station in station_list:
-        files_list = sorted(glob.glob(os.path.join(input_dir, str(station), "*mseed")))
+        files_list = _list_station_mseed_files(input_dir, station)
+        n_before = len(full)
         for file in files_list:
-            temp_st = obspy.read(file)
-            try:
-                temp_st.merge(fill_value=0)
-            except Exception:
-                temp_st.merge(fill_value=0)
-            temp_st.detrend('demean')
+            rep: dict = {}
+            temp_st = read_station_waveform_file(file, logger=None, report=rep)
+            _consume_preload_report(rep, station)
+            merge_mseed_stream_after_read(temp_st)
+            temp_st.detrend("demean")
             if temp_st:
                 full += temp_st
-    return full
+        if len(full) == n_before and files_list:
+            chunk_abs = {os.path.abspath(p) for p in files_list}
+            for file in parent_timechunk_station_waveform_files(input_dir, station):
+                if os.path.abspath(file) in chunk_abs:
+                    continue
+                rep = {}
+                temp_st = read_station_waveform_file(file, logger=None, report=rep)
+                _consume_preload_report(rep, station)
+                merge_mseed_stream_after_read(temp_st)
+                temp_st.detrend("demean")
+                if temp_st:
+                    full += temp_st
+
+    if logger is not None and n_files > 0:
+        if n_exp_known == n_files:
+            exp_msg = str(sum_exp)
+        elif n_exp_known > 0:
+            exp_msg = (
+                f"{sum_exp} (partial sum over {n_exp_known}/{n_files} file(s) with header npts)"
+            )
+        else:
+            exp_msg = "unknown"
+        logger.info(
+            "mSEED preload summary: %s file(s) — CLEAN=%s RECOVERED=%s FAILED=%s — "
+            "decoded_samples_total=%s expected_header_total=%s",
+            n_files,
+            n_clean,
+            n_rec,
+            n_fail,
+            sum_dec,
+            exp_msg,
+        )
+
+    station_mseed_stats: dict[str, dict[str, str]] = {}
+    for st in station_list:
+        station_mseed_stats[str(st)] = aggregate_station_mseed_for_summary(
+            per_station_reports.get(str(st), [])
+        )
+    return full, station_mseed_stats
 
 
 def _trace_matches_station_task(tr, station_id: str) -> bool:
@@ -508,47 +745,106 @@ def _trace_matches_station_task(tr, station_id: str) -> bool:
     ``build_station_list_from_dir`` uses directory basenames (e.g. ``TX_EF09``).
     MiniSEED stores network and station separately (``TX`` + ``EF09``), so comparing
     only ``tr.stats.station`` to ``TX_EF09`` never matches.
+
+    Also handles: dotted ``tr.id`` (``NET.STA.LOC.CHA``), FDSN space-padding, and
+    composite ``stats.station`` values like ``4P-BB01`` where the folder is ``BB01``.
     """
     sid = str(station_id).strip()
     if not sid:
         return False
-    net = str(tr.stats.network).strip()
-    sta = str(tr.stats.station).strip()
-    if sta == sid:
+
+    def _eq(a: str, b: str) -> bool:
+        return a == b or a.upper() == b.upper()
+
+    net = str(tr.stats.network or "").strip()
+    sta = str(tr.stats.station or "").strip()
+
+    if _eq(sta, sid):
         return True
-    if net and f"{net}_{sta}".upper() == sid.upper():
+
+    # Standard NET_STA / NET.STA directory naming
+    if net and _eq(f"{net}_{sta}", sid):
         return True
     if net and "_" in sid:
         prefix, rest = sid.split("_", 1)
-        if prefix.upper() == net.upper() and rest.strip().upper() == sta.upper():
+        if prefix.upper() == net.upper() and _eq(rest.strip(), sta):
             return True
     dotted = sid.replace("_", ".", 1) if "_" in sid else sid
-    if net and f"{net}.{sta}".upper() == dotted.upper():
+    if net and _eq(f"{net}.{sta}", dotted):
         return True
+
+    # ObsPy trace id: second token is always the station code (FDSN).
+    try:
+        parts = str(tr.id).split(".")
+        if len(parts) >= 2 and _eq(parts[1].strip(), sid):
+            return True
+    except Exception:
+        pass
+
+    # Some encoders put "NET-STA" or legacy composite into the station field
+    for sep in ("-", "_"):
+        if sep in sta:
+            for piece in sta.split(sep):
+                piece = piece.strip()
+                if piece and _eq(piece, sid):
+                    return True
+
     return False
 
 
 def _stream_select_for_station_task(full_st: obspy.Stream, station: str) -> obspy.Stream:
-    """Subset a merged Stream to traces for one task station id (subdir name)."""
+    """
+    Subset a merged Stream to traces for one task station id (subdir name).
+
+    Callers may fall back to reading ``input_dir/<station>/*`` when this is empty:
+    miniSEED under that path is still processed even if trace headers do not match
+    the directory name (see ModelActor shared-Stream path).
+    """
     return obspy.Stream(traces=[tr.copy() for tr in full_st if _trace_matches_station_task(tr, station)])
 
 
-def _output_writter_prediction(meta, csvPr, Ppicks, Pprob, Spicks, Sprob, detection_memory,prob_memory,predict_writer, idx, cq, cqq):
+def _station_sink_format_for_worker(args: dict) -> tuple[str, bool]:
+    """
+    Per-station file format and whether the driver aggregates a run-level ASCII summary.
+    When the main format is ``ascii``, the station file is ``xml`` or ``csv`` per
+    ``args['ascii_station_pick_format']``.
+    """
+    pick_fmt = normalize_pick_output_format(args.get("pick_output_format", "xml"))
+    use_ascii_summary = pick_fmt == "ascii"
+    if use_ascii_summary:
+        sink_fmt = normalize_ascii_station_pick_format(args.get("ascii_station_pick_format"))
+    else:
+        sink_fmt = pick_fmt
+    return sink_fmt, use_ascii_summary
+
+
+def _output_writter_prediction(
+    meta,
+    sink,
+    Ppicks,
+    Pprob,
+    Spicks,
+    Sprob,
+    detection_memory,
+    prob_memory,
+    idx,
+    cq,
+    cqq,
+    ascii_p_list=None,
+    ascii_s_list=None,
+    ascii_chrono_list=None,
+):
 
     """ 
     
-    Writes the detection & picking results into a CSV file.
+    Writes one detection / picking row via ``sink`` (CSV or XML), and/or appends to
+    *ascii_p_list* / *ascii_s_list* for the per-station ASCII summary, and/or
+    *ascii_chrono_list* as ``(time_str, 'P'|'S')`` for ``<station>_outputs/<station>.log``.
 
     Parameters
     ----------
-    dataset: hdf5 obj
-        Dataset object of the trace.
-
-    predict_writer: obj
-        For writing out the detection/picking results in the CSV file. 
-       
-    csvPr: obj
-        For writing out the detection/picking results in the CSV file.  
+    sink: PickOutputSink | None
+        Output sink for this station's pick file (XML/CSV); None only if the caller omits file output.
 
     matches: dic
         It contains the information for the detected and picked event.  
@@ -631,26 +927,36 @@ def _output_writter_prediction(meta, csvPr, Ppicks, Pprob, Spicks, Sprob, detect
     
     p_prob = np.array(p_prob)
     PdateTime = np.array(PdateTime)
-        
-    predict_writer.writerow([meta["trace_name"], 
-                     network_name,
-                     station_name, 
-                     instrument_type,
-                     station_lat, 
-                     station_lon,
-                     station_elv,
-                     PdateTime[0], 
-                     p_prob[0],
-                     SdateTime[0], 
-                     s_prob[0]
-                     ]) 
 
+    p_cell = format_pick_time_cell(PdateTime[0])
+    s_cell = format_pick_time_cell(SdateTime[0])
+    if ascii_p_list is not None and p_cell:
+        ascii_p_list.append(p_cell)
+    if ascii_s_list is not None and s_cell:
+        ascii_s_list.append(s_cell)
+    if ascii_chrono_list is not None:
+        if p_cell:
+            ascii_chrono_list.append((p_cell, "P"))
+        if s_cell:
+            ascii_chrono_list.append((s_cell, "S"))
 
+    if sink is not None:
+        sink.write_pick_row([
+            meta["trace_name"],
+            network_name,
+            station_name,
+            instrument_type,
+            station_lat,
+            station_lon,
+            station_elv,
+            PdateTime[0],
+            p_prob[0],
+            SdateTime[0],
+            s_prob[0],
+        ])
+        sink.flush()
 
-    csvPr.flush()                
-
-
-    return detection_memory,prob_memory  
+    return detection_memory, prob_memory
 
 
 def _get_snr(data, pat, window=200):
@@ -856,7 +1162,7 @@ def _picker(args, yh3, thr_type='P_threshold'):
     return Ppickall, Pproball
 
 
-def _resampling(st):
+def _resampling(st, antialias_lowpass_hz=45.0):
     'perform resampling on Obspy stream objects'
     
     need_resampling = [tr for tr in st if tr.stats.sampling_rate != 100.0]
@@ -864,7 +1170,7 @@ def _resampling(st):
        # print('resampling ...', flush=True)    
         for indx, tr in enumerate(need_resampling):
             if tr.stats.delta < 0.01:
-                tr.filter('lowpass',freq=45,zerophase=True)
+                tr.filter('lowpass', freq=float(antialias_lowpass_hz), zerophase=True)
             tr.resample(100)
             tr.stats.sampling_rate = 100
             tr.stats.delta = 0.01
@@ -957,7 +1263,17 @@ def mseed_predictor(input_dir='downloads_mseeds',
               ignore_cpu_ram_cap=False,
               # If set, use this exact station order/count (deterministic benchmarks).
               # Skips random.sample(stations2use) and specific_stations filtering.
-              fixed_station_list=None):
+              fixed_station_list=None,
+              sequential_timechunk_specs=None,
+              waveform_filter_type='bandpass',
+              waveform_filter_freqmin=1.0,
+              waveform_filter_freqmax=45.0,
+              waveform_filter_corners=2,
+              waveform_filter_zerophase=True,
+              pick_output_format='xml',
+              ascii_station_pick_format='xml',
+              analysis_window_start_str=None,
+              analysis_window_end_str=None):
     
     """ 
     
@@ -1020,6 +1336,20 @@ def mseed_predictor(input_dir='downloads_mseeds',
     if log_queue is not None:
         logger.addHandler(log_handler)  # Ray queue supports put()
 
+    if sequential_timechunk_specs:
+        _chunk_specs = list(sequential_timechunk_specs)
+    else:
+        _chunk_specs = [(input_dir, timechunk_id)]
+    if ripper and len(_chunk_specs) != 1:
+        raise ValueError(
+            "sequential_timechunk_specs is only for standard (ModelActor) multi-chunk runs; "
+            "use one mseed_predictor call per chunk for RIPPER, or pass a single chunk tuple."
+        )
+    input_dir, timechunk_id = _chunk_specs[0]
+
+    _log_prefix = _mseed_predictor_log_prefix(timechunk_id, input_dir)
+    logger = _ChunkLogAdapter(logger, {"prefix": _log_prefix})
+
     # ===== RAM SAFETY CAP VALIDATION =====
     if ram_safety_cap is not None:
         if ram_safety_cap > 0.97:
@@ -1038,8 +1368,23 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # ===== TIMING: Start tracking total trial time =====
     trial_start_time = monotonic_s()
 
+    analysis_period_minutes = None
+    if total_analysis_time is not None:
+        try:
+            analysis_period_minutes = float(total_analysis_time.total_seconds()) / 60.0
+        except Exception:
+            analysis_period_minutes = None
+
+    _pick_norm = normalize_pick_output_format(pick_output_format)
+    _ascii_station_norm = (
+        normalize_ascii_station_pick_format(ascii_station_pick_format)
+        if _pick_norm == "ascii"
+        else "xml"
+    )
+
     args = {
     "input_dir": input_dir,
+    "log_chunk_prefix": _log_prefix,
     "output_dir": output_dir,
     "P_threshold": P_threshold,
     "S_threshold": S_threshold,
@@ -1056,8 +1401,27 @@ def mseed_predictor(input_dir='downloads_mseeds',
     "model_type": model_type,
     "seisbench_parent_model": seisbench_parent_model,
     "seisbench_child_model": seisbench_child_model,
-    "Detection_threshold": Detection_threshold
+    "Detection_threshold": Detection_threshold,
+    "waveform_filter_type": waveform_filter_type,
+    "waveform_filter_freqmin": waveform_filter_freqmin,
+    "waveform_filter_freqmax": waveform_filter_freqmax,
+    "waveform_filter_corners": waveform_filter_corners,
+    "waveform_filter_zerophase": waveform_filter_zerophase,
+    "pick_output_format": pick_output_format,
+    "ascii_station_pick_format": _ascii_station_norm,
+    "analysis_period_minutes": analysis_period_minutes,
+    "timechunk_id": timechunk_id,
+    "analysis_time_window_str": _format_analysis_time_window(
+        analysis_window_start_str,
+        analysis_window_end_str,
+        timechunk_id,
+        analysis_period_minutes,
+    ),
+    "picker_model_label": resolve_picker_model_label(
+        model_type, seisbench_parent_model, seisbench_child_model
+    ),
     }
+    args["detection_confidence_threshold"] = format_detection_confidence_threshold_summary(args)
 
     logger.info(f"------- Hardware Configuration -------")
     try:
@@ -1070,38 +1434,97 @@ def mseed_predictor(input_dir='downloads_mseeds',
         logger.error("")
         sys.exit(1)
     
-    out_dir = os.path.join(os.getcwd(), str(args['output_dir']))    
-    try:
-        from eqcctpro.tools import build_station_list_from_dir
-        station_list = build_station_list_from_dir(args['input_dir'])
-    except Exception as e:
-        logger.info(f"{e}") 
-        return # To-Do: Fix so that it has a valid return? 
-    # log.write(f"GPU ID: {args['gpu_id']}; Batch size: {args['batch_size']}")
-    logger.info(f"------- Data Preprocessing for EQCCTPro -------")
-    logger.info(f"{len(station_list)} station(s) in {args['input_dir']}")
-    
-    if fixed_station_list is not None:
-        station_list = list(fixed_station_list)
-    elif stations2use and stations2use <= len(station_list):  # For System Evaluation Execution
-        station_list = random.sample(station_list, stations2use)  # Randomly choose stations from the sample size 
-        # log.write(f"Using {len(station_list)} station(s) after selection.")
+    from eqcctpro.tools import build_station_list_from_dir
 
-    if specific_stations is not None and fixed_station_list is None:
-        station_list = [x for x in station_list if x in specific_stations] # For "One Use Run" Over a Given Set of Stations (Just Run EQCCTPro on specific_stations)
-    else:
-        station_list = station_list  # someone put None thinking that they would be able to run the whole directory in one go
-    logger.info(f"Using {len(station_list)} selected station(s): {station_list}.") 
+    def _prepare_stations_tasks_for_chunk(c_input_dir, c_timechunk_id):
+        """Build ``tasks_predictor`` and related paths for one timechunk directory."""
+        args["input_dir"] = c_input_dir
+        args["timechunk_id"] = c_timechunk_id
+        lp = _mseed_predictor_log_prefix(c_timechunk_id, c_input_dir)
+        args["log_chunk_prefix"] = lp
+        args["analysis_time_window_str"] = _format_analysis_time_window(
+            analysis_window_start_str,
+            analysis_window_end_str,
+            c_timechunk_id,
+            analysis_period_minutes,
+        )
+        args["detection_confidence_threshold"] = format_detection_confidence_threshold_summary(
+            args
+        )
+        logger.extra["prefix"] = lp
 
-    if not station_list or (fixed_station_list is None and any(looks_like_timechunk_id(x) for x in station_list)):
-        # Rebuild from the actual contents of the timechunk dir
-        station_list = build_station_list_from_dir(args['input_dir'])
-        logger.info(f"Station list rebuilt from directory because it contained a timechunk id or was empty.") 
+        _tcid_sum = c_timechunk_id
+        if _tcid_sum is None:
+            _cand_tc = os.path.basename(os.path.abspath(c_input_dir))
+            if "_" in _cand_tc and len(_cand_tc) >= 10:
+                _tcid_sum = _cand_tc
 
-    tasks_predictor = [[f"({i+1}/{len(station_list)})", station_list[i], out_dir, args] for i in range(len(station_list))]
-    
-    if not tasks_predictor: return
-    
+        pick_leaf = "".join(
+            c if (c.isalnum() or c in "._-") else "_"
+            for c in str(_tcid_sum or "unknown_chunk")
+        )
+        base_output = os.path.join(os.getcwd(), str(args["output_dir"]))
+        out_dir_local = os.path.join(base_output, pick_leaf)
+        os.makedirs(out_dir_local, exist_ok=True)
+        logger.info(
+            "Picks for this timechunk will be written under %s (id=%s).",
+            out_dir_local,
+            _tcid_sum or pick_leaf,
+        )
+
+        try:
+            station_list_local = build_station_list_from_dir(args["input_dir"], logger=logger)
+        except Exception as e:
+            logger.info(f"{e}")
+            return None, None, None, None, None
+        logger.info(f"------- Data Preprocessing for EQCCTPro -------")
+        logger.info(f"{len(station_list_local)} station(s) in {args['input_dir']}")
+
+        st_list = station_list_local
+        if fixed_station_list is not None:
+            st_list = list(fixed_station_list)
+        elif stations2use and stations2use <= len(st_list):
+            st_list = random.sample(st_list, stations2use)
+
+        if specific_stations is not None and fixed_station_list is None:
+            st_list = [x for x in st_list if x in specific_stations]
+        logger.info(f"Using {len(st_list)} selected station(s): {st_list}.")
+
+        log_known_waveform_quality_issues(
+            _tcid_sum,
+            args["input_dir"],
+            st_list,
+            logger,
+        )
+        # Chunk-specific output directory: always one summary_results.ascii per folder.
+        _ascii_path = ascii_summary_results_path(
+            out_dir_local,
+            timechunk_id=None,
+            total_timechunks=1,
+        )
+        _pick_fmt0 = normalize_pick_output_format(pick_output_format)
+        if _pick_fmt0 == "ascii" and overwrite and os.path.isfile(_ascii_path):
+            try:
+                os.remove(_ascii_path)
+            except OSError:
+                pass
+
+        if not st_list or (
+            fixed_station_list is None and any(looks_like_timechunk_id(x) for x in st_list)
+        ):
+            st_list = build_station_list_from_dir(args["input_dir"], logger=logger)
+            logger.info(
+                "Station list rebuilt from directory because it contained a timechunk id or was empty."
+            )
+
+        t_pred = [
+            [f"({i+1}/{len(st_list)})", st_list[i], out_dir_local, args]
+            for i in range(len(st_list))
+        ]
+        if not t_pred:
+            return None, None, None, None, None
+        return t_pred, st_list, _ascii_path, _tcid_sum, out_dir_local
+
     # =====================================================================
     # RIPPER MODE: Use old task-based approach (model loaded per task)
     # This bypasses ModelActors and allows more flexible GPU sharing.
@@ -1115,6 +1538,11 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # for OOM prevention between trials.
     # =====================================================================
     if ripper:
+        _prep = _prepare_stations_tasks_for_chunk(input_dir, timechunk_id)
+        if _prep[0] is None:
+            return
+        tasks_predictor, station_list, _ascii_summary_path, _tcid_for_summary, out_dir = _prep
+
         # ===== TIMING: Ripper mode has no actor creation, just setup time =====
         setup_start_time = monotonic_s()
         
@@ -1329,7 +1757,10 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
         # scmlpick-style in-memory refs: one ray.put for the full Stream and one for args so each
         # .remote() only ships ObjectRefs, not N copies of waveforms / config.
-        merged_stream = _load_ripper_mseed_stream(args["input_dir"], station_list)
+        merged_stream, station_mseed_stats = _load_ripper_mseed_stream(
+            args["input_dir"], station_list, logger=logger
+        )
+        args["station_mseed_stats"] = station_mseed_stats
         if len(merged_stream) == 0:
             logger.warning(
                 "RIPPER: no traces preloaded from disk; tasks will read mSEED per station (no shared object store Stream)."
@@ -1380,12 +1811,19 @@ def mseed_predictor(input_dir='downloads_mseeds',
                     num_gpus=gpu_allocation_per_task, num_cpus=0
                 ).remote(tasks_predictor_ripper[i], True, gpu_memory_limit_mb)
 
-            model_load_times, waveform_load_times = _run_ripper_parallel_queue_scmlpick(
+            model_load_times, waveform_load_times, ripper_ascii_rows = _run_ripper_parallel_queue_scmlpick(
                 logger=logger,
                 tasks_predictor=tasks_predictor_ripper,
                 max_tasks_queue=max_pending_tasks,
                 submit_index=_ripper_submit_index,
             )
+            if normalize_pick_output_format(pick_output_format) == "ascii":
+                merged = merge_ascii_summary_rows(_ascii_summary_path, ripper_ascii_rows)
+                write_ascii_run_summary(_ascii_summary_path, merged)
+                write_mseed_error_reference_beside_summary(_ascii_summary_path)
+                _exec_p = refresh_executive_picks_summary_from_chunk_output_dir(out_dir)
+                if _exec_p:
+                    logger.info("Executive picks summary (all timechunks): %s", _exec_p)
             logger.info("")
             
             # Calculate average model load time
@@ -1412,7 +1850,18 @@ def mseed_predictor(input_dir='downloads_mseeds',
 
         logger.info(f"------- Parallel Station Waveform Processing Complete [RIPPER MODE] -------")
         end_time = monotonic_s()
-        logger.info(f"Picks saved at {output_dir}. Process Runtime: {end_time - start_time:.2f} s")
+        logger.info(f"Picks saved at {out_dir}. Process Runtime: {end_time - start_time:.2f} s")
+        total_trial_time_seconds = end_time - trial_start_time
+        if _pick_norm == "ascii":
+            _picks_root_rip = os.path.join(os.getcwd(), str(output_dir))
+            _exec_final = refresh_executive_picks_summary(
+                _picks_root_rip, total_trial_time_seconds=total_trial_time_seconds
+            )
+            if _exec_final:
+                logger.info(
+                    "Executive picks summary (final, includes total trial time): %s",
+                    _exec_final,
+                )
 
         if testing_gpu is not None: 
             num_ray_cpus = len(ray_cpus) if isinstance(ray_cpus, (list, tuple)) else int(len(list(ray_cpus)))
@@ -1427,7 +1876,6 @@ def mseed_predictor(input_dir='downloads_mseeds',
                 model_used = "eqcct"
             
             # Calculate timing metrics for ripper mode
-            total_trial_time_seconds = end_time - trial_start_time
             waveform_processing_time_seconds = end_time - start_time
             
             trial_data = {
@@ -1465,614 +1913,675 @@ def mseed_predictor(input_dir='downloads_mseeds',
     # =====================================================================
     # STANDARD MODE: Use ModelActor pool (new methodology)
     # =====================================================================
-    
-    # ===== TIMING: Start tracking actor creation time =====
-    actor_creation_start_time = monotonic_s()
-    
-    # CREATE MODEL ACTOR(S) - Add this before the task loop
-    logger.info(f"Creating model actor(s)...") 
-    
-    model_type_lower = model_type.lower() if model_type else 'eqcct'
-    model_vram_mb = None  # Defensive init; will be set in GPU branches, remains None for CPU
-    
-    # Track requested vs actual actors for CSV Comments column
-    requested_concurrent_tasks = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-    actor_cap_comment = ""  # Will be populated if actors are capped due to memory constraints
-    
-    # ===== cuDNN CONCURRENT PREDICTION LIMIT =====
-    # This tracks the maximum safe number of concurrent predictions based on GPU constraints.
-    # Key insight: cuDNN workspace memory is allocated dynamically during inference, and having
-    # too many concurrent predictions causes resource contention regardless of total actors.
-    # 
-    # safe_concurrent_predictions is set to safe_max_per_gpu (from a single GPU's perspective)
-    # in GPU branches, ensuring that concurrent predictions don't overwhelm cuDNN resources.
-    # For CPU mode, this remains at the user-requested value.
-    safe_concurrent_predictions = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-    
-    if model_type_lower == 'seisbench':
-        # --- Validate model name once on the driver (lightweight, no model loading) ---
-        # Actors will skip this network call (validate_pretrained=False) to avoid
-        # a thundering herd of concurrent list_pretrained() requests causing HTTP 500s.
-        logger.info(f"Validating SeisBench model name: {seisbench_parent_model}/{seisbench_child_model}...")
-        try:
-            from eqcctpro.seisbench_models import SeisBenchModels
-            SeisBenchModels(seisbench_parent_model, seisbench_child_model, validate_pretrained=True)
-            logger.info("SeisBench model name validated successfully.")
-        except Exception as e:
-            logger.warning(f"SeisBench model validation failed: {e}. Proceeding anyway, actors will attempt to load from cache.")
+    all_waveform_load_times = []
+    waveform_processing_time_seconds = 0.0
+    actor_creation_done = False
 
-        # Create SeisBench model actors
-        if use_gpu:
-            # Get VRAM requirement for this SeisBench model
-            model_vram_mb = get_seisbench_model_vram_mb(
-                seisbench_parent_model, 
-                seisbench_child_model,
-                default_mb=2000.0
+    for chunk_idx, (c_input_dir, c_timechunk_id) in enumerate(_chunk_specs):
+        _prep_m = _prepare_stations_tasks_for_chunk(c_input_dir, c_timechunk_id)
+        if _prep_m[0] is None:
+            if len(_chunk_specs) == 1:
+                return
+            logger.warning(
+                "Skipping timechunk %s: could not build station task list.",
+                c_timechunk_id or c_input_dir,
             )
-            # Use max of requested VRAM or model requirement (similar to EQCCT logic)
-            # gpu_memory_limit_mb is per-actor VRAM limit, model_vram_mb is the minimum requirement
-            per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
-            
-            # ===== MEMORY-AWARE GPU ACTOR CREATION =====
-            # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
-            # The constraint is: total requested VRAM must not exceed available VRAM.
-            # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
-            n_gpus = len(gpu_id)
-            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-            
-            # Get available VRAM (total pool)
-            # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
-            # Otherwise fall back to actual free VRAM query
-            available_vram_mb = get_available_vram_mb(
-                gpu_ids=gpu_id, 
-                max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
-                logger=logger
-            )
-            
-            # Calculate max actors based on VRAM (memory constraint, not hardware count)
-            max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
-            
-            # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
-            # IMPORTANT: Having too many concurrent TensorFlow/PyTorch processes on a single GPU 
-            # causes cuDNN resource contention, resulting in:
-            #   - "DNN library is not found"
-            #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
-            #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
-            # 
-            # Solution: Enforce a PER-GPU maximum, not just a global total.
-            # cuDNN requires workspace memory beyond just model weights, and concurrent
-            # operations compete for these resources.
-            #
-            # The formula scales dynamically with any model's VRAM requirements:
-            #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
-            #
-            # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
-            # cuDNN requires significant workspace memory for concurrent convolution operations.
-            # The headroom provides efficient concurrent inference while minimizing OOM risk.
-            # The headroom accounts for:
-            #   1. cuDNN workspace memory that scales with concurrent operations
-            #   2. CUDA context overhead for multiple processes
-            #   3. Memory fragmentation during concurrent allocation/deallocation
-            CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
-            
-            vram_per_single_gpu = available_vram_mb / n_gpus
-            theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
-            safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
-            
-            # Total max actors is per-GPU limit × number of GPUs
-            max_actors_with_headroom = safe_max_per_gpu * n_gpus
-            n_actors = min(requested_actors, max_actors_with_headroom)
-            
-            # Cap concurrent predictions to the total safe actors across all GPUs.
-            # This ensures we don't create "idle" actors that eat VRAM while others predict.
-            safe_concurrent_predictions = max_actors_with_headroom
-            
-            logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
-            logger.info(f"Requested concurrent tasks: {requested_actors}")
-            logger.info(f"Available GPUs: {n_gpus}")
-            logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
-            logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
-            logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
-            logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
-            logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
-            logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
-            logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
-            if requested_actors > n_actors:
-                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
-            
-            # Calculate fractional GPU allocation so Ray knows these are GPU actors
-            # 
-            # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
-            # When n_actors > n_gpus, multiple actors must share one GPU.
-            # 
-            # Example of the BUG we're fixing:
-            #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
-            #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
-            #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
-            # 
-            # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
-            # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
-            #   - actors_per_gpu = ceil(3/2) = 2
-            #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
-            #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
-            # 
-            GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
-            
-            # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
-            # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
-            # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
-            vram_per_single_gpu = available_vram_mb / n_gpus
-            # Calculate the fraction of GPU VRAM this model actually needs
-            # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
-            MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
-            
-            # Calculate how many actors might need to share a single GPU (worst case)
-            actors_per_gpu = math.ceil(n_actors / n_gpus)
-            
-            # Calculate max actors per GPU based on model-specific fractional constraint
-            max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
-            
-            # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
-            if actors_per_gpu > max_actors_per_single_gpu:
-                # Reduce n_actors so that actors_per_gpu fits
-                n_actors = max_actors_per_single_gpu * n_gpus
-                actors_per_gpu = max_actors_per_single_gpu
-                logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
-                             f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
-            
-            # Calculate fractional GPU based on worst-case actors per GPU
-            # This ensures all actors can be placed even if unevenly distributed
-            fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
-            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
-            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
-            
-            logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
-            logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
-            logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
-            logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
-            logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
-            
-            # Create all actors in parallel (non-blocking .remote() calls)
-            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
-            model_actors = [
-                SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
-                    parent_model_name=seisbench_parent_model,
-                    child_model_name=seisbench_child_model,
-                    gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
-                    use_gpu=True
-                ) for _ in range(n_actors)
-            ]
+            continue
+        tasks_predictor, station_list, _ascii_summary_path, _tcid_for_summary, out_dir = _prep_m
+        input_dir = c_input_dir
+        timechunk_id = c_timechunk_id
 
-            # Wait for all actors to initialize in parallel
-            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
-            try:
-                ray.get([actor.ready.remote() for actor in model_actors])
-            except Exception as e:
-                logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
-                raise
-            logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
-            
-            # Generate comment if actors were capped
-            if len(model_actors) < requested_actors:
-                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
-        else:
-            # ===== MEMORY-AWARE CPU ACTOR CREATION =====
-            # KEY INSIGHT: The constraint is RAM, not CPU count.
-            # taskset already limits CPU visibility, so let Ray handle scheduling.
-            n_cpus = len(ray_cpus) if ray_cpus else 1
-            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-            
-            # Get RAM requirement for this model
-            model_ram_mb = get_seisbench_model_ram_mb(
-                seisbench_parent_model,
-                seisbench_child_model,
-                use_gpu=False,
-                default_mb=600.0
-            )
-            
-            # Get available RAM based on system capacity
-            # Note: ram_safety_cap would need to be passed here, using 0.90 as default
-            available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
-            
-            # Calculate max actors based on RAM (memory constraint)
-            max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
-            if ignore_cpu_ram_cap:
-                n_actors = max(1, requested_actors)
-                logger.warning(
-                    "ignore_cpu_ram_cap=True: creating %s SeisBenchModelActor(s) without RAM-based cap "
-                    "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
-                    n_actors, requested_actors, max(1, max_actors_by_ram),
-                )
-            else:
-                n_actors = min(requested_actors, max(1, max_actors_by_ram))
-            
-            logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL =====")
-            logger.info(f"Requested concurrent tasks: {requested_actors}")
-            logger.info(f"Available CPUs: {n_cpus}")
-            logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
-            logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
-            logger.info(f"Max actors by RAM: {max_actors_by_ram}")
-            logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
-            if requested_actors > n_actors:
-                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by RAM, not CPU count.")
-            logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
-            
-            # Create all actors in parallel (non-blocking .remote() calls)
-            logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
-            model_actors = [
-                SeisBenchModelActor.remote(
-                    parent_model_name=seisbench_parent_model,
-                    child_model_name=seisbench_child_model,
-                    gpus_to_use=False,
-                    use_gpu=False
-                ) for _ in range(n_actors)
-            ]
-
-            # Wait for all actors to initialize in parallel
-            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
-            try:
-                ray.get([actor.ready.remote() for actor in model_actors])
-            except Exception as e:
-                logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
-                raise
-            logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
-            
-            # Generate comment if actors were capped
-            if len(model_actors) < requested_actors:
-                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
-    else:
-        # Create EQCCT model actors
-        if use_gpu:
-            # ===== MEMORY-AWARE GPU ACTOR CREATION (EQCCT/TensorFlow) =====
-            # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
-            # The constraint is: total requested VRAM must not exceed available VRAM.
-            # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
-            model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
-            # gpu_memory_limit_mb is per-actor VRAM limit for TF config, model_vram_mb is the minimum requirement
-            per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
-            
-            n_gpus = len(gpu_id)
-            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-            
-            # Get available VRAM (total pool)
-            # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
-            # Otherwise fall back to actual free VRAM query
-            available_vram_mb = get_available_vram_mb(
-                gpu_ids=gpu_id, 
-                max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
-                logger=logger
-            )
-            
-            # Calculate max actors based on VRAM (memory constraint, not hardware count)
-            max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
-            
-            # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
-            # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
-            # causes cuDNN resource contention, resulting in:
-            #   - "DNN library is not found"
-            #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
-            #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
-            # 
-            # Solution: Enforce a PER-GPU maximum, not just a global total.
-            # cuDNN requires workspace memory beyond just model weights, and concurrent
-            # operations compete for these resources.
-            #
-            # The formula scales dynamically with any model's VRAM requirements:
-            #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
-            #
-            # Example: EQCCT with 46550 MB/GPU, 2756 MB/actor:
-            #   theoretical = 46550 / 2756 = 16.9 actors/GPU
-            #   safe_max = floor(16.9 * 0.90) = 15 actors/GPU (with 10% headroom)
-            #
-            # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
-            # cuDNN requires significant workspace memory for concurrent convolution operations.
-            # Empirically tested values:
-            #   - 0.90 (10% headroom): Efficient concurrent inference
-            #   - 0.88 (12% headroom): Previously tested for stability
-            #   - 0.75 (25% headroom): Extremely conservative
-            # The headroom accounts for:
-            #   1. cuDNN workspace memory that scales with concurrent operations
-            #   2. CUDA context overhead for multiple processes
-            #   3. Memory fragmentation during concurrent allocation/deallocation
-            CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
-            
-            vram_per_single_gpu = available_vram_mb / n_gpus
-            theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
-            safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
-            
-            # Total max actors is per-GPU limit × number of GPUs
-            max_actors_with_headroom = safe_max_per_gpu * n_gpus
-            n_actors = min(requested_actors, max_actors_with_headroom)
-            
-            # Cap concurrent predictions to the total safe actors across all GPUs.
-            # This ensures we don't create "idle" actors that eat VRAM while others predict.
-            safe_concurrent_predictions = max_actors_with_headroom
-            
-            logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
-            logger.info(f"Requested concurrent tasks: {requested_actors}")
-            logger.info(f"Available GPUs: {n_gpus}")
-            logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
-            logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
-            logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
-            logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
-            logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
-            logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
-            logger.info(f"Creating {n_actors} ModelActor(s)")
-            if requested_actors > n_actors:
-                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
-            
-            # Calculate fractional GPU allocation so Ray knows these are GPU actors
-            # 
-            # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
-            # When n_actors > n_gpus, multiple actors must share one GPU.
-            # 
-            # Example of the BUG we're fixing:
-            #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
-            #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
-            #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
-            # 
-            # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
-            # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
-            #   - actors_per_gpu = ceil(3/2) = 2
-            #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
-            #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
-            # 
-            GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
-            
-            # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
-            # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
-            # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
-            vram_per_single_gpu = available_vram_mb / n_gpus
-            # Calculate the fraction of GPU VRAM this model actually needs
-            # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
-            MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
-            
-            # Calculate how many actors might need to share a single GPU (worst case)
-            actors_per_gpu = math.ceil(n_actors / n_gpus)
-            
-            # Calculate max actors per GPU based on model-specific fractional constraint
-            max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
-            
-            # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
-            if actors_per_gpu > max_actors_per_single_gpu:
-                # Reduce n_actors so that actors_per_gpu fits
-                n_actors = max_actors_per_single_gpu * n_gpus
-                actors_per_gpu = max_actors_per_single_gpu
-                logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
-                             f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
-            
-            # Calculate fractional GPU based on worst-case actors per GPU
-            # This ensures all actors can be placed even if unevenly distributed
-            fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
-            fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
-            fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
-            
-            logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
-            logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
-            logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
-            logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
-            logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
-            
-            # Create all actors in parallel (non-blocking .remote() calls)
-            logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
-            model_actors = [
-                ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
-                    gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
-                    p_model_path=p_model, 
-                    s_model_path=s_model, 
-                    gpu_memory_limit_mb=per_actor_vram_mb,  # Per-actor VRAM limit via TF config
-                    use_gpu=True
-                ) for _ in range(n_actors)
-            ]
-
-            # Wait for all actors to initialize in parallel
-            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
-            try:
-                ray.get([actor.ready.remote() for actor in model_actors])
-            except Exception as e:
-                logger.error(f"Failed to initialize ModelActors: {e}")
-                raise
-            logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
-            logger.info(f"[ModelActor] Models successfully loaded onto GPU(s).")
-            
-            # Generate comment if actors were capped
-            if len(model_actors) < requested_actors:
-                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
-        else:
-            # ===== MEMORY-AWARE CPU ACTOR CREATION (EQCCT/TensorFlow) =====
-            # KEY INSIGHT: The constraint is RAM, not CPU count.
-            # taskset already limits CPU visibility, so let Ray handle scheduling.
-            n_cpus = len(ray_cpus) if ray_cpus else 1
-            requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
-            
-            # Get RAM requirement for EQCCT in CPU mode
-            model_ram_mb = get_eqcct_ram_mb(use_gpu=False)
-            
-            # Get available RAM based on system capacity
-            # Note: ram_safety_cap would need to be passed here, using 0.90 as default
-            available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
-            
-            # Calculate max actors based on RAM (memory constraint)
-            max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
-            if ignore_cpu_ram_cap:
-                n_actors = max(1, requested_actors)
-                logger.warning(
-                    "ignore_cpu_ram_cap=True: creating %s ModelActor(s) without RAM-based cap "
-                    "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
-                    n_actors, requested_actors, max(1, max_actors_by_ram),
-                )
-            else:
-                n_actors = min(requested_actors, max(1, max_actors_by_ram))
-            
-            logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL (EQCCT) =====")
-            logger.info(f"Requested concurrent tasks: {requested_actors}")
-            logger.info(f"Available CPUs: {n_cpus}")
-            logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
-            logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
-            logger.info(f"Max actors by RAM: {max_actors_by_ram}")
-            logger.info(f"Creating {n_actors} ModelActor(s)")
-            if requested_actors > n_actors:
-                logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
-                logger.info(f"      Concurrency limited by RAM, not CPU count.")
-            logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
-            
-            # Create all actors in parallel (non-blocking .remote() calls)
-            logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
-            model_actors = [
-                ModelActor.remote(
-                    p_model_path=p_model, 
-                    s_model_path=s_model, 
-                    gpu_memory_limit_mb=None, 
-                    use_gpu=False
-                ) for _ in range(n_actors)
-            ]
-
-            # Wait for all actors to initialize in parallel
-            logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
-            try:
-                ray.get([actor.ready.remote() for actor in model_actors])
-            except Exception as e:
-                logger.error(f"Failed to initialize ModelActors: {e}")
-                raise
-            logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
-            
-            # Generate comment if actors were capped
-            if len(model_actors) < requested_actors:
-                actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
-
-    # ===== TIMING: End of actor creation =====
-    actor_creation_end_time = monotonic_s()
-    actor_creation_time_seconds = actor_creation_end_time - actor_creation_start_time
-    logger.info(f"Actor creation completed in {actor_creation_time_seconds:.2f} seconds")
-
-    # Submit tasks to ray in a queue
-    tasks_queue = []
+        if not actor_creation_done:
+            # ===== TIMING: Start tracking actor creation time =====
+            actor_creation_start_time = monotonic_s()
     
-    # Cap max_pending_tasks to safe_concurrent_predictions to prevent cuDNN resource contention
-    # This ensures that even with multiple actors/GPUs, we don't overwhelm cuDNN workspace allocation
-    if number_of_concurrent_station_predictions > safe_concurrent_predictions:
-        logger.info(f"cuDNN PREDICTION LIMIT: Capping concurrent predictions from {number_of_concurrent_station_predictions} to {safe_concurrent_predictions}")
-        logger.info(f"  → Actors created: {len(model_actors)} across {len(gpu_id) if use_gpu else 0} GPU(s)")
-        logger.info(f"  → Max concurrent predictions: {safe_concurrent_predictions} (total safe system limit)")
-        logger.info(f"  → Tasks will queue and execute as actors become available")
-        max_pending_tasks = safe_concurrent_predictions
-    else:
-        max_pending_tasks = number_of_concurrent_station_predictions
+            # CREATE MODEL ACTOR(S) - Add this before the task loop
+            logger.info(f"Creating model actor(s)...") 
     
-    logger.info(f"Starting EQCCTPro parallelized waveform processing...") 
-    logger.info("")
-    start_time = monotonic_s() 
-    model_type_lower = model_type.lower() if model_type else 'eqcct'
-    if model_type_lower == 'seisbench':
-        logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) -------")
-    else:
-        logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
+            model_type_lower = model_type.lower() if model_type else 'eqcct'
+            model_vram_mb = None  # Defensive init; will be set in GPU branches, remains None for CPU
+    
+            # Track requested vs actual actors for CSV Comments column
+            requested_concurrent_tasks = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            actor_cap_comment = ""  # Will be populated if actors are capped due to memory constraints
+    
+            # ===== cuDNN CONCURRENT PREDICTION LIMIT =====
+            # This tracks the maximum safe number of concurrent predictions based on GPU constraints.
+            # Key insight: cuDNN workspace memory is allocated dynamically during inference, and having
+            # too many concurrent predictions causes resource contention regardless of total actors.
+            # 
+            # safe_concurrent_predictions is set to safe_max_per_gpu (from a single GPU's perspective)
+            # in GPU branches, ensuring that concurrent predictions don't overwhelm cuDNN resources.
+            # For CPU mode, this remains at the user-requested value.
+            safe_concurrent_predictions = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+    
+            if model_type_lower == 'seisbench':
+                # --- Validate model name once on the driver (lightweight, no model loading) ---
+                # Actors will skip this network call (validate_pretrained=False) to avoid
+                # a thundering herd of concurrent list_pretrained() requests causing HTTP 500s.
+                logger.info(f"Validating SeisBench model name: {seisbench_parent_model}/{seisbench_child_model}...")
+                try:
+                    from eqcctpro.seisbench_models import SeisBenchModels
+                    SeisBenchModels(seisbench_parent_model, seisbench_child_model, validate_pretrained=True)
+                    logger.info("SeisBench model name validated successfully.")
+                except Exception as e:
+                    logger.warning(f"SeisBench model validation failed: {e}. Proceeding anyway, actors will attempt to load from cache.")
 
-    if timechunk_id is None:
-        # derive from the path if caller forgot to pass it
-        cand = os.path.basename(input_dir)
-        if "_" in cand and len(cand) >= 10:
-            timechunk_id = cand
-        else:
-            raise ValueError("timechunk_id is None and could not be inferred from input_dir; "
-                            "expected a dir named like YYYYMMDDThhmmssZ_YYYYMMDDThhmmssZ")
-    starttime, endtime, time_delta = parse_time_range(timechunk_id)
+                # Create SeisBench model actors
+                if use_gpu:
+                    # Get VRAM requirement for this SeisBench model
+                    model_vram_mb = get_seisbench_model_vram_mb(
+                        seisbench_parent_model, 
+                        seisbench_child_model,
+                        default_mb=2000.0
+                    )
+                    # Use max of requested VRAM or model requirement (similar to EQCCT logic)
+                    # gpu_memory_limit_mb is per-actor VRAM limit, model_vram_mb is the minimum requirement
+                    per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
+            
+                    # ===== MEMORY-AWARE GPU ACTOR CREATION =====
+                    # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
+                    # The constraint is: total requested VRAM must not exceed available VRAM.
+                    # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
+                    n_gpus = len(gpu_id)
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get available VRAM (total pool)
+                    # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
+                    # Otherwise fall back to actual free VRAM query
+                    available_vram_mb = get_available_vram_mb(
+                        gpu_ids=gpu_id, 
+                        max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
+                        logger=logger
+                    )
+            
+                    # Calculate max actors based on VRAM (memory constraint, not hardware count)
+                    max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
+            
+                    # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
+                    # IMPORTANT: Having too many concurrent TensorFlow/PyTorch processes on a single GPU 
+                    # causes cuDNN resource contention, resulting in:
+                    #   - "DNN library is not found"
+                    #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
+                    #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
+                    # 
+                    # Solution: Enforce a PER-GPU maximum, not just a global total.
+                    # cuDNN requires workspace memory beyond just model weights, and concurrent
+                    # operations compete for these resources.
+                    #
+                    # The formula scales dynamically with any model's VRAM requirements:
+                    #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
+                    #
+                    # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
+                    # cuDNN requires significant workspace memory for concurrent convolution operations.
+                    # The headroom provides efficient concurrent inference while minimizing OOM risk.
+                    # The headroom accounts for:
+                    #   1. cuDNN workspace memory that scales with concurrent operations
+                    #   2. CUDA context overhead for multiple processes
+                    #   3. Memory fragmentation during concurrent allocation/deallocation
+                    CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
+            
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
+                    safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
+            
+                    # Total max actors is per-GPU limit × number of GPUs
+                    max_actors_with_headroom = safe_max_per_gpu * n_gpus
+                    n_actors = min(requested_actors, max_actors_with_headroom)
+            
+                    # Cap concurrent predictions to the total safe actors across all GPUs.
+                    # This ensures we don't create "idle" actors that eat VRAM while others predict.
+                    safe_concurrent_predictions = max_actors_with_headroom
+            
+                    logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available GPUs: {n_gpus}")
+                    logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
+                    logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
+                    logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
+                    logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
+                    logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
+                    logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
+                    logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
+            
+                    # Calculate fractional GPU allocation so Ray knows these are GPU actors
+                    # 
+                    # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
+                    # When n_actors > n_gpus, multiple actors must share one GPU.
+                    # 
+                    # Example of the BUG we're fixing:
+                    #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
+                    #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
+                    #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
+                    # 
+                    # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
+                    # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
+                    #   - actors_per_gpu = ceil(3/2) = 2
+                    #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
+                    #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
+                    # 
+                    GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
+            
+                    # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
+                    # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
+                    # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    # Calculate the fraction of GPU VRAM this model actually needs
+                    # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
+                    MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
+            
+                    # Calculate how many actors might need to share a single GPU (worst case)
+                    actors_per_gpu = math.ceil(n_actors / n_gpus)
+            
+                    # Calculate max actors per GPU based on model-specific fractional constraint
+                    max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
+            
+                    # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
+                    if actors_per_gpu > max_actors_per_single_gpu:
+                        # Reduce n_actors so that actors_per_gpu fits
+                        n_actors = max_actors_per_single_gpu * n_gpus
+                        actors_per_gpu = max_actors_per_single_gpu
+                        logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
+                                     f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+            
+                    # Calculate fractional GPU based on worst-case actors per GPU
+                    # This ensures all actors can be placed even if unevenly distributed
+                    fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
+                    fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
+                    fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
+            
+                    logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+                    logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
+                    logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
+                    logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
+                    logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
+                    model_actors = [
+                        SeisBenchModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
+                            parent_model_name=seisbench_parent_model,
+                            child_model_name=seisbench_child_model,
+                            gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
+                            use_gpu=True
+                        ) for _ in range(n_actors)
+                    ]
 
-    logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
-    logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
-
-    # scmlpick-style shared refs: one copy of waveforms + args in the object store (same as RIPPER).
-    station_codes_for_stream = [tasks_predictor[i][1] for i in range(len(tasks_predictor))]
-    merged_stream_ma = _load_ripper_mseed_stream(args["input_dir"], station_codes_for_stream)
-    if len(merged_stream_ma) == 0:
-        logger.warning(
-            "ModelActor mode: no traces preloaded; tasks will read mSEED from disk per station."
-        )
-        tasks_predictor_ma = tasks_predictor
-    else:
-        logger.info(
-            f"ModelActor mode: ray.put shared Stream ({len(merged_stream_ma)} trace(s)) and args for "
-            f"{len(tasks_predictor)} station task(s)."
-        )
-        args_ref_ma = ray.put(args)
-        stream_ref_ma = ray.put(merged_stream_ma)
-        tasks_predictor_ma = [
-            [tasks_predictor[i][0], tasks_predictor[i][1], tasks_predictor[i][2], args_ref_ma, stream_ref_ma]
-            for i in range(len(tasks_predictor))
-        ]
-
-    # ===== TIMING: Collect waveform load times for averaging =====
-    waveform_load_times = []
-
-    # Concurrent Prediction(s) Parallel Processing
-    try: 
-        for i in range(len(tasks_predictor_ma)):
-            while True:
-                # Add new task to queue while max is not reached
-                if len(tasks_queue) < max_pending_tasks:
-                    # SELECT WHICH MODEL ACTOR TO USE (round-robin across GPUs)
-                    model_actor = model_actors[i % len(model_actors)]
-
-                    # Route to appropriate prediction function based on model type
-                    if model_type_lower == 'seisbench':
-                        # SeisBench models use parallel_predict_seisbench
-                        if use_gpu is False:
-                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
-                        elif use_gpu is True:
-                            # Don't allocate GPUs to workers, only to model actors
-                            # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
-                            tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
-                    else:
-                        # EQCCT models use parallel_predict (original)
-                        if use_gpu is False:
-                            tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
-                        elif use_gpu is True:
-                            # Don't allocate GPUs to workers, only to model actors
-                            # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
-                            tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
-                    break
-                # If there are more tasks than maximum, just process them
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
                 else:
-                    tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-                    for finished_task in tasks_finished:
-                        result = ray.get(finished_task)
-                        log_entry, load_time = result  # Unpack tuple: (log_message, waveform_load_time)
-                        logger.info(f'{log_entry}')
-                        if load_time is not None:
-                            waveform_load_times.append(load_time)
+                    # ===== MEMORY-AWARE CPU ACTOR CREATION =====
+                    # KEY INSIGHT: The constraint is RAM, not CPU count.
+                    # taskset already limits CPU visibility, so let Ray handle scheduling.
+                    n_cpus = len(ray_cpus) if ray_cpus else 1
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get RAM requirement for this model
+                    model_ram_mb = get_seisbench_model_ram_mb(
+                        seisbench_parent_model,
+                        seisbench_child_model,
+                        use_gpu=False,
+                        default_mb=600.0
+                    )
+            
+                    # Get available RAM based on system capacity
+                    # Note: ram_safety_cap would need to be passed here, using 0.90 as default
+                    available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
+            
+                    # Calculate max actors based on RAM (memory constraint)
+                    max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
+                    if ignore_cpu_ram_cap:
+                        n_actors = max(1, requested_actors)
+                        logger.warning(
+                            "ignore_cpu_ram_cap=True: creating %s SeisBenchModelActor(s) without RAM-based cap "
+                            "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
+                            n_actors, requested_actors, max(1, max_actors_by_ram),
+                        )
+                    else:
+                        n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            
+                    logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available CPUs: {n_cpus}")
+                    logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
+                    logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
+                    logger.info(f"Max actors by RAM: {max_actors_by_ram}")
+                    logger.info(f"Creating {n_actors} SeisBenchModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by RAM, not CPU count.")
+                    logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} SeisBenchModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
+                    model_actors = [
+                        SeisBenchModelActor.remote(
+                            parent_model_name=seisbench_parent_model,
+                            child_model_name=seisbench_child_model,
+                            gpus_to_use=False,
+                            use_gpu=False
+                        ) for _ in range(n_actors)
+                    ]
 
-        # After adding all the tasks to queue, process what's left
-        while tasks_queue:
-            tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-            for finished_task in tasks_finished:
-                result = ray.get(finished_task)
-                log_entry, load_time = result  # Unpack tuple: (log_message, waveform_load_time)
-                logger.info(f'{log_entry}')
-                if load_time is not None:
-                    waveform_load_times.append(load_time)
-        logger.info("")
-        
-        # Calculate average waveform load time
-        if waveform_load_times:
-            avg_waveform_load_time = sum(waveform_load_times) / len(waveform_load_times)
-            logger.info(f"Average waveform load time (per task): {avg_waveform_load_time:.3f}s (across {len(waveform_load_times)} tasks)")
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize SeisBenchModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
+            else:
+                # Create EQCCT model actors
+                if use_gpu:
+                    # ===== MEMORY-AWARE GPU ACTOR CREATION (EQCCT/TensorFlow) =====
+                    # KEY INSIGHT: With TF memory growth enabled, multiple actors CAN share GPU(s).
+                    # The constraint is: total requested VRAM must not exceed available VRAM.
+                    # taskset/CUDA_VISIBLE_DEVICES already limits hardware visibility, so let Ray handle scheduling.
+                    model_vram_mb = get_eqcct_vram_mb()  # Use measured EQCCT VRAM requirement
+                    # gpu_memory_limit_mb is per-actor VRAM limit for TF config, model_vram_mb is the minimum requirement
+                    per_actor_vram_mb = max(gpu_memory_limit_mb, model_vram_mb) if gpu_memory_limit_mb else model_vram_mb
+            
+                    n_gpus = len(gpu_id)
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get available VRAM (total pool)
+                    # Use total_vram_pool_mb if provided (aggregate VRAM cap across all actors)
+                    # Otherwise fall back to actual free VRAM query
+                    available_vram_mb = get_available_vram_mb(
+                        gpu_ids=gpu_id, 
+                        max_vram_mb=total_vram_pool_mb,  # Use total pool, not per-actor limit
+                        logger=logger
+                    )
+            
+                    # Calculate max actors based on VRAM (memory constraint, not hardware count)
+                    max_actors_by_vram = int(available_vram_mb / per_actor_vram_mb) if per_actor_vram_mb > 0 else requested_actors
+            
+                    # ===== cuDNN STABILITY HEADROOM (PER-GPU ENFORCEMENT) =====
+                    # IMPORTANT: Having too many concurrent TensorFlow processes on a single GPU 
+                    # causes cuDNN resource contention, resulting in:
+                    #   - "DNN library is not found"
+                    #   - "Attempting to perform BLAS operation using StreamExecutor without BLAS support"
+                    #   - "cudaSetDevice() on GPU:0 failed. Status: out of memory"
+                    # 
+                    # Solution: Enforce a PER-GPU maximum, not just a global total.
+                    # cuDNN requires workspace memory beyond just model weights, and concurrent
+                    # operations compete for these resources.
+                    #
+                    # The formula scales dynamically with any model's VRAM requirements:
+                    #   safe_max_per_gpu = floor(per_gpu_vram / per_actor_vram * CUDNN_SAFETY_FACTOR)
+                    #
+                    # Example: EQCCT with 46550 MB/GPU, 2756 MB/actor:
+                    #   theoretical = 46550 / 2756 = 16.9 actors/GPU
+                    #   safe_max = floor(16.9 * 0.90) = 15 actors/GPU (with 10% headroom)
+                    #
+                    # CUDNN_SAFETY_FACTOR: Controls how much GPU VRAM to reserve for cuDNN workspace.
+                    # cuDNN requires significant workspace memory for concurrent convolution operations.
+                    # Empirically tested values:
+                    #   - 0.90 (10% headroom): Efficient concurrent inference
+                    #   - 0.88 (12% headroom): Previously tested for stability
+                    #   - 0.75 (25% headroom): Extremely conservative
+                    # The headroom accounts for:
+                    #   1. cuDNN workspace memory that scales with concurrent operations
+                    #   2. CUDA context overhead for multiple processes
+                    #   3. Memory fragmentation during concurrent allocation/deallocation
+                    CUDNN_SAFETY_FACTOR = 1.0 - cudnn_headroom  # Use user-defined headroom
+            
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    theoretical_max_per_gpu = vram_per_single_gpu / per_actor_vram_mb if per_actor_vram_mb > 0 else float('inf')
+                    safe_max_per_gpu = max(1, int(theoretical_max_per_gpu * CUDNN_SAFETY_FACTOR))
+            
+                    # Total max actors is per-GPU limit × number of GPUs
+                    max_actors_with_headroom = safe_max_per_gpu * n_gpus
+                    n_actors = min(requested_actors, max_actors_with_headroom)
+            
+                    # Cap concurrent predictions to the total safe actors across all GPUs.
+                    # This ensures we don't create "idle" actors that eat VRAM while others predict.
+                    safe_concurrent_predictions = max_actors_with_headroom
+            
+                    logger.info(f"===== MEMORY-AWARE GPU ACTOR POOL (EQCCT) =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available GPUs: {n_gpus}")
+                    logger.info(f"Total VRAM Pool: {available_vram_mb:.0f} MB")
+                    logger.info(f"VRAM per model: {per_actor_vram_mb:.0f} MB")
+                    logger.info(f"Per-GPU VRAM: {vram_per_single_gpu:.0f} MB")
+                    logger.info(f"Theoretical max per GPU: {theoretical_max_per_gpu:.1f} actors")
+                    logger.info(f"Safe max per GPU (with {cudnn_headroom*100:.0f}% cuDNN headroom): {safe_max_per_gpu} actors")
+                    logger.info(f"Max actors total: {max_actors_with_headroom} ({safe_max_per_gpu} per GPU × {n_gpus} GPUs)")
+                    logger.info(f"Creating {n_actors} ModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by VRAM with cuDNN headroom ({max_actors_with_headroom} max).")
+            
+                    # Calculate fractional GPU allocation so Ray knows these are GPU actors
+                    # 
+                    # CRITICAL: Ray places each actor on a SINGLE GPU, not spread across GPUs.
+                    # When n_actors > n_gpus, multiple actors must share one GPU.
+                    # 
+                    # Example of the BUG we're fixing:
+                    #   - 3 actors, 2 GPUs, old calculation: 0.95 * 2 / 3 = 0.63 per actor
+                    #   - Ray places: Actor1→GPU0 (0.63), Actor2→GPU1 (0.63)
+                    #   - Actor3 needs 0.63, but GPU0 has 0.37 left, GPU1 has 0.37 left → DEADLOCK!
+                    # 
+                    # CORRECT approach: Calculate based on actors_per_gpu (ceiling).
+                    # If 3 actors on 2 GPUs, worst case is 2 actors on 1 GPU, so:
+                    #   - actors_per_gpu = ceil(3/2) = 2
+                    #   - fractional_gpu = 0.95 / 2 = 0.475 per actor
+                    #   - Now 2 actors can fit on 1 GPU: 2 × 0.475 = 0.95 ≤ 1.0 ✓
+                    # 
+                    GPU_HEADROOM_FACTOR = 0.95  # Leave 5% headroom per Ray best practices
+            
+                    # Calculate MIN_FRACTIONAL_GPU dynamically based on model's actual VRAM requirement
+                    # This allows smaller models (e.g., PhaseNet ~500MB) to have more actors per GPU
+                    # compared to larger models (e.g., EQCCT ~1700MB) on the same hardware
+                    vram_per_single_gpu = available_vram_mb / n_gpus
+                    # Calculate the fraction of GPU VRAM this model actually needs
+                    # Floor at 0.01 (1%) for Ray scheduling stability, cap at 0.50 to ensure at least 2 actors can fit
+                    MIN_FRACTIONAL_GPU = max(0.01, min(0.475, per_actor_vram_mb / vram_per_single_gpu))
+            
+                    # Calculate how many actors might need to share a single GPU (worst case)
+                    actors_per_gpu = math.ceil(n_actors / n_gpus)
+            
+                    # Calculate max actors per GPU based on model-specific fractional constraint
+                    max_actors_per_single_gpu = int(GPU_HEADROOM_FACTOR / MIN_FRACTIONAL_GPU)
+            
+                    # If actors_per_gpu exceeds what can fit on one GPU, cap n_actors
+                    if actors_per_gpu > max_actors_per_single_gpu:
+                        # Reduce n_actors so that actors_per_gpu fits
+                        n_actors = max_actors_per_single_gpu * n_gpus
+                        actors_per_gpu = max_actors_per_single_gpu
+                        logger.warning(f"Capping actors to {n_actors} total ({actors_per_gpu} per GPU) "
+                                     f"(model needs {MIN_FRACTIONAL_GPU:.1%} GPU, max {max_actors_per_single_gpu} actors/GPU with {GPU_HEADROOM_FACTOR:.0%} headroom)")
+            
+                    # Calculate fractional GPU based on worst-case actors per GPU
+                    # This ensures all actors can be placed even if unevenly distributed
+                    fractional_gpu = GPU_HEADROOM_FACTOR / actors_per_gpu if actors_per_gpu > 0 else 1.0
+                    fractional_gpu = min(fractional_gpu, 1.0)  # Cap at 1.0
+                    fractional_gpu = math.floor(fractional_gpu * 100) / 100  # Truncate to 2 decimal places
+            
+                    logger.info(f"Using fractional GPU allocation: {fractional_gpu:.3f} GPU per actor")
+                    logger.info(f"  → Model VRAM fraction: {MIN_FRACTIONAL_GPU:.1%} of GPU ({per_actor_vram_mb:.0f} MB / {vram_per_single_gpu:.0f} MB)")
+                    logger.info(f"  → Actors per GPU (worst case): {actors_per_gpu}")
+                    logger.info(f"  → Max per-GPU usage: {actors_per_gpu} × {fractional_gpu:.3f} = {actors_per_gpu * fractional_gpu:.3f} / 1.0 GPU")
+                    logger.info(f"  → Headroom per GPU: {(1 - actors_per_gpu * fractional_gpu) * 100:.1f}% reserved for Ray/CUDA overhead")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({per_actor_vram_mb/1024:.2f}GB VRAM each)...")
+                    model_actors = [
+                        ModelActor.options(num_gpus=fractional_gpu, num_cpus=0).remote(
+                            gpus_to_use=gpu_id,  # Pass all available GPUs, actor will use what Ray assigns
+                            p_model_path=p_model, 
+                            s_model_path=s_model, 
+                            gpu_memory_limit_mb=per_actor_vram_mb,  # Per-actor VRAM limit via TF config
+                            use_gpu=True
+                        ) for _ in range(n_actors)
+                    ]
+
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize ModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} GPU actor(s) created successfully. Task queue will handle concurrency.")
+                    logger.info(f"[ModelActor] Models successfully loaded onto GPU(s).")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (VRAM pool: {available_vram_mb:.0f} MB, {per_actor_vram_mb:.0f} MB/actor)"
+                else:
+                    # ===== MEMORY-AWARE CPU ACTOR CREATION (EQCCT/TensorFlow) =====
+                    # KEY INSIGHT: The constraint is RAM, not CPU count.
+                    # taskset already limits CPU visibility, so let Ray handle scheduling.
+                    n_cpus = len(ray_cpus) if ray_cpus else 1
+                    requested_actors = number_of_concurrent_station_predictions if number_of_concurrent_station_predictions else 1
+            
+                    # Get RAM requirement for EQCCT in CPU mode
+                    model_ram_mb = get_eqcct_ram_mb(use_gpu=False)
+            
+                    # Get available RAM based on system capacity
+                    # Note: ram_safety_cap would need to be passed here, using 0.90 as default
+                    available_ram_mb = get_available_ram_mb(ram_safety_cap=0.90, logger=logger)
+            
+                    # Calculate max actors based on RAM (memory constraint)
+                    max_actors_by_ram = int(available_ram_mb / model_ram_mb) if model_ram_mb > 0 else requested_actors
+                    if ignore_cpu_ram_cap:
+                        n_actors = max(1, requested_actors)
+                        logger.warning(
+                            "ignore_cpu_ram_cap=True: creating %s ModelActor(s) without RAM-based cap "
+                            "(requested=%s, RAM heuristic would allow ~%s). OOM risk.",
+                            n_actors, requested_actors, max(1, max_actors_by_ram),
+                        )
+                    else:
+                        n_actors = min(requested_actors, max(1, max_actors_by_ram))
+            
+                    logger.info(f"===== MEMORY-AWARE CPU ACTOR POOL (EQCCT) =====")
+                    logger.info(f"Requested concurrent tasks: {requested_actors}")
+                    logger.info(f"Available CPUs: {n_cpus}")
+                    logger.info(f"Available RAM: {available_ram_mb:.0f} MB")
+                    logger.info(f"RAM per model: {model_ram_mb:.0f} MB")
+                    logger.info(f"Max actors by RAM: {max_actors_by_ram}")
+                    logger.info(f"Creating {n_actors} ModelActor(s)")
+                    if requested_actors > n_actors:
+                        logger.info(f"NOTE: Tasks will be queued and round-robin distributed to the {n_actors} actor(s).")
+                        logger.info(f"      Concurrency limited by RAM, not CPU count.")
+                    logger.info(f"Let Ray handle scheduling (taskset already restricts CPU visibility)")
+            
+                    # Create all actors in parallel (non-blocking .remote() calls)
+                    logger.info(f"Creating {n_actors} ModelActor(s) in parallel ({model_ram_mb/1024:.2f}GB RAM each)...")
+                    model_actors = [
+                        ModelActor.remote(
+                            p_model_path=p_model, 
+                            s_model_path=s_model, 
+                            gpu_memory_limit_mb=None, 
+                            use_gpu=False
+                        ) for _ in range(n_actors)
+                    ]
+
+                    # Wait for all actors to initialize in parallel
+                    logger.info(f"Waiting for {n_actors} actor(s) to initialize (loading models concurrently)...")
+                    try:
+                        ray.get([actor.ready.remote() for actor in model_actors])
+                    except Exception as e:
+                        logger.error(f"Failed to initialize ModelActors: {e}")
+                        raise
+                    logger.info(f"All {n_actors} CPU actor(s) created successfully. Task queue will handle concurrency.")
+            
+                    # Generate comment if actors were capped
+                    if len(model_actors) < requested_actors:
+                        actor_cap_comment = f"Requested {requested_actors} actors, created {len(model_actors)} (RAM limited to {available_ram_mb:.0f} MB, {model_ram_mb:.0f} MB/actor)"
+
+            # ===== TIMING: End of actor creation =====
+            actor_creation_end_time = monotonic_s()
+            actor_creation_time_seconds = actor_creation_end_time - actor_creation_start_time
+            logger.info(f"Actor creation completed in {actor_creation_time_seconds:.2f} seconds")
+            actor_creation_done = True
+        elif len(_chunk_specs) > 1:
+            logger.info(
+                "Reusing %s ModelActor(s) for sequential timechunk %s (%s/%s).",
+                len(model_actors),
+                timechunk_id,
+                chunk_idx + 1,
+                len(_chunk_specs),
+            )
+
+
+        # Submit tasks to ray in a queue
+        tasks_queue = []
+    
+        # Cap max_pending_tasks to safe_concurrent_predictions to prevent cuDNN resource contention
+        # This ensures that even with multiple actors/GPUs, we don't overwhelm cuDNN workspace allocation
+        if number_of_concurrent_station_predictions > safe_concurrent_predictions:
+            logger.info(f"cuDNN PREDICTION LIMIT: Capping concurrent predictions from {number_of_concurrent_station_predictions} to {safe_concurrent_predictions}")
+            logger.info(f"  → Actors created: {len(model_actors)} across {len(gpu_id) if use_gpu else 0} GPU(s)")
+            logger.info(f"  → Max concurrent predictions: {safe_concurrent_predictions} (total safe system limit)")
+            logger.info(f"  → Tasks will queue and execute as actors become available")
+            max_pending_tasks = safe_concurrent_predictions
         else:
-            avg_waveform_load_time = 0.0
+            max_pending_tasks = number_of_concurrent_station_predictions
+    
+        logger.info(f"Starting EQCCTPro parallelized waveform processing...") 
+        logger.info("")
+        start_time = monotonic_s() 
+        model_type_lower = model_type.lower() if model_type else 'eqcct'
+        if model_type_lower == 'seisbench':
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via SeisBench ({seisbench_parent_model} - {seisbench_child_model}) -------")
+        else:
+            logger.info(f"------- Analyzing Seismic Waveforms for P and S Picks via EQCCT -------")
 
-    except Exception as e:
-        avg_waveform_load_time = 0.0  # Default if error occurs before collecting any times
-        # Catch any error in the parallel processing
-        logger.error(f"ERROR in parallel processing at {datetime.now()}")
-        logger.error(f"Error: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise  # Re-raise to see the error
+        if timechunk_id is None:
+            # derive from the path if caller forgot to pass it
+            cand = os.path.basename(input_dir)
+            if "_" in cand and len(cand) >= 10:
+                timechunk_id = cand
+            else:
+                raise ValueError("timechunk_id is None and could not be inferred from input_dir; "
+                                "expected a dir named like YYYYMMDDThhmmssZ_YYYYMMDDThhmmssZ")
+        starttime, endtime, time_delta = parse_time_range(timechunk_id)
 
-    logger.info(f"------- Parallel Station Waveform Processing Complete For {starttime} to {endtime} Timechunk-------")
+        logger.info(f"Analyzing {time_delta} minute timechunk from {starttime} to {endtime} ({waveform_overlap} min overlap)")
+        logger.info(f"Processing a total of {len(tasks_predictor)} stations, {max_pending_tasks} at a time.") 
+
+        # scmlpick-style shared refs: one copy of waveforms + args in the object store (same as RIPPER).
+        station_codes_for_stream = [tasks_predictor[i][1] for i in range(len(tasks_predictor))]
+        merged_stream_ma, station_mseed_stats = _load_ripper_mseed_stream(
+            args["input_dir"], station_codes_for_stream, logger=logger
+        )
+        args["station_mseed_stats"] = station_mseed_stats
+        if len(merged_stream_ma) == 0:
+            logger.warning(
+                "ModelActor mode: no traces preloaded; tasks will read mSEED from disk per station."
+            )
+            tasks_predictor_ma = tasks_predictor
+        else:
+            logger.info(
+                f"ModelActor mode: ray.put shared Stream ({len(merged_stream_ma)} trace(s)) and args for "
+                f"{len(tasks_predictor)} station task(s)."
+            )
+            args_ref_ma = ray.put(args)
+            stream_ref_ma = ray.put(merged_stream_ma)
+            tasks_predictor_ma = [
+                [tasks_predictor[i][0], tasks_predictor[i][1], tasks_predictor[i][2], args_ref_ma, stream_ref_ma]
+                for i in range(len(tasks_predictor))
+            ]
+
+        # ===== TIMING: Collect waveform load times for averaging =====
+        waveform_load_times = []
+        ascii_summary_rows: list = []
+
+        # Concurrent Prediction(s) Parallel Processing
+        try: 
+            for i in range(len(tasks_predictor_ma)):
+                while True:
+                    # Add new task to queue while max is not reached
+                    if len(tasks_queue) < max_pending_tasks:
+                        # SELECT WHICH MODEL ACTOR TO USE (round-robin across GPUs)
+                        model_actor = model_actors[i % len(model_actors)]
+
+                        # Route to appropriate prediction function based on model type
+                        if model_type_lower == 'seisbench':
+                            # SeisBench models use parallel_predict_seisbench
+                            if use_gpu is False:
+                                tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
+                            elif use_gpu is True:
+                                # Don't allocate GPUs to workers, only to model actors
+                                # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
+                                tasks_queue.append(parallel_predict_seisbench.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
+                        else:
+                            # EQCCT models use parallel_predict (original)
+                            if use_gpu is False:
+                                tasks_queue.append(parallel_predict.options(num_cpus=0).remote(tasks_predictor_ma[i], model_actor, False))
+                            elif use_gpu is True:
+                                # Don't allocate GPUs to workers, only to model actors
+                                # Use num_cpus=0 to avoid deadlocks when Ray has limited CPUs
+                                tasks_queue.append(parallel_predict.options(num_cpus=0, num_gpus=0).remote(tasks_predictor_ma[i], model_actor, True))
+                        break
+                    # If there are more tasks than maximum, just process them
+                    else:
+                        tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                        for finished_task in tasks_finished:
+                            result = ray.get(finished_task)
+                            log_entry, load_time, ascii_row = _unpack_modelactor_predict_result(
+                                result
+                            )
+                            logger.info(f'{log_entry}')
+                            if load_time is not None:
+                                waveform_load_times.append(load_time)
+                            if ascii_row is not None:
+                                ascii_summary_rows.append(ascii_row)
+
+            # After adding all the tasks to queue, process what's left
+            while tasks_queue:
+                tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
+                for finished_task in tasks_finished:
+                    result = ray.get(finished_task)
+                    log_entry, load_time, ascii_row = _unpack_modelactor_predict_result(
+                        result
+                    )
+                    logger.info(f'{log_entry}')
+                    if load_time is not None:
+                        waveform_load_times.append(load_time)
+                    if ascii_row is not None:
+                        ascii_summary_rows.append(ascii_row)
+            logger.info("")
+        
+            # Calculate average waveform load time
+            if waveform_load_times:
+                avg_waveform_load_time = sum(waveform_load_times) / len(waveform_load_times)
+                logger.info(f"Average waveform load time (per task): {avg_waveform_load_time:.3f}s (across {len(waveform_load_times)} tasks)")
+            else:
+                avg_waveform_load_time = 0.0
+
+            if normalize_pick_output_format(pick_output_format) == "ascii":
+                merged = merge_ascii_summary_rows(_ascii_summary_path, ascii_summary_rows)
+                write_ascii_run_summary(_ascii_summary_path, merged)
+                write_mseed_error_reference_beside_summary(_ascii_summary_path)
+                _exec_p = refresh_executive_picks_summary_from_chunk_output_dir(out_dir)
+                if _exec_p:
+                    logger.info("Executive picks summary (all timechunks): %s", _exec_p)
+
+        except Exception as e:
+            avg_waveform_load_time = 0.0  # Default if error occurs before collecting any times
+            # Catch any error in the parallel processing
+            logger.error(f"ERROR in parallel processing at {datetime.now()}")
+            logger.error(f"Error: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise  # Re-raise to see the error
+
+        logger.info(f"------- Parallel Station Waveform Processing Complete For {starttime} to {endtime} Timechunk-------")
+        end_time = monotonic_s()
+        logger.info(f"Picks saved at {out_dir} Process Runtime: {end_time - start_time:.2f} s")
+        all_waveform_load_times.extend(waveform_load_times)
+        waveform_processing_time_seconds += end_time - start_time
+
+    if not actor_creation_done:
+        logger.error("No timechunk produced station tasks in ModelActor mode; exiting.")
+        return
+
     end_time = monotonic_s()
-    logger.info(f"Picks saved at {output_dir}Process Runtime: {end_time - start_time:.2f} s")
+    total_trial_time_seconds = end_time - trial_start_time
+    if all_waveform_load_times:
+        avg_waveform_load_time = sum(all_waveform_load_times) / len(all_waveform_load_times)
+    else:
+        avg_waveform_load_time = 0.0
 
     if testing_gpu is not None: 
         # Guard: make sure CPUs is an int, not a list
@@ -2095,10 +2604,7 @@ def mseed_predictor(input_dir='downloads_mseeds',
         # This may be less than number_of_concurrent_station_predictions due to optimal capping
         actual_actors = len(model_actors) if model_actors else 1
         
-        # Calculate timing metrics
-        total_trial_time_seconds = end_time - trial_start_time
-        waveform_processing_time_seconds = end_time - start_time
-        
+        # total_trial_time_seconds: final wall clock from trial_start_time (set above)
         trial_data = {
             "Trial Number": None,  # Will be auto-filled by append_trial_row
             "Stations Used": str(station_list),
@@ -2128,7 +2634,18 @@ def mseed_predictor(input_dir='downloads_mseeds',
             
         append_trial_row(csv_path=test_csv_filepath, trial_data=trial_data)
         logger.info(f"Successfully saved trial data to CSV at {test_csv_filepath}")
-        
+
+    if _pick_norm == "ascii":
+        _picks_root_ma = os.path.join(os.getcwd(), str(output_dir))
+        _exec_ma = refresh_executive_picks_summary(
+            _picks_root_ma, total_trial_time_seconds=total_trial_time_seconds
+        )
+        if _exec_ma:
+            logger.info(
+                "Executive picks summary (final, includes total trial time): %s",
+                _exec_ma,
+            )
+
     return "Successfully ran EQCCTPro, exiting..."
 
 
@@ -2285,7 +2802,6 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
     """
     import glob
     import shutil
-    import csv
     import logging
     from logging.handlers import QueueHandler
     from eqcctpro.seisbench_models import mseed2stream_3c, process_raw_station_stream_3c
@@ -2298,6 +2814,9 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         pos, station, out_dir, args = predict_args
         use_shared_stream = False
 
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
+
     # Set up logger to forward to the main listener
     logger = logging.getLogger(f"eqcctpro.worker.{station}")
     logger.setLevel(logging.INFO)
@@ -2305,173 +2824,189 @@ def parallel_predict_seisbench(predict_args, model_actor, gpu=False):
         logger.addHandler(QueueHandler(args['log_queue']))
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
 
-    if os.path.isfile(csv_filename):
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
+            return (_pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."), 0.0, None)
 
     os.makedirs(save_dir, exist_ok=True)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
-                csvPr_gen.close()
-                return (f"{pos} {station}: FAILED - No traces for station in shared Stream.", None)
-            stream3c, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            if not files_list:
-                csvPr_gen.close()
-                return (f"{pos} {station}: FAILED - No mSEED files found.", None)
-            stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
-    except Exception as e:
-        csvPr_gen.close()
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
-        return (f"{pos} {station}: {err_msg}", None)
-    waveform_load_time = monotonic_s() - waveform_load_start
+        sink.write_header()
+        sink.flush()
 
-    try:
-        # Get picks from SeisBench model
-        # Use ray.get with a timeout or just normally if we fixed the CPU deadlock
-        classify_output = ray.get(model_actor.classify.remote(
-            stream3c,
-            P_threshold=args.get('P_threshold', 0.3),
-            S_threshold=args.get('S_threshold', 0.3),
-            Detection_threshold=args.get('Detection_threshold', 0.3),
-            strict=False,
-            flexible_horizontal_components=True
-        ))
-        
-        # Extract metadata from stream
-        station_code = stream3c[0].stats.station if len(stream3c) > 0 else station
-        network_code = stream3c[0].stats.network if len(stream3c) > 0 else ""
-        # Try to get coordinates from stream metadata if available
-        station_lat = getattr(stream3c[0].stats, 'coordinates', {}).get('latitude', 0.0) if len(stream3c) > 0 else 0.0
-        station_lon = getattr(stream3c[0].stats, 'coordinates', {}).get('longitude', 0.0) if len(stream3c) > 0 else 0.0
-        station_elv = getattr(stream3c[0].stats, 'coordinates', {}).get('elevation', 0.0) if len(stream3c) > 0 else 0.0
-        
-        # Extract picks from ClassifyOutput
-        picks = classify_output.picks if hasattr(classify_output, 'picks') else []
-        
-        # Group picks by time to write to CSV
-        # SeisBench picks are individual. We'll group them if they are very close or just write them.
-        # To match EQCCT style, we'll try to find P and S pairs within a 10s window? 
-        # Actually, let's just write them as they come for now, or use a simple grouping.
-        
-        p_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'P']
-        s_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'S']
-        
-        # Simple pairing: for each P, find the first S that comes after it within 30s
-        used_s = set()
-        for p in p_picks:
-            # Robust attribute extraction for SeisBench Pick objects
-            p_time = getattr(p, 'peak_time', getattr(p, 'start_time', getattr(p, 'time', None)))
-            p_prob = getattr(p, 'peak_value', getattr(p, 'score', getattr(p, 'value', 0.0)))
-            
-            if p_time is None:
-                continue
-            
-            match_s = None
-            for s in s_picks:
-                s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
-                if s not in used_s and s_time and 0 < (s_time - p_time) < 30:
-                    match_s = s
-                    used_s.add(s)
-                    break
-            
-            if match_s:
-                ms_time = getattr(match_s, 'peak_time', getattr(match_s, 'start_time', getattr(match_s, 'time', None)))
-                ms_prob = getattr(match_s, 'peak_value', getattr(match_s, 'score', getattr(match_s, 'value', 0.0)))
-                s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
-                s_prob_str = f"{ms_prob:.6f}"
+        start_Predicting = monotonic_s()
+
+        # ===== TIMING: Track waveform loading time =====
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    # Traces may be in the preloaded Stream under headers that do not match the
+                    # per-station subdirectory name; subsetting would drop them. Fall back to the
+                    # same on-disk read path as non-shared mode (path-keyed, not header-keyed).
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (_pfx(f"{pos} {station}: FAILED - No traces for station in shared Stream."), None, None)
+                    stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
+                else:
+                    stream3c, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
             else:
-                s_time_str = ''
-                s_prob_str = ''
-            
-            predict_writer.writerow([
-                station_code,
-                network_code,
-                station_code,
-                0,  # instrument_type
-                station_lat,
-                station_lon,
-                station_elv,
-                p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                f"{p_prob:.6f}",
-                s_time_str,
-                s_prob_str
-            ])
-            
-        # Write remaining S picks
-        for s in s_picks:
-            if s not in used_s:
-                s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
-                s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
-                if s_time:
-                    predict_writer.writerow([
-                        station_code,
-                        network_code,
-                        station_code,
-                        0,  # instrument_type
-                        station_lat,
-                        station_lon,
-                        station_elv,
-                        '',
-                        '',
-                        s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
-                        f"{s_prob:.6f}"
-                    ])
-        
-        # If no picks found at all, write one row with station info
-        if not picks:
-            predict_writer.writerow([
-                station_code,
-                network_code,
-                station_code,
-                0,  # instrument_type
-                station_lat,
-                station_lon,
-                station_elv,
-                '', '', '', ''
-            ])
-            
-        csvPr_gen.flush()
-        csvPr_gen.close()
-        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        # Return tuple: (log_message, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", waveform_load_time)
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                if not files_list:
+                    return (_pfx(f"{pos} {station}: FAILED - No mSEED files found."), None, None)
+                stream3c, freqmin, freqmax = mseed2stream_3c(args, files_list, station)
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (unknown error)."
+            return (_pfx(f"{pos} {station}: {err_msg}"), None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
 
-    except Exception as exp:
-        if 'csvPr_gen' in locals():
-            csvPr_gen.close()
-        # Return tuple with waveform_load_time if available
-        load_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+        try:
+            # Get picks from SeisBench model
+            classify_output = ray.get(model_actor.classify.remote(
+                stream3c,
+                P_threshold=args.get('P_threshold', 0.3),
+                S_threshold=args.get('S_threshold', 0.3),
+                Detection_threshold=args.get('Detection_threshold', 0.3),
+                strict=False,
+                flexible_horizontal_components=True
+            ))
+
+            # Extract metadata from stream
+            station_code = stream3c[0].stats.station if len(stream3c) > 0 else station
+            network_code = stream3c[0].stats.network if len(stream3c) > 0 else ""
+            station_lat = getattr(stream3c[0].stats, 'coordinates', {}).get('latitude', 0.0) if len(stream3c) > 0 else 0.0
+            station_lon = getattr(stream3c[0].stats, 'coordinates', {}).get('longitude', 0.0) if len(stream3c) > 0 else 0.0
+            station_elv = getattr(stream3c[0].stats, 'coordinates', {}).get('elevation', 0.0) if len(stream3c) > 0 else 0.0
+
+            picks = classify_output.picks if hasattr(classify_output, 'picks') else []
+
+            p_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'P']
+            s_picks = [p for p in picks if getattr(p, 'phase', 'P').upper() == 'S']
+
+            used_s = set()
+            for p in p_picks:
+                p_time = getattr(p, 'peak_time', getattr(p, 'start_time', getattr(p, 'time', None)))
+                p_prob = getattr(p, 'peak_value', getattr(p, 'score', getattr(p, 'value', 0.0)))
+
+                if p_time is None:
+                    continue
+
+                if use_ascii_summary:
+                    pt_str = p_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                    ascii_p_phases.append(pt_str)
+                    ascii_chrono_events.append((pt_str, "P"))
+
+                match_s = None
+                for s in s_picks:
+                    s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
+                    if s not in used_s and s_time and 0 < (s_time - p_time) < 30:
+                        match_s = s
+                        used_s.add(s)
+                        break
+
+                if match_s:
+                    ms_time = getattr(match_s, 'peak_time', getattr(match_s, 'start_time', getattr(match_s, 'time', None)))
+                    ms_prob = getattr(match_s, 'peak_value', getattr(match_s, 'score', getattr(match_s, 'value', 0.0)))
+                    s_time_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f') if ms_time else ''
+                    s_prob_str = f"{ms_prob:.6f}"
+                    if use_ascii_summary and ms_time:
+                        st_str = ms_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                        ascii_s_phases.append(st_str)
+                        ascii_chrono_events.append((st_str, "S"))
+                else:
+                    s_time_str = ''
+                    s_prob_str = ''
+
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    p_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                    f"{p_prob:.6f}",
+                    s_time_str,
+                    s_prob_str
+                ])
+
+            for s in s_picks:
+                if s not in used_s:
+                    s_time = getattr(s, 'peak_time', getattr(s, 'start_time', getattr(s, 'time', None)))
+                    s_prob = getattr(s, 'peak_value', getattr(s, 'score', getattr(s, 'value', 0.0)))
+                    if s_time:
+                        if use_ascii_summary:
+                            ost = s_time.strftime('%Y-%m-%d %H:%M:%S.%f')
+                            ascii_s_phases.append(ost)
+                            ascii_chrono_events.append((ost, "S"))
+                        sink.write_pick_row([
+                            station_code,
+                            network_code,
+                            station_code,
+                            0,
+                            station_lat,
+                            station_lon,
+                            station_elv,
+                            '',
+                            '',
+                            s_time.strftime('%Y-%m-%d %H:%M:%S.%f'),
+                            f"{s_prob:.6f}"
+                        ])
+
+            if not picks:
+                sink.write_pick_row([
+                    station_code,
+                    network_code,
+                    station_code,
+                    0,
+                    station_lat,
+                    station_lon,
+                    station_elv,
+                    '', '', '', ''
+                ])
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station_code).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            sink.flush()
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            return (
+                _pfx(
+                    f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
+                ),
+                waveform_load_time,
+                ascii_row,
+            )
+
+        except Exception as exp:
+            load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), load_time, None)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass
 
 
 @ray.remote
@@ -2483,7 +3018,6 @@ def parallel_predict(predict_args, model_actor, gpu=False):
     """
     import glob
     import shutil
-    import csv
     import logging
     from logging.handlers import QueueHandler
     # --- QUIET TF C++/Python LOGS BEFORE ANY TF IMPORT --- 
@@ -2521,107 +3055,131 @@ def parallel_predict(predict_args, model_actor, gpu=False):
         pos, station, out_dir, args = predict_args
         use_shared_stream = False
 
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
+
     logger = logging.getLogger(f"eqcctpro.worker.{station}")
 
     # NOTE: Model is shared via model_actor when model_actor is not None
 
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
 
-    if os.path.isfile(csv_filename):
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", 0.0)
+            return (_pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."), 0.0, None)
 
-    os.makedirs(save_dir)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
-                return (f"{pos} {station}: FAILED no traces for station in shared Stream.", None)
-            packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
-            if packed is None:
-                return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
-            meta, data_set, hp, lp = packed
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
-            if meta is None:
-                return (f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).", None)
-    except Exception as e:
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-        return (f"{pos} {station}: {err_msg}", None)
-    waveform_load_time = monotonic_s() - waveform_load_start
+        sink.write_header()
+        sink.flush()
 
-    try:
-        # Load model ONLY if we don't have a shared model_actor (RIPPER mode)
-        if model_actor is None:
-            logger.info("RIPPER MODE: Loading EQCCT model inside task...")
-            # Configure GPU for this specific task process
-            if gpu:
-                from eqcctpro.tools import tf_environ
-                # Set a per-task VRAM limit if provided in args
-                vram_limit = args.get('gpu_memory_limit_mb')
-                tf_environ(gpu_id=0, vram_limit_mb=vram_limit, use_gpu=True, logger=logger)
-            
-            from eqcctpro.eqcct_tf_models import load_eqcct_model
-            model = load_eqcct_model(args['p_model'], args['s_model'])
-            logger.info("Model loaded inside task.")
-            
-            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
-            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-            predP, predS = model.predict(pred_generator, verbose=0)
-        else:
-            # Standard mode: Use the shared ModelActor
-            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
-            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-            
-            # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
-            # predP, predS = ray.get(model_actor.predict.remote(pred_generator))\
-            predP, predS = ray.get(model_actor.predict_from_arrays.remote(
-                                meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
-        
-        detection_memory = []
-        prob_memory = []
-        for ix in range(len(predP)):
-            Ppicks, Pprob = _picker(args, predP[ix,:, 0])   
-            Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+        start_Predicting = monotonic_s()
 
-            detection_memory, prob_memory = _output_writter_prediction(
-                meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, 
-                detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
+        # ===== TIMING: Track waveform loading time =====
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (_pfx(f"{pos} {station}: FAILED no traces for station in shared Stream."), None, None)
+                    packed = _mseed2nparray(args, files_list, station)
+                else:
+                    packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+                if packed is None:
+                    return (_pfx(f"{pos} {station}: FAILED reading mSEED (corrupted or empty files)."), None, None)
+                meta, data_set, hp, lp = packed
+            else:
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                meta, data_set, hp, lp = _mseed2nparray(args, files_list, station)
+                if meta is None:
+                    return (_pfx(f"{pos} {station}: FAILED reading mSEED (corrupted or empty files)."), None, None)
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            return (_pfx(f"{pos} {station}: {err_msg}"), None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+
+        try:
+            # Load model ONLY if we don't have a shared model_actor (RIPPER mode)
+            if model_actor is None:
+                logger.info("RIPPER MODE: Loading EQCCT model inside task...")
+                # Configure GPU for this specific task process
+                if gpu:
+                    from eqcctpro.tools import tf_environ
+                    # Set a per-task VRAM limit if provided in args
+                    vram_limit = args.get('gpu_memory_limit_mb')
+                    tf_environ(gpu_id=0, vram_limit_mb=vram_limit, use_gpu=True, logger=logger)
+
+                from eqcctpro.eqcct_tf_models import load_eqcct_model
+                model = load_eqcct_model(args['p_model'], args['s_model'])
+                logger.info("Model loaded inside task.")
+
+                params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+                pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+                predP, predS = model.predict(pred_generator, verbose=0)
+            else:
+                # Standard mode: Use the shared ModelActor
+                params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+                pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+
+                # USE THE SHARED MODEL ACTOR INSTEAD OF LOADING MODEL
+                predP, predS = ray.get(model_actor.predict_from_arrays.remote(
+                                    meta["trace_start_time"], data_set, args["batch_size"], args["normalization_mode"]))
+
+            detection_memory = []
+            prob_memory = []
+            for ix in range(len(predP)):
+                Ppicks, Pprob = _picker(args, predP[ix,:, 0])
+                Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+
+                ap = ascii_p_phases if use_ascii_summary else None
+                asp = ascii_s_phases if use_ascii_summary else None
+                ach = ascii_chrono_events if use_ascii_summary else None
+                detection_memory, prob_memory = _output_writter_prediction(
+                    meta, sink, Ppicks, Pprob, Spicks, Sprob,
+                    detection_memory, prob_memory, ix, len(predP), len(predS),
+                    ascii_p_list=ap, ascii_s_list=asp, ascii_chrono_list=ach,
+                )
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+            # Return tuple: (log_message, waveform_load_time, ascii_row or None)
+            return (
+                _pfx(f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"),
+                waveform_load_time,
+                ascii_row,
             )
-                                        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        # Return tuple: (log_message, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", waveform_load_time)
 
-    except Exception as exp:
-        # Return tuple with waveform_load_time if available
-        load_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", load_time)
+        except Exception as exp:
+            # Return tuple with waveform_load_time if available
+            load_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), load_time, None)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass
 
 
 # =====================================================================
@@ -2651,9 +3209,10 @@ def _run_ripper_parallel_queue_scmlpick(
     total_tasks = len(tasks_predictor)
     model_load_times: list = []
     waveform_load_times: list = []
+    ascii_rows: list = []
 
     if total_tasks == 0:
-        return model_load_times, waveform_load_times
+        return model_load_times, waveform_load_times, ascii_rows
 
     tasks_queue: list = []
     idx_iter = iter(range(total_tasks))
@@ -2676,12 +3235,14 @@ def _run_ripper_parallel_queue_scmlpick(
             except ray.exceptions.RayError as e:
                 logger.warning("RIPPER Ray error: %s", e)
                 continue
-            log_entry, ml_time, wf_time = result
-            logger.info("%s", log_entry)
+            log_e, ml_time, wf_time, ascii_row = _unpack_ripper_predict_result(result)
+            logger.info("%s", log_e)
             if ml_time is not None:
                 model_load_times.append(ml_time)
             if wf_time is not None:
                 waveform_load_times.append(wf_time)
+            if ascii_row is not None:
+                ascii_rows.append(ascii_row)
         try:
             while len(tasks_queue) < max_tasks_queue:
                 i = next(idx_iter)
@@ -2689,7 +3250,7 @@ def _run_ripper_parallel_queue_scmlpick(
         except StopIteration:
             pass
 
-    return model_load_times, waveform_load_times
+    return model_load_times, waveform_load_times, ascii_rows
 
 
 @ray.remote(max_calls=1, max_retries=1)
@@ -2707,7 +3268,6 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
     """
     import glob
     import shutil
-    import csv
     import logging
     import sys
     
@@ -2756,104 +3316,131 @@ def ripper_parallel_predict_eqcct(predict_args, gpu=False, gpu_memory_limit_mb=N
         pos, station, out_dir, args = predict_args
         use_shared_stream = False
 
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
+
     # RIPPER MODE: Load the model inside this task (old approach)
     # ===== TIMING: Track model load time for ripper mode analysis =====
     model_load_start = monotonic_s()
     model = load_eqcct_model(args["p_model"], args["s_model"])
     model_load_time = monotonic_s() - model_load_start
-    
-    save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
 
-    if os.path.isfile(csv_filename):
+    save_dir = os.path.join(out_dir, str(station)+'_outputs')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
+
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            # Return 3-tuple for consistency with caller unpacking logic
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
-
-    os.makedirs(save_dir)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
-    try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
-                return (
-                    f"{pos} {station}: FAILED no traces for station in shared Stream.",
-                    model_load_time,
-                    None,
-                )
-            packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            packed = _mseed2nparray(args, files_list, station)
-        if packed is None:
             return (
-                f"{pos} {station}: FAILED reading mSEED (corrupted or empty files).",
+                _pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."),
                 model_load_time,
+                0.0,
                 None,
             )
-        meta, data_set, hp, lp = packed
-    except Exception as e:
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-        return (f"{pos} {station}: {err_msg}", model_load_time, None)
-    waveform_load_time = monotonic_s() - waveform_load_start
 
+    os.makedirs(save_dir, exist_ok=True)
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
-        params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
-        pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
-        
-        # RIPPER MODE: Use the locally loaded model directly
-        predP, predS = model.predict(pred_generator, verbose=0)
-        
-        detection_memory = []
-        prob_memory = []
-        for ix in range(len(predP)):
-            Ppicks, Pprob = _picker(args, predP[ix,:, 0])   
-            Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+        sink.write_header()
+        sink.flush()
 
-            detection_memory, prob_memory = _output_writter_prediction(
-                meta, csvPr_gen, Ppicks, Pprob, Spicks, Sprob, 
-                detection_memory, prob_memory, predict_writer, ix, len(predP), len(predS)
-            )
-                                        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        
-        # Clean up model to free GPU memory
-        del model
+        start_Predicting = monotonic_s()
+
+        waveform_load_start = monotonic_s()
         try:
-            import tensorflow as tf
-            tf.keras.backend.clear_session()
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (
+                            _pfx(f"{pos} {station}: FAILED no traces for station in shared Stream."),
+                            model_load_time,
+                            None,
+                            None,
+                        )
+                    packed = _mseed2nparray(args, files_list, station)
+                else:
+                    packed = _eqcct_stream_to_nparray(args, st_sel, station, files_list=None)
+            else:
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                packed = _mseed2nparray(args, files_list, station)
+            if packed is None:
+                return (
+                    _pfx(f"{pos} {station}: FAILED reading mSEED (corrupted or empty files)."),
+                    model_load_time,
+                    None,
+                    None,
+                )
+            meta, data_set, hp, lp = packed
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else 'FAILED reading mSEED (corrupted or empty files).'
+            return (_pfx(f"{pos} {station}: {err_msg}"), model_load_time, None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+
+        try:
+            params_pred = {'batch_size': args["batch_size"], 'norm_mode': args["normalization_mode"]}
+            pred_generator = PreLoadGeneratorTest(meta["trace_start_time"], data_set, **params_pred)
+
+            predP, predS = model.predict(pred_generator, verbose=0)
+
+            detection_memory = []
+            prob_memory = []
+            for ix in range(len(predP)):
+                Ppicks, Pprob = _picker(args, predP[ix,:, 0])
+                Spicks, Sprob = _picker(args, predS[ix,:, 0], 'S_threshold')
+
+                ap = ascii_p_phases if use_ascii_summary else None
+                asp = ascii_s_phases if use_ascii_summary else None
+                ach = ascii_chrono_events if use_ascii_summary else None
+                detection_memory, prob_memory = _output_writter_prediction(
+                    meta, sink, Ppicks, Pprob, Spicks, Sprob,
+                    detection_memory, prob_memory, ix, len(predP), len(predS),
+                    ascii_p_list=ap, ascii_s_list=asp, ascii_chrono_list=ach,
+                )
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+
+            del model
+            try:
+                import tensorflow as tf
+                tf.keras.backend.clear_session()
+            except Exception:
+                pass
+
+            return (
+                _pfx(f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})"),
+                model_load_time,
+                waveform_load_time,
+                ascii_row,
+            )
+
+        except Exception as exp:
+            wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), model_load_time, wf_time, None)
+    finally:
+        try:
+            sink.close()
         except Exception:
             pass
-        
-        # Return tuple: (log_message, model_load_time, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={hp}, LP={lp})", model_load_time, waveform_load_time)
-
-    except Exception as exp:
-        # Return tuple with available times
-        wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", model_load_time, wf_time)
 
 
 @ray.remote(max_calls=1, max_retries=1)
@@ -2876,7 +3463,6 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     """
     import glob
     import shutil
-    import csv
     import logging
     import sys
 
@@ -2887,6 +3473,9 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     else:
         pos, station, out_dir, args = predict_args
         use_shared_stream = False
+
+    def _pfx(msg: str) -> str:
+        return _apply_log_chunk_prefix(args, msg)
 
     # RIPPER MODE: Load the SeisBench model inside this task using SeisBenchModels class
     from eqcctpro.seisbench_models import SeisBenchModels, mseed2stream_3c, process_raw_station_stream_3c
@@ -2913,116 +3502,162 @@ def ripper_parallel_predict_seisbench(predict_args, gpu=False, gpu_memory_limit_
     model_load_time = monotonic_s() - model_load_start
     
     save_dir = os.path.join(out_dir, str(station)+'_outputs')
-    csv_filename = os.path.join(save_dir,'X_prediction_results.csv')
+    sink_fmt, use_ascii_summary = _station_sink_format_for_worker(args)
+    out_path = prediction_results_path(save_dir, sink_fmt)
 
-    if os.path.isfile(csv_filename):
+    if out_path and os.path.isfile(out_path):
         if args['overwrite']:
             shutil.rmtree(save_dir)
         else:
-            # Return 3-tuple for consistency with caller unpacking logic
-            return (f"{pos} {station}: Skipped (already exists - overwrite=False).", model_load_time, 0.0)
+            return (
+                _pfx(f"{pos} {station}: Skipped (already exists - overwrite=False)."),
+                model_load_time,
+                0.0,
+                None,
+            )
 
     os.makedirs(save_dir, exist_ok=True)
-    csvPr_gen = open(csv_filename, 'w')
-    predict_writer = csv.writer(csvPr_gen, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-    predict_writer.writerow(['file_name', 
-                            'network',
-                            'station',
-                            'instrument_type',
-                            'station_lat',
-                            'station_lon',
-                            'station_elv',
-                            'p_arrival_time',
-                            'p_probability',
-                            's_arrival_time',
-                            's_probability'])  
-    csvPr_gen.flush()
-    
-    start_Predicting = monotonic_s()
-
-    # ===== TIMING: Track waveform loading time =====
-    waveform_load_start = monotonic_s()
+    sink = PickOutputSink(out_path, sink_fmt)
+    ascii_p_phases = []
+    ascii_s_phases = []
+    ascii_chrono_events: list[tuple[str, str]] = []
     try:
-        if use_shared_stream:
-            full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
-            st_sel = _stream_select_for_station_task(full_st, station)
-            if len(st_sel) == 0:
-                csvPr_gen.close()
-                return (
-                    f"{pos} {station}: FAILED no traces for station in shared Stream.",
-                    model_load_time,
-                    None,
-                )
-            stream, freqmin, freqmax = process_raw_station_stream_3c(args, st_sel, station)
-        else:
-            files_list = glob.glob(f"{args['input_dir']}/{station}/*mseed")
-            result = mseed2stream_3c(args, files_list, station)
-            if result is None:
-                csvPr_gen.close()
-                return (f"{pos} {station}: FAILED reading mSEED (no valid 3C stream).", model_load_time, None)
-            stream, freqmin, freqmax = result
-    except Exception as e:
-        csvPr_gen.close()
-        err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
-        return (f"{pos} {station}: {err_msg}", model_load_time, None)
-    waveform_load_time = monotonic_s() - waveform_load_start
+        sink.write_header()
+        sink.flush()
 
-    try:
-        # Run SeisBench model prediction using the model wrapper's classify method
-        # IMPORTANT: strict=False and flexible_horizontal_components=True are needed
-        # to handle streams that don't perfectly match expected channel names
-        classify_output = model_wrapper.classify(
-            stream,
-            P_threshold=args.get('P_threshold', 0.3),
-            S_threshold=args.get('S_threshold', 0.3),
-            Detection_threshold=Detection_threshold,
-            strict=False,
-            flexible_horizontal_components=True,
-        )
-        if gpu:
-            cuda_synchronize_best_effort()
-        
-        # Extract picks from ClassifyOutput
-        picks = classify_output.picks if hasattr(classify_output, 'picks') else []
-        
-        # Process picks and write to CSV
-        for pick in picks:
-            pick_time = getattr(pick, 'peak_time', getattr(pick, 'start_time', getattr(pick, 'time', None)))
-            pick_prob = getattr(pick, 'peak_value', getattr(pick, 'score', getattr(pick, 'value', 0.0)))
-            pick_phase = getattr(pick, 'phase', 'P').upper()
-            
-            if pick_time is not None:
-                predict_writer.writerow([
-                    args['input_dir'].split('/')[-1],  # file_name
-                    '',  # network
-                    station,  # station
-                    '',  # instrument_type
-                    '',  # station_lat
-                    '',  # station_lon
-                    '',  # station_elv
-                    str(pick_time) if pick_phase == 'P' else '',  # p_arrival_time
-                    f"{pick_prob:.6f}" if pick_phase == 'P' else '',  # p_probability
-                    str(pick_time) if pick_phase == 'S' else '',  # s_arrival_time
-                    f"{pick_prob:.6f}" if pick_phase == 'S' else ''  # s_probability
+        start_Predicting = monotonic_s()
+
+        waveform_load_start = monotonic_s()
+        try:
+            if use_shared_stream:
+                full_st = ray.get(stream_ref) if isinstance(stream_ref, ray.ObjectRef) else stream_ref
+                st_sel = _stream_select_for_station_task(full_st, station)
+                if len(st_sel) == 0:
+                    files_list = _list_station_mseed_files(args["input_dir"], station)
+                    if not files_list:
+                        return (
+                            _pfx(f"{pos} {station}: FAILED no traces for station in shared Stream."),
+                            model_load_time,
+                            None,
+                            None,
+                        )
+                    result = mseed2stream_3c(args, files_list, station)
+                else:
+                    result = process_raw_station_stream_3c(args, st_sel, station)
+                if result is None:
+                    return (
+                        _pfx(f"{pos} {station}: FAILED reading mSEED (no valid 3C stream)."),
+                        model_load_time,
+                        None,
+                        None,
+                    )
+                stream, freqmin, freqmax = result
+            else:
+                files_list = _list_station_mseed_files(args["input_dir"], station)
+                result = mseed2stream_3c(args, files_list, station)
+                if result is None:
+                    return (
+                        _pfx(f"{pos} {station}: FAILED reading mSEED (no valid 3C stream)."),
+                        model_load_time,
+                        None,
+                        None,
+                    )
+                stream, freqmin, freqmax = result
+        except Exception as e:
+            err_msg = f"FAILED reading mSEED: {str(e)}" if str(e) else "FAILED reading mSEED (corrupted or empty files)."
+            return (_pfx(f"{pos} {station}: {err_msg}"), model_load_time, None, None)
+        waveform_load_time = monotonic_s() - waveform_load_start
+
+        try:
+            classify_output = model_wrapper.classify(
+                stream,
+                P_threshold=args.get('P_threshold', 0.3),
+                S_threshold=args.get('S_threshold', 0.3),
+                Detection_threshold=Detection_threshold,
+                strict=False,
+                flexible_horizontal_components=True,
+            )
+            if gpu:
+                cuda_synchronize_best_effort()
+
+            picks = classify_output.picks if hasattr(classify_output, 'picks') else []
+
+            for pick in picks:
+                pick_time = getattr(pick, 'peak_time', getattr(pick, 'start_time', getattr(pick, 'time', None)))
+                pick_prob = getattr(pick, 'peak_value', getattr(pick, 'score', getattr(pick, 'value', 0.0)))
+                pick_phase = getattr(pick, 'phase', 'P').upper()
+
+                if pick_time is None:
+                    continue
+                if use_ascii_summary:
+                    t_str = pick_time.strftime('%Y-%m-%d %H:%M:%S.%f') if hasattr(pick_time, 'strftime') else str(pick_time)
+                    if pick_phase == 'P':
+                        ascii_p_phases.append(t_str)
+                        ascii_chrono_events.append((t_str, "P"))
+                    elif pick_phase == 'S':
+                        ascii_s_phases.append(t_str)
+                        ascii_chrono_events.append((t_str, "S"))
+                sink.write_pick_row([
+                    args['input_dir'].split('/')[-1],
+                    '',
+                    station,
+                    '',
+                    '',
+                    '',
+                    '',
+                    str(pick_time) if pick_phase == 'P' else '',
+                    f"{pick_prob:.6f}" if pick_phase == 'P' else '',
+                    str(pick_time) if pick_phase == 'S' else '',
+                    f"{pick_prob:.6f}" if pick_phase == 'S' else ''
                 ])
-        csvPr_gen.flush()
-        csvPr_gen.close()
-                                        
-        end_Predicting = monotonic_s()
-        delta = (end_Predicting - start_Predicting)
-        
-        # Clean up model to free GPU memory
-        del model_wrapper
-        if gpu and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        # Return tuple: (log_message, model_load_time, waveform_load_time) for timing analysis
-        return (f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})", model_load_time, waveform_load_time)
 
-    except Exception as exp:
-        if 'csvPr_gen' in locals():
-            csvPr_gen.close()
-        # Return tuple with available times
-        ml_time = model_load_time if 'model_load_time' in locals() else None
-        wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
-        return (f"{pos} {station}: FAILED the prediction. {exp}", ml_time, wf_time)
+            if not picks:
+                sink.write_pick_row([
+                    args['input_dir'].split('/')[-1],
+                    '',
+                    station,
+                    '',
+                    '',
+                    '',
+                    '',
+                    '', '', '', ''
+                ])
+
+            if use_ascii_summary:
+                ascii_row = build_ascii_summary_row_tuple(
+                    str(station).strip(),
+                    args,
+                    p_phases=ascii_p_phases,
+                    s_phases=ascii_s_phases,
+                )
+                write_station_pick_log(out_dir, str(station).strip(), ascii_chrono_events)
+            else:
+                ascii_row = None
+
+            sink.flush()
+
+            end_Predicting = monotonic_s()
+            delta = (end_Predicting - start_Predicting)
+
+            del model_wrapper
+            if gpu and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            return (
+                _pfx(
+                    f"{pos} {station}: Finished the prediction in {round(delta,2)}s. (HP={freqmin}, LP={freqmax}, picks={len(picks)})"
+                ),
+                model_load_time,
+                waveform_load_time,
+                ascii_row,
+            )
+
+        except Exception as exp:
+            ml_time = model_load_time if 'model_load_time' in locals() else None
+            wf_time = waveform_load_time if 'waveform_load_time' in locals() else None
+            return (_pfx(f"{pos} {station}: FAILED the prediction. {exp}"), ml_time, wf_time, None)
+    finally:
+        try:
+            sink.close()
+        except Exception:
+            pass

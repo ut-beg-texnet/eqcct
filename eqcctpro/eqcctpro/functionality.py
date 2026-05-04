@@ -53,7 +53,7 @@ class RunEQCCTPro():
                 cpu_id_list: list = [1],
                 start_time:str = None, 
                 end_time:str = None, 
-                timechunk_dt:int = 1,
+                timechunk_dt: int | None = None,
                 waveform_overlap:int = 0,
                 tmp_dir:str = None,
                 # SeisBench model parameters
@@ -64,7 +64,16 @@ class RunEQCCTPro():
                 # Ripper mode - uses old task-based approach instead of ModelActors
                 ripper: bool = False,  # If True, use task-based parallel_predict instead of ModelActor pool
                 ripper_ignore_cpu_ram_cap: bool = False,  # CPU Ripper: skip RAM-based max_pending_tasks clamp
-                ignore_cpu_ram_cap: bool = False):  # CPU: skip RAM caps in mseed_predictor (ModelActor pool + Ripper queue)
+                ignore_cpu_ram_cap: bool = False,  # CPU: skip RAM caps in mseed_predictor (ModelActor pool + Ripper queue)
+                waveform_filter_type: str = 'bandpass',
+                waveform_filter_freqmin: float = 1.0,
+                waveform_filter_freqmax: float = 45.0,
+                waveform_filter_corners: int = 2,
+                waveform_filter_zerophase: bool = True,
+                pick_output_format: str = 'xml',
+                ascii_station_pick_format: str = 'xml',
+                overwrite: bool = False,
+                relax_timechunk_station_inventory: bool = False):
          
         self.use_gpu = use_gpu  # 'this instance' of the classes object, use_gpu = use_gpu 
         self.input_dir = input_dir
@@ -84,7 +93,17 @@ class RunEQCCTPro():
         self.vram_mb = vram_mb
         self.stations2use = stations2use
         self.gpu_vram_safety_cap = gpu_vram_safety_cap
-        
+
+        self.waveform_filter_type = waveform_filter_type
+        self.waveform_filter_freqmin = waveform_filter_freqmin
+        self.waveform_filter_freqmax = waveform_filter_freqmax
+        self.waveform_filter_corners = waveform_filter_corners
+        self.waveform_filter_zerophase = waveform_filter_zerophase
+        self.pick_output_format = pick_output_format
+        self.ascii_station_pick_format = ascii_station_pick_format
+        self.overwrite = overwrite
+        self.relax_timechunk_station_inventory = relax_timechunk_station_inventory
+
         if cudnn_headroom > 0.80:
             raise ValueError(f"cudnn_headroom cannot exceed 0.80 (80%), got {cudnn_headroom}. This is required for system stability.")
         self.cudnn_headroom = cudnn_headroom
@@ -271,14 +290,29 @@ class RunEQCCTPro():
             tf_environ(gpu_id=1, vram_limit_mb=self.vram_mb, gpus_to_use=self.selected_gpus, intra_threads=self.intra_threads, inter_threads=self.inter_threads, logger=self.logger, skip_tf=skip_tf)
     
     def eqcctpro_parallelization(self):
-        if self.specific_stations is None: # We check if the station dirs are consistent, if not, exit
-            statement, specific_stations_list, do_i_exit = check_station_dirs(input_dir=self.input_dir)
-            self.logger.info(f"{statement}")
-            if do_i_exit: exit()
-
-        # We want to use a specified amount of stations
-        else: specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
-        statement = f"Using {len(specific_stations_list)} selected station(s)."
+        if self.specific_stations is None:
+            if self.relax_timechunk_station_inventory:
+                self.logger.info(
+                    "relax_timechunk_station_inventory=True: skipping the uniform timechunk station check. "
+                    "Each timechunk task will process only stations present in that chunk's directory."
+                )
+                self.logger.info("")
+                specific_stations_list = None
+            else:
+                statement, specific_stations_list, do_i_exit = check_station_dirs(
+                    input_dir=self.input_dir, logger=self.logger
+                )
+                self.logger.info(f"{statement}")
+                if do_i_exit:
+                    exit()
+        else:
+            specific_stations_list = [station.strip() for station in self.specific_stations.split(',')]
+        if specific_stations_list is None:
+            statement = (
+                "No global station filter; each timechunk task discovers stations from that chunk's directory."
+            )
+        else:
+            statement = f"Using {len(specific_stations_list)} selected station(s)."
         self.logger.info(f"{statement}")
         self.logger.info("")           
 
@@ -293,35 +327,137 @@ class RunEQCCTPro():
         self.logger.info(f"------- Starting EQCCTPro... -------")
         self.logger.info(f"Detailed subprocess information can be found in the log file.")
         self.logger.info("")
-        for i in range(len(self.tasks_picker)):
-            mseed_timechunk_dir_name = self.tasks_picker[i][1]
-            timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name) 
-        
-            # Concurrent Timechunks 
-            while True: 
-                if len(tasks_queue) < max_pending_tasks: 
-                    tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_queue=self.log_queue, 
-                                        P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
-                                        number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions, ray_cpus=self.cpu_id_list, use_gpu=self.use_gpu, 
-                                        gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, specific_stations=specific_stations_list, 
-                                        stations2use=self.stations2use,
-                                        timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
-                                        number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions, total_analysis_time=total_analysis_time,
-                                        intra_threads=self.intra_threads, inter_threads=self.inter_threads,
-                                        model_type=self.model_type, seisbench_parent_model=self.seisbench_parent_model, 
-                                        seisbench_child_model=self.seisbench_child_model, Detection_threshold=self.Detection_threshold,
-                                        ram_safety_cap=self.ram_safety_cap,
-                                        cudnn_headroom=self.cudnn_headroom,
-                                        ripper=self.ripper,
-                                        ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
-                                        ignore_cpu_ram_cap=self.ignore_cpu_ram_cap))
-                    break
-                
-                else: # If there are more tasks than maximum, just process them
-                    tasks_finished, tasks_queue = ray.wait(tasks_queue, num_returns=1, timeout=None)
-                    for finished_task in tasks_finished:
-                        log_entry = ray.get(finished_task)
-                        log_queue.put(log_entry)  # Add log entry to the queue
+
+        use_modelactor_sequential_chunks = not self.ripper and len(self.tasks_picker) > 1
+        if use_modelactor_sequential_chunks:
+            if max_pending_tasks > 1:
+                self.logger.info(
+                    "ModelActor mode with %s timechunks: using one Ray worker for all chunks so the "
+                    "ModelActor pool stays loaded (ignoring number_of_concurrent_timechunk_predictions=%s "
+                    "for chunk-level parallelism). Chunks run back-to-back inside that worker.",
+                    len(self.tasks_picker),
+                    max_pending_tasks,
+                )
+            else:
+                self.logger.info(
+                    "ModelActor mode: submitting one worker that reuses the same actor pool across "
+                    "all %s timechunk(s).",
+                    len(self.tasks_picker),
+                )
+            seq_specs = [
+                (
+                    os.path.join(self.input_dir, self.tasks_picker[i][1]),
+                    self.tasks_picker[i][1],
+                )
+                for i in range(len(self.tasks_picker))
+            ]
+            cdir0, cid0 = seq_specs[0]
+            tasks_queue.append(
+                mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                    input_dir=cdir0,
+                    output_dir=self.output_dir,
+                    log_queue=self.log_queue,
+                    P_threshold=self.P_threshold,
+                    S_threshold=self.S_threshold,
+                    p_model=self.p_model_filepath,
+                    s_model=self.s_model_filepath,
+                    overwrite=self.overwrite,
+                    number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions,
+                    ray_cpus=self.cpu_id_list,
+                    use_gpu=self.use_gpu,
+                    gpu_id=self.selected_gpus,
+                    gpu_memory_limit_mb=self.vram_mb,
+                    specific_stations=specific_stations_list,
+                    stations2use=self.stations2use,
+                    timechunk_id=cid0,
+                    waveform_overlap=self.waveform_overlap,
+                    total_timechunks=len(self.tasks_picker),
+                    number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions,
+                    total_analysis_time=total_analysis_time,
+                    intra_threads=self.intra_threads,
+                    inter_threads=self.inter_threads,
+                    model_type=self.model_type,
+                    seisbench_parent_model=self.seisbench_parent_model,
+                    seisbench_child_model=self.seisbench_child_model,
+                    Detection_threshold=self.Detection_threshold,
+                    ram_safety_cap=self.ram_safety_cap,
+                    cudnn_headroom=self.cudnn_headroom,
+                    ripper=self.ripper,
+                    ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
+                    ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                    waveform_filter_type=self.waveform_filter_type,
+                    waveform_filter_freqmin=self.waveform_filter_freqmin,
+                    waveform_filter_freqmax=self.waveform_filter_freqmax,
+                    waveform_filter_corners=self.waveform_filter_corners,
+                    waveform_filter_zerophase=self.waveform_filter_zerophase,
+                    pick_output_format=self.pick_output_format,
+                    ascii_station_pick_format=self.ascii_station_pick_format,
+                    analysis_window_start_str=self.start_time,
+                    analysis_window_end_str=self.end_time,
+                    sequential_timechunk_specs=seq_specs,
+                )
+            )
+        else:
+            for i in range(len(self.tasks_picker)):
+                mseed_timechunk_dir_name = self.tasks_picker[i][1]
+                timechunk_dir_path = os.path.join(self.input_dir, mseed_timechunk_dir_name)
+
+                # Concurrent Timechunks
+                while True:
+                    if len(tasks_queue) < max_pending_tasks:
+                        tasks_queue.append(
+                            mseed_predictor.options(num_gpus=0, num_cpus=1).remote(
+                                input_dir=timechunk_dir_path,
+                                output_dir=self.output_dir,
+                                log_queue=self.log_queue,
+                                P_threshold=self.P_threshold,
+                                S_threshold=self.S_threshold,
+                                p_model=self.p_model_filepath,
+                                s_model=self.s_model_filepath,
+                                overwrite=self.overwrite,
+                                number_of_concurrent_station_predictions=self.number_of_concurrent_station_predictions,
+                                ray_cpus=self.cpu_id_list,
+                                use_gpu=self.use_gpu,
+                                gpu_id=self.selected_gpus,
+                                gpu_memory_limit_mb=self.vram_mb,
+                                specific_stations=specific_stations_list,
+                                stations2use=self.stations2use,
+                                timechunk_id=mseed_timechunk_dir_name,
+                                waveform_overlap=self.waveform_overlap,
+                                total_timechunks=len(self.tasks_picker),
+                                number_of_concurrent_timechunk_predictions=self.number_of_concurrent_timechunk_predictions,
+                                total_analysis_time=total_analysis_time,
+                                intra_threads=self.intra_threads,
+                                inter_threads=self.inter_threads,
+                                model_type=self.model_type,
+                                seisbench_parent_model=self.seisbench_parent_model,
+                                seisbench_child_model=self.seisbench_child_model,
+                                Detection_threshold=self.Detection_threshold,
+                                ram_safety_cap=self.ram_safety_cap,
+                                cudnn_headroom=self.cudnn_headroom,
+                                ripper=self.ripper,
+                                ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
+                                ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                                waveform_filter_type=self.waveform_filter_type,
+                                waveform_filter_freqmin=self.waveform_filter_freqmin,
+                                waveform_filter_freqmax=self.waveform_filter_freqmax,
+                                waveform_filter_corners=self.waveform_filter_corners,
+                                waveform_filter_zerophase=self.waveform_filter_zerophase,
+                                pick_output_format=self.pick_output_format,
+                                ascii_station_pick_format=self.ascii_station_pick_format,
+                                analysis_window_start_str=self.start_time,
+                                analysis_window_end_str=self.end_time,
+                            )
+                        )
+                        break
+
+                    else:  # If there are more tasks than maximum, just process them
+                        tasks_finished, tasks_queue = ray.wait(
+                            tasks_queue, num_returns=1, timeout=None
+                        )
+                        for finished_task in tasks_finished:
+                            log_entry = ray.get(finished_task)
+                            log_queue.put(log_entry)  # Add log entry to the queue
 
         # After adding all the tasks to queue, process what's left
         while tasks_queue:
@@ -347,9 +483,15 @@ class RunEQCCTPro():
             # Set CPU affinity
             process = psutil.Process(os.getpid())
             process.cpu_affinity(self.cpu_id_list)  # Limit process to the given CPU IDs
-            
-            self.chunk_time() # Generates the UTC times for each of the timesets in the given time range 
-            self.dt_task_generator() # Generates the task list so can know how many total tasks there are for our given time range 
+
+            self.timechunk_dt = exit_if_timechunk_dt_missing(
+                self.timechunk_dt, logger=self.logger
+            )
+            self.chunk_time()  # UTC windows from start_time / end_time / timechunk_dt / overlap
+            self.dt_task_generator()
+            materialize_input_into_timechunk_layout(
+                self.input_dir, self.times_list, logger=self.logger
+            )
             
             if self.use_gpu: # GPU
                 self.configure_gpu()
@@ -459,7 +601,7 @@ class EvaluateSystem():
                  start_time:str = None, 
                  end_time:str = None, 
                  conc_timechunk_tasks_step_size: int = 1, 
-                 timechunk_dt:int = 1,
+                 timechunk_dt: int | None = None,
                  waveform_overlap:int = 0,
                  tmp_dir:str = None,
                  # SeisBench model parameters
@@ -470,7 +612,15 @@ class EvaluateSystem():
                  # Ripper mode - uses old task-based approach instead of ModelActors
                  ripper: bool = False,
                  ripper_ignore_cpu_ram_cap: bool = False,
-                 ignore_cpu_ram_cap: bool = False):
+                 ignore_cpu_ram_cap: bool = False,
+                 waveform_filter_type: str = 'bandpass',
+                 waveform_filter_freqmin: float = 1.0,
+                 waveform_filter_freqmax: float = 45.0,
+                 waveform_filter_corners: int = 2,
+                 waveform_filter_zerophase: bool = True,
+                 pick_output_format: str = 'xml',
+                 ascii_station_pick_format: str = 'xml',
+                 overwrite: bool = False):
         
         valid_modes = {"cpu", "gpu"}
         if eval_mode not in valid_modes: 
@@ -529,6 +679,15 @@ class EvaluateSystem():
         self.ripper_ignore_cpu_ram_cap = ripper_ignore_cpu_ram_cap
         self.ignore_cpu_ram_cap = ignore_cpu_ram_cap
 
+        self.waveform_filter_type = waveform_filter_type
+        self.waveform_filter_freqmin = waveform_filter_freqmin
+        self.waveform_filter_freqmax = waveform_filter_freqmax
+        self.waveform_filter_corners = waveform_filter_corners
+        self.waveform_filter_zerophase = waveform_filter_zerophase
+        self.pick_output_format = pick_output_format
+        self.ascii_station_pick_format = ascii_station_pick_format
+        self.overwrite = overwrite
+
         # Validate model type and parameters
         if self.model_type not in ['eqcct', 'seisbench']:
             raise ValueError(f"model_type must be 'eqcct' or 'seisbench', got '{model_type}'")
@@ -569,7 +728,13 @@ class EvaluateSystem():
         self.logger.info(f"Successfully set up temp files to be stored at {self.home_tmp_dir}")
 
         # Calculate these at the start to determine total potential concurrency
+        self.timechunk_dt = exit_if_timechunk_dt_missing(
+            self.timechunk_dt, logger=self.logger
+        )
         self.chunk_time()
+        materialize_input_into_timechunk_layout(
+            self.input_dir, self.times_list, logger=self.logger
+        )
         max_stations = max(self.stations2use_list) if self.stations2use_list else 1
         max_timechunks = len(self.times_list) if self.times_list else 1
         intended_workers = max_stations * max_timechunks
@@ -820,6 +985,9 @@ class EvaluateSystem():
         
         self.chunk_time()
         self.dt_task_generator()
+        materialize_input_into_timechunk_layout(
+            self.input_dir, self.times_list, logger=self.logger
+        )
         
         # Get actual station count from the first timechunk directory to ensure skip logic 
         # accounts for stations being filtered out due to missing data.
@@ -1217,6 +1385,7 @@ class EvaluateSystem():
                                     if len(tasks_queue) < max_pending_tasks: 
                                         tasks_queue.append(mseed_predictor.options(num_gpus=0, num_cpus=1).remote(input_dir=timechunk_dir_path, output_dir=self.output_dir, log_queue=self.log_queue, 
                                                             P_threshold=self.P_threshold, S_threshold=self.S_threshold, p_model=self.p_model_filepath, s_model=self.s_model_filepath, 
+                                                            overwrite=self.overwrite,
                                                             number_of_concurrent_station_predictions=num_concurrent_predictions, ray_cpus=cpus_to_use, use_gpu=self.use_gpu, 
                                                             gpu_id=self.selected_gpus, gpu_memory_limit_mb=self.vram_mb, stations2use=num_stations_capped, 
                                                             timechunk_id=mseed_timechunk_dir_name, waveform_overlap=self.waveform_overlap, total_timechunks=len(self.tasks_picker), 
@@ -1228,7 +1397,16 @@ class EvaluateSystem():
                                                             cudnn_headroom=self.cudnn_headroom,
                                                             ripper=self.ripper,
                                                             ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
-                                                            ignore_cpu_ram_cap=self.ignore_cpu_ram_cap))
+                                                            ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                                                            waveform_filter_type=self.waveform_filter_type,
+                                                            waveform_filter_freqmin=self.waveform_filter_freqmin,
+                                                            waveform_filter_freqmax=self.waveform_filter_freqmax,
+                                                            waveform_filter_corners=self.waveform_filter_corners,
+                                                            waveform_filter_zerophase=self.waveform_filter_zerophase,
+                                                            pick_output_format=self.pick_output_format,
+                                                            ascii_station_pick_format=self.ascii_station_pick_format,
+                                                            analysis_window_start_str=self.start_time,
+                                                            analysis_window_end_str=self.end_time))
                                     
                                         break
                                 
@@ -1397,6 +1575,9 @@ class EvaluateSystem():
         # Calculate these at the start
         self.chunk_time()
         self.dt_task_generator()
+        materialize_input_into_timechunk_layout(
+            self.input_dir, self.times_list, logger=self.logger
+        )
 
         # Get actual station count from the first timechunk directory to ensure skip logic 
         # accounts for stations being filtered out due to missing data.
@@ -1847,6 +2028,7 @@ class EvaluateSystem():
                                 S_threshold=self.S_threshold, 
                                 p_model=self.p_model_filepath, 
                                 s_model=self.s_model_filepath, 
+                                overwrite=self.overwrite,
                                 number_of_concurrent_station_predictions=predictions, 
                                 ray_cpus=cpus_to_use, 
                                 use_gpu=self.use_gpu, 
@@ -1871,6 +2053,15 @@ class EvaluateSystem():
                                 ripper=self.ripper,
                                 ripper_ignore_cpu_ram_cap=self.ripper_ignore_cpu_ram_cap,
                                 ignore_cpu_ram_cap=self.ignore_cpu_ram_cap,
+                                waveform_filter_type=self.waveform_filter_type,
+                                waveform_filter_freqmin=self.waveform_filter_freqmin,
+                                waveform_filter_freqmax=self.waveform_filter_freqmax,
+                                waveform_filter_corners=self.waveform_filter_corners,
+                                waveform_filter_zerophase=self.waveform_filter_zerophase,
+                                pick_output_format=self.pick_output_format,
+                                ascii_station_pick_format=self.ascii_station_pick_format,
+                                analysis_window_start_str=self.start_time,
+                                analysis_window_end_str=self.end_time,
                             )
                             
                             # Wait for result

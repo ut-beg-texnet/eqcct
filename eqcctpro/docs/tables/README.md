@@ -7,7 +7,14 @@ Tables for the EQCCTPro methodology section. Generated from code and trial data.
 ```bash
 # From project root
 python scripts/visualization/generate_paper_tables.py --output_dir docs/tables --results_root results
+
+# Regenerate figure/table audit (writes FIGURE_VS_TABLES_CHECKLIST.md)
+python3 scripts/visualization/verify_figures_vs_tables.py
 ```
+
+## Figure vs table checklist
+
+`FIGURE_VS_TABLES_CHECKLIST.md` is **auto-generated** from JSON/CSV sources and trial code. Run `verify_figures_vs_tables.py` after changing benchmarks or paper tables.
 
 ## Table Descriptions
 

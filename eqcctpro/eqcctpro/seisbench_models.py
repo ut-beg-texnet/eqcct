@@ -1,9 +1,18 @@
+import os
 import obspy
 import numpy as np
 import seisbench.models as sbm
 import time
 import random
+import logging
 from pathlib import Path
+
+from eqcctpro.tools import (
+    merge_mseed_stream_after_read,
+    parent_timechunk_station_waveform_files,
+    read_station_waveform_file,
+)
+from eqcctpro.waveform_filter import apply_waveform_filter, resolve_waveform_filter_params
 
 class SeisBenchModels:
     def __init__(self, parent_model_name, child_model_name, validate_pretrained=True):
@@ -142,7 +151,7 @@ class SeisBenchModels:
             )
 
 
-def resampling(st):
+def resampling(st, antialias_lowpass_hz=45.0):
     """
     Perform resampling on ObsPy stream objects.
     Fallback resampling method when interpolate() fails.
@@ -161,7 +170,7 @@ def resampling(st):
     if len(need_resampling) > 0:
         for indx, tr in enumerate(need_resampling):
             if tr.stats.delta < 0.01:
-                tr.filter('lowpass', freq=45, zerophase=True)
+                tr.filter('lowpass', freq=float(antialias_lowpass_hz), zerophase=True)
             tr.resample(100)
             tr.stats.sampling_rate = 100
             tr.stats.delta = 0.01
@@ -171,11 +180,26 @@ def resampling(st):
     return st
 
 
+def _zero_trace_like(reference: obspy.Trace, channel_suffix: str) -> obspy.Trace:
+    """Same window and sampling rate as ``reference``, data all zeros (SeisBench-style gap fill)."""
+    stats = reference.stats.copy()
+    ch = (stats.channel or "HHX").strip()
+    if len(ch) >= 1:
+        stats.channel = ch[:-1] + channel_suffix
+    else:
+        stats.channel = "HH" + channel_suffix
+    data = np.zeros(reference.stats.npts, dtype=np.float64)
+    return obspy.Trace(data=data, header=stats)
+
+
 def process_raw_station_stream_3c(args, st, station):
     """
     SeisBench preprocessing (taper → bandpass → resample → trim → 3C) from an in-memory
     ObsPy Stream that is already read, merged per file, and demeaned (same state as after
     the file-read loop in mseed2stream_3c). Used with ray.put shared Streams (scmlpick-style).
+
+    Missing E/N/Z components are **zero-filled** by default (aligned with SeisBench
+    ``annotate(..., strict=False)``), unless ``EQCCTPRO_STRICT_3C`` is set.
     """
     if st is None or len(st) == 0:
         raise ValueError(f"No traces for station {station} in shared Stream.")
@@ -194,32 +218,27 @@ def process_raw_station_stream_3c(args, st, station):
     max_percentage = 5 / (st[0].stats.delta * st[0].stats.npts)
     st.taper(max_percentage=max_percentage, type="cosine")
 
-    freqmin, freqmax = 1.0, 45.0
-    if args.get("stations_filters") is not None:
-        try:
-            df_filters = args["stations_filters"]
-            row = df_filters[df_filters.sta == station].iloc[0]
-            freqmin, freqmax = float(row["hp"]), float(row["lp"])
-        except Exception:
-            pass
-
-    st.filter("bandpass", freqmin=freqmin, freqmax=freqmax, corners=2, zerophase=True)
+    ftype, freqmin, freqmax, f_corners, f_zp = resolve_waveform_filter_params(args, station)
+    apply_waveform_filter(st, ftype, freqmin, freqmax, f_corners, f_zp)
 
     if any(tr.stats.sampling_rate != 100.0 for tr in st):
         try:
             st.interpolate(100.0, method="linear")
         except Exception:
-            st = resampling(st)
+            st = resampling(st, antialias_lowpass_hz=freqmax)
 
     t0 = max(tr.stats.starttime for tr in st)
     t1 = min(tr.stats.endtime for tr in st)
     st.trim(t0, t1, pad=False)
 
-    by_last = {}
+    by_last: dict[str, list] = {}
     for tr in st:
-        by_last.setdefault(tr.stats.channel[-1], []).append(tr)
+        ch = (tr.stats.channel or "").strip()
+        if len(ch) < 1:
+            continue
+        by_last.setdefault(ch[-1], []).append(tr)
 
-    def _best_trace(letter):
+    def _best_trace(letter: str):
         lst = by_last.get(letter, [])
         return lst[0] if lst else None
 
@@ -227,20 +246,154 @@ def process_raw_station_stream_3c(args, st, station):
     trN = _best_trace("N") or _best_trace("2")
     trZ = _best_trace("Z")
 
-    missing_components = []
+    # Map observed traces by upper-case SEED channel name (first unused wins).
+    by_code: dict[str, list] = {}
+    for tr in st:
+        key = (tr.stats.channel or "").strip().upper()
+        if key:
+            by_code.setdefault(key, []).append(tr)
+
+    def _used_ids():
+        return {id(x) for x in (trE, trN, trZ) if x is not None}
+
+    def _first_unused_for_codes(codes: tuple[str, ...]):
+        used = _used_ids()
+        for code in codes:
+            for tr in by_code.get(code, []):
+                if id(tr) not in used:
+                    return tr
+        return None
+
+    # Common broadband / weak-motion channel names (FDSN-style 3-letter codes).
     if trZ is None:
-        missing_components.append("Z")
+        trZ = _first_unused_for_codes(("CHZ", "HHZ", "BHZ", "SHZ", "CNZ", "EHZ"))
     if trE is None:
-        missing_components.append("E (or 1)")
+        trE = _first_unused_for_codes(("CHE", "HHE", "BHE", "SHE", "CNE", "HH1", "BH1", "EH1"))
     if trN is None:
-        missing_components.append("N (or 2)")
+        trN = _first_unused_for_codes(("CHN", "HHN", "BHN", "SHN", "CNN", "HH2", "BH2", "EH2"))
+
+    def _unassigned_traces():
+        sel = _used_ids()
+        return [tr for tr in st if id(tr) not in sel]
+
+    # Salvage: e.g. CHE + CHN + CNN where CNN is vertical or mis-tagged (no *Z code).
+    _max_salvage = 4
+    for _ in range(_max_salvage):
+        u = _unassigned_traces()
+        if trZ is None and trE is not None and trN is not None and len(u) == 1:
+            trZ = u[0]
+            continue
+        u = _unassigned_traces()
+        if trE is None and trN is not None and trZ is not None and len(u) == 1:
+            c = (u[0].stats.channel or "")[-1:]
+            if c in ("E", "1"):
+                trE = u[0]
+                continue
+        u = _unassigned_traces()
+        if trN is None and trE is not None and trZ is not None and len(u) == 1:
+            c = (u[0].stats.channel or "")[-1:]
+            if c in ("N", "2"):
+                trN = u[0]
+                continue
+        break
+
+    def _recompute_missing():
+        m = []
+        if trZ is None:
+            m.append("Z")
+        if trE is None:
+            m.append("E (or 1)")
+        if trN is None:
+            m.append("N (or 2)")
+        return m
+
+    missing_components = _recompute_missing()
+
+    _strict_3c = os.environ.get("EQCCTPRO_STRICT_3C", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+    if missing_components and _strict_3c:
+        available_channels = [tr.stats.channel for tr in st]
+        raise ValueError(
+            f"Missing required components for station {station}: {', '.join(missing_components)}. "
+            f"Available channels: {available_channels}. "
+            f"Unset EQCCTPRO_STRICT_3C to zero-fill missing components (SeisBench strict=False), "
+            f"or supply E/N/Z (or 1/2/Z) data."
+        )
+
+    if (
+        missing_components
+        and len(st) >= 3
+        and not _strict_3c
+        and trE is None
+        and trN is None
+        and trZ is None
+    ):
+        chans = [tr.stats.channel for tr in st]
+        logging.getLogger("eqcctpro").warning(
+            "Station %s: could not map ENZ from channel names %s; "
+            "using first three traces in lexicographic channel order as E, N, Z "
+            "(set EQCCTPRO_STRICT_3C=1 to forbid).",
+            station,
+            chans,
+        )
+        ordered = sorted(list(st), key=lambda t: (t.stats.channel or "").upper())
+        trE, trN, trZ = ordered[0], ordered[1], ordered[2]
+        missing_components = _recompute_missing()
+
+    # No component mapped by last letter / code list (e.g. odd channel names): assign 1–2 traces by sort order.
+    if (
+        missing_components
+        and not _strict_3c
+        and trE is None
+        and trN is None
+        and trZ is None
+        and 1 <= len(st) < 3
+    ):
+        ordered = sorted(list(st), key=lambda t: (t.stats.channel or "").upper())
+        if len(ordered) == 1:
+            trE = ordered[0].copy()
+        else:
+            trE, trN = ordered[0].copy(), ordered[1].copy()
+        missing_components = _recompute_missing()
+
+    if missing_components and not _strict_3c:
+        template = trE or trN or trZ or (st[0] if len(st) else None)
+        if template is None:
+            available_channels = [tr.stats.channel for tr in st]
+            raise ValueError(
+                f"No template trace to align zero-fill for station {station}. "
+                f"Available channels: {available_channels}."
+            )
+        log = logging.getLogger("eqcctpro")
+        filled_labels = []
+        if trE is None:
+            trE = _zero_trace_like(template, "E")
+            filled_labels.append("E")
+        if trN is None:
+            trN = _zero_trace_like(template, "N")
+            filled_labels.append("N")
+        if trZ is None:
+            trZ = _zero_trace_like(template, "Z")
+            filled_labels.append("Z")
+        if filled_labels:
+            log.warning(
+                "Station %s: zero-filled missing component(s) %s (same window as observed data; "
+                "matches SeisBench annotate(strict=False)).",
+                station,
+                ", ".join(filled_labels),
+            )
+        missing_components = []
 
     if missing_components:
         available_channels = [tr.stats.channel for tr in st]
         raise ValueError(
             f"Missing required components for station {station}: {', '.join(missing_components)}. "
             f"Available channels: {available_channels}. "
-            f"Please ensure the mSEED files contain 3-component data (E/N/Z or 1/2/Z)."
+            f"Please ensure the mSEED files contain usable component data (E/N/Z or 1/2/Z)."
         )
 
     out = obspy.Stream(traces=[trE.copy(), trN.copy(), trZ.copy()])
@@ -263,7 +416,8 @@ def mseed2stream_3c(args, files_list, station):
     4. Apply bandpass filter (1-45 Hz, or station-specific)
     5. Resample to 100 Hz
     6. Trim to intersection (common time window, no padding)
-    7. Select best 3 components (E/N/Z or 1/2/Z)
+    7. Select best 3 components (E/N/Z or 1/2/Z); missing components are zero-filled
+       unless ``EQCCTPRO_STRICT_3C`` is set (see ``process_raw_station_stream_3c``).
     
     Parameters:
     -----------
@@ -300,16 +454,32 @@ def mseed2stream_3c(args, files_list, station):
 
     # --- 1) Read all input files into one stream ---
     for file in files_list:
-        try:
-            temp_st = obspy.read(str(file))  # Convert Path to string if needed
-            temp_st.merge(method=1, fill_value=0)   # merge fragments, fill gaps with zeros
-            temp_st.detrend("demean")
-            if len(temp_st) > 0:
-                st += temp_st
-                files_read += 1
-        except Exception as e:
-            # Continue to next file if one fails
-            continue
+        temp_st = read_station_waveform_file(
+            str(file),
+            logger=args.get("logger") if isinstance(args, dict) else None,
+        )
+        merge_mseed_stream_after_read(temp_st)
+        temp_st.detrend("demean")
+        if len(temp_st) > 0:
+            st += temp_st
+            files_read += 1
+
+    if len(st) == 0 and isinstance(args, dict):
+        inp = args.get("input_dir")
+        if inp:
+            chunk_abs = {os.path.abspath(str(p)) for p in files_list}
+            for file in parent_timechunk_station_waveform_files(str(inp), station):
+                if os.path.abspath(str(file)) in chunk_abs:
+                    continue
+                temp_st = read_station_waveform_file(
+                    str(file),
+                    logger=args.get("logger") if isinstance(args, dict) else None,
+                )
+                merge_mseed_stream_after_read(temp_st)
+                temp_st.detrend("demean")
+                if len(temp_st) > 0:
+                    st += temp_st
+                    files_read += 1
 
     if len(st) == 0:
         raise ValueError(

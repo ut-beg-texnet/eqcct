@@ -128,6 +128,7 @@ def build_eval_defaults(ripper: bool) -> dict:
         'tmp_dir': tmp_dir,
         'start_time': '2026-01-26 10:22:07',
         'end_time': '2026-01-26 10:23:07',
+        'timechunk_dt': 1,
         'ripper': ripper,
         'ripper_ignore_cpu_ram_cap': bool(ripper and args.ripper_ignore_cpu_ram_cap),
         'ignore_cpu_ram_cap': bool(args.ignore_cpu_ram_cap),

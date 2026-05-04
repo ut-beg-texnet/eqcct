@@ -49,15 +49,16 @@ MODEL_COLORS = {
     "EQCCT": "#8E44AD",
 }
 
+# Fallback when serial JSON missing: (load_s, annotate_228_s, classify_total_228_s) from Table 1 scaling JSON
 SERIAL_TABLE = {
-    ("PhaseNet", "CPU"): (1.264, 0.343, 33.70),
-    ("PhaseNet", "GPU"): (1.309, 0.224, 27.11),
-    ("PhaseNetLight", "CPU"): (1.184, 0.315, 1.43),
-    ("PhaseNetLight", "GPU"): (1.180, 0.216, 1.43),
-    ("EQTransformer", "CPU"): (1.197, 1.216, 12.20),
-    ("EQTransformer", "GPU"): (1.215, 0.513, 12.22),
-    ("EQT-NC", "CPU"): (1.190, 1.182, 8.19),
-    ("EQT-NC", "GPU"): (1.171, 0.458, 8.18),
+    ("PhaseNet", "CPU"): (1.206, 0.317, 59.57),
+    ("PhaseNet", "GPU"): (1.186, 0.206, 2.49),
+    ("PhaseNetLight", "CPU"): (1.185, 0.267, 3.34),
+    ("PhaseNetLight", "GPU"): (1.178, 0.199, 1.38),
+    ("EQTransformer", "CPU"): (1.182, 1.219, 15.98),
+    ("EQTransformer", "GPU"): (1.185, 0.550, 12.71),
+    ("EQT-NC", "CPU"): (1.184, 1.054, 10.17),
+    ("EQT-NC", "GPU"): (1.181, 0.494, 7.06),
 }
 
 ALL_MODELS = ["PhaseNet", "PhaseNetLight", "EQTransformer", "EQT-NC", "EQCCT"]
@@ -100,15 +101,44 @@ MARKER_STYLE = {
 LINE_WIDTH = 3.0
 
 SERIAL_SPOTCHECK_JSON = BASE / "docs" / "tables" / "serial_classify_spotcheck_cpu.json"
+SERIAL_SPOTCHECK_V2 = BASE / "docs" / "tables" / "serial_classify_spotcheck.json"
 
 
 def _load_serial_spotcheck() -> dict | None:
-    if not SERIAL_SPOTCHECK_JSON.is_file():
+    """Legacy CPU-only JSON, or format_version 2/3 (CPU + 230 slice) from the full spotcheck file."""
+    for path in (SERIAL_SPOTCHECK_JSON, SERIAL_SPOTCHECK_V2):
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if raw.get("format_version") in (2, 3):
+            try:
+                r230 = raw["results"]["CPU"]["230_stations_1_min_dt"]
+                return {
+                    "device": "CPU",
+                    "timechunk": raw["timechunk"],
+                    "dataset": "230_stations_1_min_dt",
+                    "n_runs": raw["n_runs"],
+                    "station_counts_requested": r230["station_counts_requested"],
+                    "models": r230["models"],
+                }
+            except (KeyError, TypeError):
+                continue
+        return raw
+    return None
+
+
+def _classify_series_from_spotcheck_model(entry) -> dict | None:
+    """Spotcheck model entry is either flat {station_str: sec} or nested with classify_total_s."""
+    if entry is None or not isinstance(entry, dict):
         return None
-    try:
-        return json.loads(SERIAL_SPOTCHECK_JSON.read_text())
-    except (json.JSONDecodeError, OSError):
+    if "classify_total_s" in entry:
+        return entry["classify_total_s"]
+    if "load_s" in entry or "annotate_all_s" in entry:
         return None
+    return entry
 
 
 def _serial_streaming_times(model: str, station_grid: np.ndarray, empirical: dict | None) -> np.ndarray:
@@ -127,9 +157,13 @@ def _serial_streaming_times(model: str, station_grid: np.ndarray, empirical: dic
     if not empirical:
         return analytic
     raw = empirical.get("models", {}).get(model)
-    if not raw:
+    series = _classify_series_from_spotcheck_model(raw)
+    if not series:
         return analytic
-    d = {int(k): float(v) for k, v in raw.items()}
+    try:
+        d = {int(k): float(v) for k, v in series.items()}
+    except (ValueError, TypeError):
+        return analytic
     if not d:
         return analytic
     xp = sorted(d.keys())

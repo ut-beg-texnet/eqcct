@@ -1,0 +1,1574 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<seiscomp xmlns="http://geofon.gfz-potsdam.de/ns/seiscomp3-schema/0.13" version="0.13">
+  <EventParameters>
+    <pick publicID="20240912.194155.43-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:41:55.431Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.891</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:42:58.954551Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194157.80-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:41:57.801Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.78</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:42:58.954589Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194155.43-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194155.35-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:41:55.35Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.036</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:42:58.954617Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192325.43-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:25.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.084</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:31.894132Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192341.90-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:41.9Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.601</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:31.894171Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192325.43-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192325.43-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:25.431Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.781</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:31.894199Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192328.81-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:28.811Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.119</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:31.894222Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192325.43-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194725.43-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:47:25.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.074</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:48:32.129156Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194800.97-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:48:00.97Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.891</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:49:00.482019Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194755.51-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194744.05-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:47:44.051Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.894</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:48:32.129272Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194745.15-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:47:45.151Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.88</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:48:32.129314Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194744.05-EQCCT-TX.PB26.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194531.51-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:45:31.51Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.015</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:46:31.930686Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192925.41-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:29:25.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.007</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:30:32.370256Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192303.32-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:03.321Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.892</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:00.680722Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192304.38-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:04.381Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.892</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:23:31.401911Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192303.30-EQCCT-TX.PB26.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.193923.60-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:39:23.601Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.003</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:40:01.008135Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193926.40-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:39:26.401Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.857</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:40:31.185168Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.193925.41-EQCCT-TX.PB26.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194327.18-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:43:27.18Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.91</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:44:00.899149Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194329.27-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:43:29.27Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.865</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:44:00.899189Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194327.18-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.191859.70-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:18:59.7Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.56</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:19:51.126412Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191901.85-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:19:01.85Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.836</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:19:59.188894Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.191859.74-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192525.37-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:25:25.371Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.006</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:26:32.033868Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192552.78-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:25:52.781Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.794</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:26:32.033908Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192525.37-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194555.43-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:45:55.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.876</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:47:01.511507Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194601.32-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:46:01.32Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.721</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:47:01.511548Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194555.43-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192658.43-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:26:58.431Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.286</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:28:00.136963Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192711.01-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:27:11.011Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.042</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:28:00.137002Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192658.43-EQCCT-TX.PB26.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194755.51-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:47:55.51Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.56</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:49:00.481978Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194755.43-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:47:55.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.669</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:49:00.482047Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194126.31-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:41:26.31Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.003</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:42:32.159157Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193055.43-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:30:55.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.853</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:31:59.670162Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193255.41-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:32:55.411Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.008</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:33:59.22105Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193300.43-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:33:00.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.712</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:33:59.221103Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192458.43-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:24:58.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.503</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:26:01.192159Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192500.40-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:25:00.4Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.071</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:26:01.1922Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192458.43-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.193655.41-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:36:55.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.006</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:38:00.06482Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193925.41-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:39:25.411Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.585</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:40:31.185124Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192857.81-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:28:57.811Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.294</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:29:32.292404Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192859.13-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:28:59.131Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.862</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:29:32.292451Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192857.81-EQCCT-TX.PB26.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192825.41-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:28:25.411Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.028</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:29:32.292481Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191859.74-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:18:59.74Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.54</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:19:59.188854Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191858.34-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:18:58.341Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.916</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:19:59.188923Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191859.57-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:18:59.571Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.892</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:19:59.188948Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.191858.34-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192358.43-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:58.431Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.34</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:59.592155Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192407.63-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:24:07.631Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.847</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:59.592196Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192358.43-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192358.41-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:58.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.603</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:59.592226Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192404.04-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:24:04.04Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.621</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:24:59.59225Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192358.41-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192956.43-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:29:56.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.001</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:31:01.382187Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193001.20-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:30:01.2Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.035</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:31:01.38224Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192956.43-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192303.30-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:23:03.301Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.837</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:23:31.40187Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194437.10-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:44:37.101Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.406</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:45:32.1169Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194438.24-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:44:38.241Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.914</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:45:32.11694Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194437.10-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194427.35-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:44:27.35Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.003</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:45:32.116969Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193423.03-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:23.03Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.899</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:35:32.267079Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193424.98-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:24.98Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.85</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:35:32.267139Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.193423.03-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194955.35-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:49:55.35Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.016</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:51:01.144938Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193455.43-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:55.43Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.769</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:36:00.610267Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193456.99-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:56.99Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.704</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:36:00.61032Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.193455.43-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.193455.32-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:55.32Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.003</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:36:00.610361Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192557.41-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:25:57.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.007</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:26:58.882691Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191926.96-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:19:26.961Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.352</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:20:31.528146Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191925.51-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:19:25.511Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.048</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:20:31.528187Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192002.38-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:20:02.381Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.131</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:20:31.528216Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.191925.51-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.191656.43-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:16:56.431Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.014</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:18:01.036849Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191724.31-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:17:24.31Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.536</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:18:01.036896Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191727.50-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:17:27.5Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.638</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:18:01.036924Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.191724.31-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194325.43-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:43:25.431Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.818</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:44:31.318137Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194331.90-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:43:31.901Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.888</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:44:31.318176Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194325.43-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194825.41-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:48:25.411Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.053</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:49:32.812166Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194855.43-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:48:55.431Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.586</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:49:32.812202Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194825.41-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.193955.51-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:39:55.51Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.015</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:40:59.739926Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194853.37-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:48:53.371Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.039</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:49:59.080566Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.194855.44-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:48:55.441Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.771</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:49:59.080613Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.194853.37-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192755.43-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:27:55.431Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.324</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:29:00.372294Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192814.56-EQCCT-TX.PB26.00.HHZ">
+      <time>
+        <value>2024-09-12T19:28:14.561Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB26" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.146</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:29:00.372335Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192755.43-EQCCT-TX.PB26.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194055.41-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:40:55.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.004</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:41:59.086244Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192859.41-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:28:59.411Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.133</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:30:00.388533Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192902.80-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:29:02.801Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.029</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:30:00.388578Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192859.41-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.191955.41-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:19:55.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.004</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:21:00.997544Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192014.09-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:20:14.09Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.885</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:21:00.997586Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.191955.41-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.191956.41-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:19:56.411Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.559</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:21:00.997615Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192002.37-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:20:02.371Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.817</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:21:00.99764Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.191956.41-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192157.41-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:21:57.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.027</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:22:59.115923Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192209.13-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:22:09.13Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.678</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:22:59.115973Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192157.41-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.191727.41-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:17:27.41Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.123</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:18:31.720653Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.191727.49-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:17:27.49Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.714</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:18:31.720695Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.191727.41-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.193422.63-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:22.63Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.96</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:35:01.131557Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193424.30-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:24.3Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.888</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:35:01.131599Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.193422.63-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.193356.43-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:33:56.431Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.388</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:35:01.131628Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.193427.86-EQCCT-4O.SA04.00.HHZ">
+      <time>
+        <value>2024-09-12T19:34:27.861Z</value>
+      </time>
+      <waveformID networkCode="4O" stationCode="SA04" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.878</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:35:01.13166Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.193356.43-EQCCT-4O.SA04.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.194927.35-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:49:27.35Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.006</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:50:32.918839Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192109.23-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:21:09.23Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.916</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:22:01.567713Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192110.55-EQCCT-TX.PB38.00.HHZ">
+      <time>
+        <value>2024-09-12T19:21:10.55Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB38" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.748</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:22:01.567752Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192109.23-EQCCT-TX.PB38.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+    <pick publicID="20240912.192139.60-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:21:39.6Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.817</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>P</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:22:01.56778Z</creationTime>
+      </creationInfo>
+    </pick>
+    <pick publicID="20240912.192140.50-EQCCT-TX.PB29.00.HHZ">
+      <time>
+        <value>2024-09-12T19:21:40.5Z</value>
+      </time>
+      <waveformID networkCode="TX" stationCode="PB29" locationCode="00" channelCode="HHZ"/>
+      <filterID>Probability_0.853</filterID>
+      <methodID>EQCCT</methodID>
+      <phaseHint>S</phaseHint>
+      <evaluationMode>automatic</evaluationMode>
+      <creationInfo>
+        <agencyID>TEXNET</agencyID>
+        <author>EQCCT</author>
+        <creationTime>2024-09-12T19:22:01.567804Z</creationTime>
+      </creationInfo>
+      <comment>
+        <text>20240912.192139.60-EQCCT-TX.PB29.00.HHZ</text>
+        <id>RefPickID</id>
+      </comment>
+    </pick>
+  </EventParameters>
+</seiscomp>

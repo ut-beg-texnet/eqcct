@@ -420,6 +420,7 @@ def run_serial_eval_bench(model, mode, station_count, cpu_ids, gpus=None, ripper
         tmp_dir=tmp_dir,
         start_time='2024-12-15 12:00:00',
         end_time='2024-12-15 12:01:00',
+        timechunk_dt=1,
         ripper=ripper
     )
     if mode == 'cpu':
@@ -457,6 +458,7 @@ def run_eval_bench(model, mode, cpu_ids, cpu_range, gpus=None, ripper=False, sta
         tmp_dir=tmp_dir, 
         start_time='2024-12-15 12:00:00', 
         end_time='2024-12-15 12:01:00', 
+        timechunk_dt=1,
         ripper=ripper
     )
     if mode == 'cpu': eval_sys.evaluate_cpu()
